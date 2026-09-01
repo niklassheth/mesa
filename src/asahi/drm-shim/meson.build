@@ -11,3 +11,19 @@ libasahi_noop_drm_shim = shared_library(
   gnu_symbol_visibility : 'hidden',
   install : true,
 )
+
+if with_tools.contains('drm-shim')
+  executable(
+    't8132_gles_compute_add3',
+    files('t8132_gles_compute_add3.c'),
+    dependencies : [dependency('egl'), dependency('glesv2')],
+    install : false,
+  )
+
+  executable(
+    't8132_gles_compute_xyz',
+    files('t8132_gles_compute_xyz.c'),
+    dependencies : [dependency('egl'), dependency('glesv2')],
+    install : false,
+  )
+endif
