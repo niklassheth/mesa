@@ -11,8 +11,19 @@
 #include "util/u_dynarray.h"
 #include "util/u_range.h"
 #include "agx_device.h"
+#include "agx_apple9.h"
 #include "agx_state.h"
 #include "vdrm.h"
+
+static_assert(AGX_APPLE9_RENDER_ENCODER_SLOTS == AGX_MAX_BATCHES,
+              "each live batch needs a disjoint Apple9 VDM slot");
+static_assert(AGX_APPLE9_RENDER_ENCODER_BASE >=
+                 AGX_APPLE9_RENDER_CONTEXT_BASE &&
+              AGX_APPLE9_RENDER_ENCODER_BASE +
+                    AGX_APPLE9_RENDER_ENCODER_SLOTS *
+                       AGX_APPLE9_RENDER_ENCODER_STRIDE <=
+                 AGX_APPLE9_RENDER_CONTEXT_BASE + UINT64_C(0x100000000),
+              "Apple9 VDM slots must fit in the 4-GiB render aperture");
 
 #define foreach_active(ctx, idx)                                               \
    BITSET_FOREACH_SET(idx, ctx->batches.active, AGX_MAX_BATCHES)
@@ -82,7 +93,12 @@ agx_encoder_allocate(struct agx_batch *batch, struct agx_device *dev)
 {
    struct agx_bo *bo = agx_bo_create(dev, 0x80000, 0, 0, "Encoder");
    uint8_t *map = agx_bo_map(bo);
-   return (struct agx_encoder){.bo = bo, .current = map, .end = map + bo->size};
+   return (struct agx_encoder){
+      .bo = bo,
+      .current = map,
+      .end = map + bo->size,
+      .gpu = bo->va->addr,
+   };
 }
 
 static void
@@ -112,17 +128,44 @@ agx_batch_init(struct agx_context *ctx,
       memset(batch->bo_list.set, 0, batch->bo_list.bit_count / 8);
    }
 
+   batch->apple9_dispatch_count = 0;
+   batch->apple9_package = NULL;
+   batch->apple9_render_package = NULL;
+   batch->apple9_launch_next = AGX_APPLE9_COMPUTE_LAUNCH_OFFSET;
+   batch->apple9_resource_next = AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
+                                  AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET;
+
    if (agx_batch_is_compute(batch)) {
       batch->cdm = agx_encoder_allocate(batch, dev);
       memset(&batch->vdm, 0, sizeof(batch->vdm));
    } else {
       batch->vdm = agx_encoder_allocate(batch, dev);
       memset(&batch->cdm, 0, sizeof(batch->cdm));
+
+      if (agx_apple9_direct_render_enabled(dev)) {
+         unsigned slot = agx_batch_idx(batch);
+         assert(slot < AGX_APPLE9_RENDER_ENCODER_SLOTS);
+         assert(batch->vdm.bo->size <= AGX_APPLE9_RENDER_ENCODER_STRIDE);
+         uint64_t address = AGX_APPLE9_RENDER_ENCODER_BASE +
+                            slot * AGX_APPLE9_RENDER_ENCODER_STRIDE;
+
+         /* Apple9 VDM pointers are relative to this render aperture. Create
+          * the final caller VM_BIND here so the kernel adapter can consume
+          * cmdbuf.vdm_base unchanged instead of fabricating an alias. */
+         int ret = agx_bo_bind(dev, batch->vdm.bo, address,
+                               batch->vdm.bo->size, 0,
+                               DRM_ASAHI_BIND_READ);
+         assert(ret == 0 && "failed to bind Apple9 VDM in render aperture");
+         batch->vdm.gpu = address;
+         batch->vdm.storage_gpu = address;
+         batch->vdm.gpu_alias_size = batch->vdm.bo->size;
+      }
    }
 
    util_dynarray_init(&batch->scissor, ctx);
    util_dynarray_init(&batch->depth_bias, ctx);
    util_dynarray_init(&batch->timestamps, ctx);
+   util_dynarray_init(&batch->apple9_attachments, ctx);
 
    batch->clear = 0;
    batch->draw = 0;
@@ -257,14 +300,35 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    }
 
    agx_bo_unreference(dev, screen->rodata);
+   if (batch->vdm.bo && batch->vdm.gpu_alias_size &&
+       batch->vdm.gpu != batch->vdm.bo->va->addr &&
+       batch->vdm.gpu != batch->vdm.storage_gpu) {
+      int ret = agx_bo_bind(dev, NULL, batch->vdm.gpu,
+                            batch->vdm.gpu_alias_size, 0,
+                            DRM_ASAHI_BIND_UNBIND);
+      assert(ret == 0 && "failed to unbind Apple9 VDM aperture alias");
+   }
+   if (batch->vdm.bo && batch->vdm.storage_gpu &&
+       batch->vdm.storage_gpu != batch->vdm.bo->va->addr) {
+      int ret = agx_bo_bind(dev, NULL, batch->vdm.storage_gpu,
+                            batch->vdm.bo->size, 0,
+                            DRM_ASAHI_BIND_UNBIND);
+      assert(ret == 0 && "failed to unbind Apple9 VDM storage alias");
+   }
    agx_bo_unreference(dev, batch->vdm.bo);
    agx_bo_unreference(dev, batch->cdm.bo);
+   agx_bo_unreference(dev, batch->apple9_package);
+   batch->apple9_package = NULL;
+   if (batch->apple9_render_package)
+      agx_apple9_render_package_release(batch->apple9_render_package);
+   batch->apple9_render_package = NULL;
    agx_pool_cleanup(&batch->pool);
    agx_pool_cleanup(&batch->pipeline_pool);
 
    util_dynarray_fini(&batch->scissor);
    util_dynarray_fini(&batch->depth_bias);
    util_dynarray_fini(&batch->timestamps);
+   util_dynarray_fini(&batch->apple9_attachments);
 
    if (!(dev->debug & (AGX_DBG_TRACE | AGX_DBG_SYNC))) {
       agx_batch_print_stats(dev, batch);
@@ -395,6 +459,19 @@ agx_flush_all(struct agx_context *ctx, const char *reason)
          perf_debug_ctx(ctx, "Flushing due to: %s\n", reason);
 
       agx_flush_batch(ctx, &ctx->batches.slots[idx]);
+   }
+}
+
+void
+agx_flush_apple9_render_batches(struct agx_context *ctx, const char *reason)
+{
+   unsigned idx;
+   foreach_active(ctx, idx) {
+      struct agx_batch *batch = &ctx->batches.slots[idx];
+
+      /* Clear-only batches have no selected fixed-slot generation yet. */
+      if (batch->apple9_render_package)
+         agx_flush_batch_for_reason(ctx, batch, reason);
    }
 }
 
@@ -818,6 +895,21 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
    struct util_dynarray cmdbuf = UTIL_DYNARRAY_INIT;
 
    if (compute) {
+      if (batch->apple9_attachments.size) {
+         struct drm_asahi_cmd_header attachment_header = {
+            .cmd_type = DRM_ASAHI_SET_COMPUTE_ATTACHMENTS,
+            .size = batch->apple9_attachments.size,
+            .cdm_barrier = DRM_ASAHI_BARRIER_NONE,
+            .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
+         };
+         util_dynarray_append(&cmdbuf, attachment_header);
+         util_dynarray_append_array(
+            &cmdbuf, struct drm_asahi_attachment,
+            util_dynarray_begin(&batch->apple9_attachments),
+            util_dynarray_num_elements(&batch->apple9_attachments,
+                                       struct drm_asahi_attachment));
+      }
+
       /* Barrier on previous submission */
       struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
 
@@ -891,11 +983,13 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
             c->layers, c->samples);
       }
 
-      assert(0);
-   }
-
-   if (ret == ENODEV)
+      /* A failed submit has not published the timeline point allocated for
+       * this batch. Continuing would attach an unsignaled, fabricated seqid
+       * to BOs and let fixed-USC ownership advance past work that never
+       * existed. There is no initialized-batch discard path, so fail closed
+       * in release builds as well as debug builds. */
       abort();
+   }
 
    /* Now stash our batch fence into any shared BOs. */
    if (shared_bo_count) {

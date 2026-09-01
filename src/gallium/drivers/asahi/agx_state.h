@@ -32,6 +32,7 @@
 #include "util/rwlock.h"
 #include "util/u_range.h"
 #include "agx_bg_eot.h"
+#include "agx_apple9.h"
 #include "agx_helpers.h"
 #include "agx_nir_texture.h"
 
@@ -223,6 +224,25 @@ struct agx_compiled_shader {
    /* Mapped executable memory */
    struct agx_bo *bo;
 
+   /* Compiled by the deliberately bounded Apple9 compute backend. */
+   bool apple9_tiny;
+   /* Whether the early NIR permits a nonzero pipe_grid_info dynamic shared
+    * allocation.  Apple9 package validation still constrains the resulting
+    * static-plus-dynamic total to the exact capture-backed ABI size. */
+   bool apple9_has_variable_shared_mem;
+   struct agx_apple9_compute_profile apple9_compute_profile;
+   uint32_t apple9_main_offset;
+   /* Immutable per-pipeline Dynamic Caching state.  The device quarantines a
+    * second reference so this compact address is not recycled early. */
+   struct agx_bo *apple9_state_bo;
+   uint64_t apple9_state_address;
+
+   /* Apple9 render compiler output consumed by the pipeline linker/VDM
+    * encoder. Generated stage storage is owned by this compiled shader.
+    */
+   uint8_t *apple9_render_binary;
+   struct agx_apple9_render_stage apple9_render_stage;
+
    /* Uniforms the driver must push */
    unsigned push_range_count;
    struct agx_push_range push[AGX_MAX_PUSH_RANGES];
@@ -374,6 +394,15 @@ struct agx_encoder {
    struct agx_bo *bo;
    uint8_t *current;
    uint8_t *end;
+
+   /* GPU address consumed by the command. Usually bo->va->addr, but Apple9
+    * render encoders have a caller-owned alias in the render aperture. */
+   uint64_t gpu;
+
+   /* Apple9 retains a unique storage alias while publishing the consumed VDM
+    * pages at a fixed context-relative address for one serialized batch. */
+   uint64_t storage_gpu;
+   uint64_t gpu_alias_size;
 };
 
 struct agx_batch {
@@ -439,6 +468,19 @@ struct agx_batch {
     */
    struct agx_encoder vdm;
    struct agx_encoder cdm;
+
+   /* Immutable source package selected into the resident archive on submit. */
+   struct agx_apple9_render_package *apple9_render_package;
+   struct agx_bo *apple9_vertex_bo;
+   uint32_t apple9_vertex_offset;
+   uint32_t apple9_vertex_size;
+
+   /* Apple9 direct records appended to cdm for this command. */
+   unsigned apple9_dispatch_count;
+   struct agx_bo *apple9_package;
+   uint32_t apple9_launch_next;
+   uint32_t apple9_resource_next;
+   struct util_dynarray apple9_attachments;
 
    /* Scissor and depth-bias descriptors, uploaded at GPU time */
    struct util_dynarray scissor, depth_bias;
@@ -866,6 +908,18 @@ struct agx_screen {
    struct agx_device dev;
    struct disk_cache *disk_cache;
 
+   /* Device-specific NIR policy.  Apple9's bounded render compiler must keep
+    * arithmetic in its source stage until both stage compilers accept the
+    * same general instruction set. */
+   nir_shader_compiler_options apple9_nir_options;
+
+   /* Fixed-base Apple9 render generations, owned by Gallium. */
+   struct agx_apple9_render_cache *apple9_render_cache;
+   simple_mtx_t apple9_render_package_lock;
+   /* Last submission using the shared fixed-USC generation, compute or
+    * render. Ownership switches wait for this point before changing bytes. */
+   uint64_t apple9_fixed_usc_seqid;
+
    struct agx_bo *rodata;
 
    /* Shared timeline syncobj and value to serialize flushes across contexts */
@@ -1079,6 +1133,8 @@ void agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch);
 void agx_flush_batch_for_reason(struct agx_context *ctx,
                                 struct agx_batch *batch, const char *reason);
 void agx_flush_all(struct agx_context *ctx, const char *reason);
+void agx_flush_apple9_render_batches(struct agx_context *ctx,
+                                     const char *reason);
 void agx_flush_readers(struct agx_context *ctx, struct agx_resource *rsrc,
                        const char *reason);
 void agx_flush_writer(struct agx_context *ctx, struct agx_resource *rsrc,

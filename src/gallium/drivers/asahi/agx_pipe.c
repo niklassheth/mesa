@@ -44,6 +44,7 @@
 #include "util/u_upload_mgr.h"
 #include "util/xmlconfig.h"
 #include "agx_bg_eot.h"
+#include "agx_apple9.h"
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_disk_cache.h"
@@ -1516,9 +1517,12 @@ agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch,
 
    *cmdbuf = (struct drm_asahi_cmd_compute){
       .cdm_ctrl_stream_base = batch->cdm.bo->va->addr,
+      /* The UAPI bound is one byte past the complete first segment.  current
+       * still points at the 32-bit terminator that was packed above. */
       .cdm_ctrl_stream_end =
          batch->cdm.bo->va->addr +
-         (batch->cdm.current - (uint8_t *)agx_bo_map(batch->cdm.bo)),
+         (batch->cdm.current - (uint8_t *)agx_bo_map(batch->cdm.bo)) +
+         sizeof(uint32_t),
       .sampler_heap =
          batch->sampler_heap.bo ? batch->sampler_heap.bo->va->addr : 0,
       .sampler_count = batch->sampler_heap.count,
@@ -1557,9 +1561,18 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
 
    assert(batch->initialized);
 
-   /* Finalize the encoder */
-   uint8_t stop[5 + 64] = {0x00, 0x00, 0x00, 0xc0, 0x00};
-   memcpy(batch->vdm.current, stop, sizeof(stop));
+   /* The bounded Apple9 direct encoder carries the native 4-byte stream
+    * terminator in every draw so another draw can replace it in place.  The
+    * generic finalizer below used to append a second terminator after the
+   * last draw; caller-owned T8132 streams end at the first one. */
+   if (batch->apple9_render_package) {
+      uint32_t terminator;
+      memcpy(&terminator, batch->vdm.current - 4, sizeof(terminator));
+      assert(terminator == 0xc0000000);
+   } else {
+      uint8_t stop[5 + 64] = {0x00, 0x00, 0x00, 0xc0, 0x00};
+      memcpy(batch->vdm.current, stop, sizeof(stop));
+   }
 
    struct asahi_bg_eot pipeline_background =
       agx_build_bg_eot(batch, false, false);
@@ -1596,11 +1609,52 @@ agx_flush_render(struct agx_context *ctx, struct agx_batch *batch,
     */
    agx_batch_add_bo(batch, batch->vdm.bo);
 
+   if (agx_apple9_direct_render_enabled(dev)) {
+      /* Metal publishes the direct VDM inside the already-bound fixed render
+       * context.  agx_flush_batch() copies this finalized encoder there after
+       * installing the selected pipeline generation.  Keep the separately
+       * bound encoder BO as caller-owned construction/lifetime storage. */
+      batch->vdm.gpu = AGX_APPLE9_RENDER_FIXED_ENCODER;
+      batch->vdm.gpu_alias_size = 0;
+   }
+
    agx_cmdbuf(
-      dev, cmdbuf, &batch->pool, batch, &batch->key, batch->vdm.bo->va->addr,
+      dev, cmdbuf, &batch->pool, batch, &batch->key, batch->vdm.gpu,
       scissor, zbias, agx_get_occlusion_heap(batch), pipeline_background,
       pipeline_background_partial, pipeline_store, clear_pipeline_textures,
       batch->clear_depth, batch->clear_stencil, &batch->tilebuffer_layout);
+
+   if (agx_apple9_direct_render_enabled(dev)) {
+      if (batch->key.nr_cbufs != 1 || !batch->key.cbufs[0].texture) {
+         fprintf(stderr,
+                 "Apple9 direct render currently needs one color target\n");
+         return;
+      }
+
+      struct agx_apple9_render_package *render_package =
+         batch->apple9_render_package;
+      bool package_ready = render_package != NULL;
+      uint32_t load_usc = agx_apple9_render_package_program_word(
+         dev, render_package, AGX_APPLE9_RENDER_LOAD_OFFSET);
+      uint32_t store_usc = agx_apple9_render_package_program_word(
+         dev, render_package, AGX_APPLE9_RENDER_STORE_OFFSET);
+      if (!package_ready || !load_usc || !store_usc) {
+         fprintf(stderr, "failed to prepare Apple9 color target\n");
+         return;
+      }
+
+      /* These are offsets into the caller's USC package.  m1n1 combines
+       * them with the admitted Apple9 render aperture; no PBE target alias or
+       * source-fixture attachment remains necessary. */
+      cmdbuf->bg.usc = load_usc;
+      cmdbuf->bg.rsrc_spec = AGX_APPLE9_RENDER_LOAD_RSRC;
+      cmdbuf->eot.usc = store_usc;
+      cmdbuf->eot.rsrc_spec = 0;
+      cmdbuf->partial_bg.usc = load_usc;
+      cmdbuf->partial_bg.rsrc_spec = AGX_APPLE9_RENDER_LOAD_RSRC;
+      cmdbuf->partial_eot.usc = store_usc;
+      cmdbuf->partial_eot.rsrc_spec = 0;
+   }
 }
 
 void
@@ -1612,6 +1666,87 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
    struct drm_asahi_cmd_render render;
    struct drm_asahi_cmd_compute compute;
    bool has_vdm = false, has_cdm = false;
+   struct agx_screen *screen = agx_screen(ctx->base.screen);
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   bool apple9_render =
+      agx_apple9_direct_render_enabled(dev) && batch->vdm.bo &&
+      batch->apple9_render_package != NULL;
+   bool apple9_compute =
+      agx_apple9_compute_enabled(dev) && batch->cdm.bo &&
+      batch->apple9_dispatch_count != 0;
+   bool apple9_fixed_usc = apple9_render || apple9_compute;
+   assert(!(apple9_render && apple9_compute));
+
+   /*
+    * Compute and VBO render share one fixed-USC DVA but retain distinct
+    * physical arenas. Owner selection plus submit is therefore one
+    * screen-wide transaction. Wait for the previous owner before changing a
+    * live mapping, and hold the lock through publication so another context
+    * cannot switch it between selection and submit.
+    */
+   if (apple9_fixed_usc) {
+      simple_mtx_lock(&screen->apple9_render_package_lock);
+      if (screen->apple9_fixed_usc_seqid) {
+         int ret = drmSyncobjTimelineWait(
+            dev->fd, &screen->flush_syncobj,
+            &screen->apple9_fixed_usc_seqid, 1, INT64_MAX,
+            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
+         if (ret) {
+            fprintf(stderr,
+                    "failed to retire previous Apple9 fixed-USC user: %d\n",
+                    ret);
+            simple_mtx_unlock(&screen->apple9_render_package_lock);
+            abort();
+         }
+      }
+   }
+
+   if (apple9_compute) {
+      bool installed = agx_apple9_install_compute_archive(dev);
+      if (!installed) {
+         fprintf(stderr, "failed to install Apple9 compute generation\n");
+         simple_mtx_unlock(&screen->apple9_render_package_lock);
+         abort();
+      }
+      agx_apple9_render_cache_invalidate_fixed_usc(
+         screen->apple9_render_cache);
+   }
+
+   if (apple9_render) {
+      bool bound = screen->apple9_render_cache &&
+         agx_apple9_render_cache_bind(
+            screen->apple9_render_cache, batch->apple9_render_package);
+      if (!bound) {
+         fprintf(stderr, "failed to bind Apple9 render generation\n");
+         agx_apple9_render_cache_invalidate_fixed_usc(
+            screen->apple9_render_cache);
+         simple_mtx_unlock(&screen->apple9_render_package_lock);
+         abort();
+      }
+      if (batch->apple9_vertex_bo) {
+         const uint8_t *vertex_data =
+            (const uint8_t *)agx_bo_map(batch->apple9_vertex_bo) +
+            batch->apple9_vertex_offset;
+         if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
+            fprintf(stderr, "APPLE9_VERTEX_UPLOAD_BYTES");
+            for (unsigned i = 0;
+                 i < MIN2(batch->apple9_vertex_size, 64); ++i)
+               fprintf(stderr, "%s%02x", i ? "" : " ", vertex_data[i]);
+            fprintf(stderr, "\n");
+         }
+         bool uploaded = agx_apple9_render_cache_upload_vertex_buffer(
+            screen->apple9_render_cache, vertex_data,
+            batch->apple9_vertex_size);
+         if (!uploaded) {
+            fprintf(stderr,
+                    "failed to upload Apple9 vertex resource heap\n");
+            agx_apple9_render_cache_invalidate_fixed_usc(
+               screen->apple9_render_cache);
+            simple_mtx_unlock(&screen->apple9_render_package_lock);
+            abort();
+         }
+      }
+   }
 
    if (batch->cdm.bo) {
       agx_flush_compute(ctx, batch, &compute);
@@ -1620,16 +1755,36 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
 
    if (batch->vdm.bo && (batch->clear || batch->initialized)) {
       agx_flush_render(ctx, batch, &render);
+      if (apple9_render) {
+         const uint8_t *encoder = agx_bo_map(batch->vdm.bo);
+         size_t encoder_size = batch->vdm.current - encoder;
+         bool uploaded = agx_apple9_render_cache_upload_encoder(
+            screen->apple9_render_cache, encoder, encoder_size);
+         if (!uploaded) {
+            fprintf(stderr,
+                    "failed to publish fixed Apple9 VDM encoder\n");
+            agx_apple9_render_cache_invalidate_fixed_usc(
+               screen->apple9_render_cache);
+            simple_mtx_unlock(&screen->apple9_render_package_lock);
+            abort();
+         }
+      }
       has_vdm = true;
    }
 
    if (!has_cdm && !has_vdm) {
       agx_batch_reset(ctx, batch);
+      if (apple9_fixed_usc)
+         simple_mtx_unlock(&screen->apple9_render_package_lock);
       return;
    }
 
    agx_batch_submit(ctx, batch, has_cdm ? &compute : NULL,
                     has_vdm ? &render : NULL);
+   if (apple9_fixed_usc) {
+      screen->apple9_fixed_usc_seqid = ctx->flush_last_seqid;
+      simple_mtx_unlock(&screen->apple9_render_package_lock);
+   }
 }
 
 static void
@@ -2338,6 +2493,9 @@ agx_destroy_screen(struct pipe_screen *pscreen)
    if (screen->dev.ro)
       screen->dev.ro->destroy(screen->dev.ro);
 
+   agx_apple9_render_cache_destroy(&screen->dev,
+                                   screen->apple9_render_cache);
+   simple_mtx_destroy(&screen->apple9_render_package_lock);
    agx_bo_unreference(&screen->dev, screen->rodata);
    u_transfer_helper_destroy(pscreen->transfer_helper);
    agx_close_device(&screen->dev);
@@ -2457,6 +2615,7 @@ agx_screen_create(int fd, struct renderonly *ro,
    assert(!ret);
 
    simple_mtx_init(&agx_screen->flush_seqid_lock, mtx_plain);
+   simple_mtx_init(&agx_screen->apple9_render_package_lock, mtx_plain);
 
    agx_screen->heap_memory_percent =
       driQueryOptionf(config->options, "heap_memory_percent");
@@ -2486,8 +2645,14 @@ agx_screen_create(int fd, struct renderonly *ro,
    screen->get_disk_shader_cache = agx_get_disk_shader_cache;
    screen->get_cl_cts_version = agx_get_cl_cts_version;
 
+   agx_screen->apple9_nir_options = agx_nir_options;
+   agx_screen->apple9_nir_options.disable_inter_shader_code_motion = true;
+   const nir_shader_compiler_options *nir_options =
+      agx_apple9_compute_enabled(&agx_screen->dev)
+         ? &agx_screen->apple9_nir_options
+         : &agx_nir_options;
    for (unsigned i = 0; i <= MESA_SHADER_COMPUTE; i++)
-      screen->nir_options[i] = &agx_nir_options;
+      screen->nir_options[i] = nir_options;
 
    screen->resource_create = u_transfer_helper_resource_create;
    screen->resource_destroy = u_transfer_helper_resource_destroy;

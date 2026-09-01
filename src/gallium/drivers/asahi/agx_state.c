@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx_compile_apple9.h"
 #include "asahi/compiler/agx_nir.h"
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/layout/layout.h"
@@ -52,6 +53,7 @@
 #include "util/u_prim.h"
 #include "util/u_transfer.h"
 #include "util/u_upload_mgr.h"
+#include "agx_apple9.h"
 #include "agx_bg_eot.h"
 #include "agx_bo.h"
 #include "agx_device.h"
@@ -1341,6 +1343,7 @@ agx_create_vertex_elements(struct pipe_context *ctx, unsigned count,
    assert(count <= AGX_MAX_ATTRIBS);
 
    struct agx_vertex_elements *so = calloc(1, sizeof(*so));
+   so->num_attribs = count;
 
    for (unsigned i = 0; i < count; ++i) {
       const struct pipe_vertex_element ve = state[i];
@@ -1497,12 +1500,154 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
                                size_t data_size, bool prolog, bool epilog,
                                unsigned cf_base, bool internal_kernel);
 
+static bool
+agx_apple9_bounded_render_signature(const nir_shader *nir)
+{
+   if (nir->info.stage == MESA_SHADER_VERTEX) {
+      bool vertex_id =
+         BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_VERTEX_ID) ||
+         BITSET_TEST(nir->info.system_values_read,
+                     SYSTEM_VALUE_VERTEX_ID_ZERO_BASE);
+      uint64_t required =
+         BITFIELD64_BIT(VARYING_SLOT_POS) | BITFIELD64_BIT(VARYING_SLOT_VAR0);
+
+      uint64_t supported_inputs = BITFIELD64_BIT(VERT_ATTRIB_GENERIC0) |
+                                  BITFIELD64_BIT(VERT_ATTRIB_GENERIC1);
+
+      return !(nir->info.inputs_read & ~supported_inputs) &&
+             (nir->info.inputs_read == 0 ||
+              nir->info.inputs_read == supported_inputs) &&
+             (nir->info.inputs_read != 0 || vertex_id) &&
+             (nir->info.outputs_written & required) == required;
+   }
+
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      return (nir->info.inputs_read & BITFIELD64_BIT(VARYING_SLOT_VAR0)) &&
+             (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DATA0)) &&
+             !nir->info.fs.uses_discard;
+   }
+
+   return false;
+}
+
 /* Does not take ownership of key. Clones if necessary. */
 static struct agx_compiled_shader *
 agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                     struct agx_uncompiled_shader *so,
                     union asahi_shader_key *key_)
 {
+   bool apple9_render =
+      agx_apple9_direct_render_enabled(dev) &&
+      (so->type == MESA_SHADER_VERTEX || so->type == MESA_SHADER_FRAGMENT);
+   if (apple9_render) {
+      struct blob_reader bootstrap_reader;
+      blob_reader_init(&bootstrap_reader, so->early_serialized_nir.data,
+                       so->early_serialized_nir.size);
+      nir_shader *bootstrap =
+         nir_deserialize(NULL, &agx_nir_options, &bootstrap_reader);
+      bool supported = agx_apple9_bounded_render_signature(bootstrap);
+      if (!supported) {
+         fprintf(stderr,
+                 "Apple9 bootstrap render compiler rejected unsupported "
+                 "%s shader IO/signature\n",
+                 _mesa_shader_stage_to_abbrev(so->type));
+         nir_print_shader(bootstrap, stderr);
+         ralloc_free(bootstrap);
+         return NULL;
+      }
+      ralloc_free(bootstrap);
+   }
+
+   if (so->type == MESA_SHADER_COMPUTE && agx_apple9_compute_enabled(dev)) {
+      struct blob_reader early_reader;
+      blob_reader_init(&early_reader, so->early_serialized_nir.data,
+                       so->early_serialized_nir.size);
+      nir_shader *early =
+         nir_deserialize(NULL, &agx_nir_options, &early_reader);
+      struct agx_compiled_shader *compiled = CALLOC_STRUCT(agx_compiled_shader);
+      const char *reason = NULL;
+
+      if (!agx_compile_apple9_tiny(
+             early, &compiled->b, &compiled->apple9_compute_profile, &reason)) {
+         fprintf(stderr,
+                 "Apple9 compute shader is outside the bounded NIR "
+                 "compiler: %s\n",
+                 reason ?: "unknown reason");
+         nir_print_shader(early, stderr);
+         ralloc_free(early);
+         FREE(compiled);
+         return NULL;
+      }
+
+      if (compiled->b.info.binary_size > AGX_APPLE9_COMPUTE_MAIN_MAX_SIZE) {
+         fprintf(stderr,
+                 "Apple9 compute main is too large for the source-built "
+                 "package: %u > %u bytes\n",
+                 compiled->b.info.binary_size,
+                 AGX_APPLE9_COMPUTE_MAIN_MAX_SIZE);
+         free(compiled->b.binary);
+         ralloc_free(early);
+         FREE(compiled);
+         return NULL;
+      }
+
+      compiled->apple9_tiny = true;
+      compiled->apple9_has_variable_shared_mem =
+         early->info.cs.has_variable_shared_mem;
+      compiled->stage = MESA_SHADER_COMPUTE;
+      compiled->so = so;
+
+      if (agx_apple9_compute_has_dynamic_state(
+             &compiled->apple9_compute_profile)) {
+         /* Metal keys external Dynamic Caching state by address and keeps
+          * that selector stable for the pipeline lifetime.  Allocate an
+          * immutable record from the device's append-only slab arena even
+          * when the executable archive block is interned.  An abandoned
+          * record remains a tombstone until device teardown, so no failed
+          * compile can recycle its selector.
+          */
+         void *apple9_state_record = NULL;
+         if (!agx_apple9_alloc_compute_state(dev, &compiled->apple9_state_bo,
+                                             &apple9_state_record,
+                                             &compiled->apple9_state_address)) {
+            free(compiled->b.binary);
+            ralloc_free(early);
+            FREE(compiled);
+            return NULL;
+         }
+         if (!agx_apple9_compute_state_address_supported(
+                dev->shader_base, compiled->apple9_state_address) ||
+             !agx_apple9_build_compute_state(
+                apple9_state_record, AGX_APPLE9_COMPUTE_STATE_STRIDE,
+                &compiled->apple9_compute_profile)) {
+            fprintf(stderr,
+                    "Apple9 compute state is invalid or outside the compact "
+                    "USC window\n");
+            agx_bo_unreference(dev, compiled->apple9_state_bo);
+            free(compiled->b.binary);
+            ralloc_free(early);
+            FREE(compiled);
+            return NULL;
+         }
+      }
+      if (!agx_apple9_upload_compute_shader(dev, compiled->b.binary,
+                                            compiled->b.info.binary_size,
+                                            &compiled->apple9_compute_profile,
+                                            &compiled->apple9_main_offset)) {
+         fprintf(stderr,
+                 "Apple9 compute archive is full or the main cannot use "
+                 "the compact archive call\n");
+         agx_bo_unreference(dev, compiled->apple9_state_bo);
+         free(compiled->b.binary);
+         ralloc_free(early);
+         FREE(compiled);
+         return NULL;
+      }
+
+      ralloc_free(early);
+      return compiled;
+   }
+
    struct blob_reader reader;
    blob_reader_init(&reader, so->serialized_nir.data, so->serialized_nir.size);
    nir_shader *nir = nir_deserialize(NULL, &agx_nir_options, &reader);
@@ -1601,6 +1746,33 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
 
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
 
+   if (apple9_render && getenv("AGX_APPLE9_TRACE")) {
+      fprintf(stderr, "APPLE9_RENDER_NIR stage=%s before bounded compiler\n",
+              _mesa_shader_stage_to_abbrev(so->type));
+      nir_print_shader(nir, stderr);
+   }
+
+   struct agx_shader_part apple9_stage = {0};
+   if (apple9_render) {
+      const char *reason = NULL;
+      bool compiled_stage =
+         so->type == MESA_SHADER_FRAGMENT
+            ? agx_compile_apple9_fragment(nir, &apple9_stage, &reason)
+            : agx_compile_apple9_vertex(nir, &apple9_stage, &reason);
+      if (!compiled_stage) {
+         fprintf(stderr,
+                 "Apple9 %s shader is outside the bounded render compiler: "
+                 "%s\n",
+                 _mesa_shader_stage_to_abbrev(so->type),
+                 reason ?: "unknown reason");
+         nir_print_shader(nir, stderr);
+         ralloc_free(nir);
+         ralloc_free(pre_gs);
+         ralloc_free(gs_count);
+         return NULL;
+      }
+   }
+
    struct agx_compiled_shader *compiled = agx_compile_nir(
       dev, nir, &pctx->debug, so->type, false, so->type != MESA_SHADER_FRAGMENT,
       false, 0, attrib_components_read);
@@ -1656,6 +1828,26 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
    compiled->gs = gs_info;
    compiled->b.info.outputs = outputs;
 
+   if (apple9_render) {
+      compiled->apple9_render_binary = apple9_stage.binary;
+      if (so->type == MESA_SHADER_FRAGMENT) {
+         assert(apple9_stage.info.varyings.fs.nr_cf >= 2);
+         compiled->apple9_render_stage = (struct agx_apple9_render_stage){
+            .binary = compiled->apple9_render_binary,
+            .binary_size = apple9_stage.info.binary_size,
+            .varying_components = apple9_stage.info.varyings.fs.nr_cf - 1,
+            .render_targets = 1,
+         };
+      } else {
+         compiled->apple9_render_stage = (struct agx_apple9_render_stage){
+            .binary = compiled->apple9_render_binary,
+            .binary_size = apple9_stage.info.binary_size,
+            .position_components = 4,
+            .varying_components = compiled->uvs.user_size,
+         };
+      }
+   }
+
    ralloc_free(nir);
    ralloc_free(pre_gs);
    ralloc_free(gs_count);
@@ -1667,12 +1859,22 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
                        struct agx_uncompiled_shader *so,
                        union asahi_shader_key *key)
 {
+   bool apple9_compute = so->type == MESA_SHADER_COMPUTE &&
+                         agx_apple9_compute_enabled(&screen->dev);
+   bool apple9_render =
+      agx_apple9_direct_render_enabled(&screen->dev) &&
+      (so->type == MESA_SHADER_VERTEX || so->type == MESA_SHADER_FRAGMENT);
+   bool apple9_bounded = apple9_compute || apple9_render;
    struct agx_compiled_shader *compiled =
-      agx_disk_cache_retrieve(screen, so, key);
+      apple9_bounded ? NULL : agx_disk_cache_retrieve(screen, so, key);
 
    if (!compiled) {
       compiled = agx_compile_variant(&screen->dev, pctx, so, key);
-      agx_disk_cache_store(screen->disk_cache, so, key, compiled);
+      if (!compiled)
+         return NULL;
+
+      if (!apple9_bounded)
+         agx_disk_cache_store(screen->disk_cache, so, key, compiled);
    }
 
    /* key may be destroyed after we return, so clone it before using it as a
@@ -1960,6 +2162,9 @@ agx_create_shader_state(struct pipe_context *pctx,
    return so;
 }
 
+static void agx_delete_uncompiled_shader(struct agx_device *dev,
+                                         struct agx_uncompiled_shader *so);
+
 static void *
 agx_create_compute_state(struct pipe_context *pctx,
                          const struct pipe_compute_state *cso)
@@ -1981,10 +2186,19 @@ agx_create_compute_state(struct pipe_context *pctx,
    nir_shader *nir = (void *)cso->prog;
 
    agx_shader_initialize(dev, so, nir, ctx->support_lod_bias, ctx->robust);
-   agx_get_shader_variant(agx_screen(pctx->screen), pctx, so, &key);
+   struct agx_compiled_shader *compiled =
+      agx_get_shader_variant(agx_screen(pctx->screen), pctx, so, &key);
 
    /* We're done with the NIR, throw it away */
    ralloc_free(nir);
+   if (!compiled) {
+      /* Propagate the bounded Apple9 compiler rejection through Gallium so
+       * API program linking fails.  Returning an empty shader object made an
+       * unsupported program look successful and every dispatch a silent
+       * no-op. */
+      agx_delete_uncompiled_shader(dev, so);
+      return NULL;
+   }
    return so;
 }
 
@@ -2119,6 +2333,13 @@ asahi_fast_link(struct agx_context *ctx, struct agx_uncompiled_shader *so,
    agx_fast_link(linked, dev, so->type == MESA_SHADER_FRAGMENT, &key->main->b,
                  &prolog->b, &epilog->b, key->nr_samples_shaded);
 
+   if (so->type == MESA_SHADER_VERTEX && prolog &&
+       prolog->apple9_render_stage.binary) {
+      linked->apple9_vertex_prolog = prolog->apple9_render_stage.binary;
+      linked->apple9_vertex_prolog_size =
+         prolog->apple9_render_stage.binary_size;
+   }
+
    /* Cache the fast linked program */
    union asahi_shader_key *cloned_key =
       ralloc_memdup(so->linked_shaders, key, sizeof(*key));
@@ -2169,6 +2390,22 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
 
    memcpy(link_key.prolog.vs.attribs, &ctx->attributes->key,
           sizeof(link_key.prolog.vs.attribs));
+
+   if (agx_apple9_direct_render_enabled(dev) &&
+       getenv("AGX_APPLE9_TRACE_VBO_PROLOG") != NULL) {
+      nir_builder diagnostic = nir_builder_init_simple_shader(
+         MESA_SHADER_VERTEX, &agx_nir_options, "Apple9 diagnostic VS prolog");
+      agx_nir_vs_prolog(&diagnostic, &link_key.prolog.vs);
+      fprintf(stderr, "APPLE9_RENDER_NIR stage=VS_PROLOG lowered VBO ABI\n");
+      nir_print_shader(diagnostic.shader, stderr);
+      ralloc_free(diagnostic.shader);
+
+      /* This mode exists to inspect the generated prolog before it is safe
+       * to execute.  Terminate before command emission, never after it.
+       */
+      if (getenv("AGX_APPLE9_TRACE_VBO_PROLOG_EXIT") != NULL)
+         exit(0);
+   }
 
    void *old = ctx->linked.vs;
 
@@ -2375,6 +2612,17 @@ agx_bind_shader_state(struct pipe_context *pctx, void *cso,
 {
    struct agx_context *ctx = agx_context(pctx);
 
+   /*
+    * The bounded Apple9 VDM stream has one fixed logical launch slot per
+    * render batch.  Submit an existing batch before changing either linked
+    * stage.  Its immutable package generation is rebound just before submit,
+    * while the next batch may select another generation at the same slot.
+    */
+   if ((stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_FRAGMENT) &&
+       agx_apple9_direct_render_enabled(agx_device(pctx->screen)) &&
+       ctx->stage[stage].shader != cso)
+      agx_flush_apple9_render_batches(ctx, "Apple9 render pipeline change");
+
    if (stage == MESA_SHADER_VERTEX)
       ctx->dirty |= AGX_DIRTY_VS_PROG;
    else if (stage == MESA_SHADER_FRAGMENT)
@@ -2421,10 +2669,6 @@ agx_bind_cs_state(struct pipe_context *pctx, void *cso)
    agx_bind_shader_state(pctx, cso, MESA_SHADER_COMPUTE);
 }
 
-/* Forward declare because of the recursion hit with geometry shaders */
-static void agx_delete_uncompiled_shader(struct agx_device *dev,
-                                         struct agx_uncompiled_shader *so);
-
 static void
 agx_delete_compiled_shader(struct agx_device *dev,
                            struct agx_compiled_shader *so)
@@ -2438,7 +2682,9 @@ agx_delete_compiled_shader(struct agx_device *dev,
    if (so->gs_copy)
       agx_delete_compiled_shader(dev, so->gs_copy);
 
+   free(so->apple9_render_binary);
    free(so->b.binary);
+   agx_bo_unreference(dev, so->apple9_state_bo);
    agx_bo_unreference(dev, so->bo);
    FREE(so);
 }
@@ -2576,7 +2822,28 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
 
    builder(&b, data);
 
+   if (agx_apple9_direct_render_enabled(agx_device(ctx->base.screen)) &&
+       getenv("AGX_APPLE9_TRACE") && builder == agx_nir_vs_prolog) {
+      fprintf(stderr, "APPLE9_RENDER_NIR stage=VS_PROLOG before compiler\n");
+      nir_print_shader(b.shader, stderr);
+   }
+
    struct agx_device *dev = agx_device(ctx->base.screen);
+   struct agx_shader_part apple9_prolog = {0};
+   bool compile_apple9_prolog =
+      agx_apple9_direct_render_enabled(dev) && builder == agx_nir_vs_prolog &&
+      BITSET_LAST_BIT(((const struct agx_vs_prolog_key *)data)->component_mask);
+   if (compile_apple9_prolog) {
+      const char *reason = NULL;
+      if (!agx_compile_apple9_vertex_prolog(b.shader, &apple9_prolog,
+                                            &reason)) {
+         fprintf(stderr,
+                 "Apple9 vertex prolog is outside the bounded compiler: %s\n",
+                 reason ?: "unknown reason");
+         nir_print_shader(b.shader, stderr);
+      }
+   }
+
    if (!prolog) {
       agx_preprocess_nir(b.shader);
       NIR_PASS(_, b.shader, agx_nir_lower_texture);
@@ -2588,6 +2855,14 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
       !prolog && !(b.shader->info.stage == MESA_SHADER_FRAGMENT &&
                    b.shader->info.fs.uses_sample_shading),
       prolog || epilog, cf_base, NULL);
+
+   if (apple9_prolog.binary) {
+      shader->apple9_render_binary = apple9_prolog.binary;
+      shader->apple9_render_stage = (struct agx_apple9_render_stage){
+         .binary = shader->apple9_render_binary,
+         .binary_size = apple9_prolog.info.binary_size,
+      };
+   }
 
    ralloc_free(b.shader);
 
@@ -3023,7 +3298,6 @@ agx_launch_internal(struct agx_batch *batch, struct agx_grid grid,
 
    if (batch->cdm.current + dispatch_upper_bound >= batch->cdm.end)
       agx_flush_batch_for_reason(ctx, batch, "CDM overfull");
-
 }
 
 void
@@ -3282,19 +3556,26 @@ agx_batch_init_state(struct agx_batch *batch)
       struct agx_device *dev = agx_device(ctx->base.screen);
       uint8_t *out = batch->cdm.current;
 
-      /* See below */
-      agx_push(out, CDM_BARRIER, cfg) {
-         cfg.usc_cache_inval = true;
-         cfg.unk_5 = true;
-         cfg.unk_6 = true;
-         cfg.unk_8 = true;
-         // cfg.unk_11 = true;
-         // cfg.unk_20 = true;
-         if (dev->params.num_clusters_total > 1) {
-            // cfg.unk_24 = true;
-            if (dev->params.gpu_generation == 13) {
-               cfg.unk_4 = true;
-               // cfg.unk_26 = true;
+      /*
+       * The legacy barrier below is a G13/G14 packet.  Apple9 direct streams
+       * begin with their first 0x2c dispatch record; coherency is provided by
+       * the source-built Work envelope until the Apple9 barrier encoding is
+       * understood and exposed independently.
+       */
+      if (!agx_apple9_compute_enabled(dev)) {
+         agx_push(out, CDM_BARRIER, cfg) {
+            cfg.usc_cache_inval = true;
+            cfg.unk_5 = true;
+            cfg.unk_6 = true;
+            cfg.unk_8 = true;
+            // cfg.unk_11 = true;
+            // cfg.unk_20 = true;
+            if (dev->params.num_clusters_total > 1) {
+               // cfg.unk_24 = true;
+               if (dev->params.gpu_generation == 13) {
+                  cfg.unk_4 = true;
+                  // cfg.unk_26 = true;
+               }
             }
          }
       }
@@ -3304,36 +3585,41 @@ agx_batch_init_state(struct agx_batch *batch)
 
    /* Emit state on the batch that we don't change and so don't dirty track */
    uint8_t *out = batch->vdm.current;
+   bool apple9_direct =
+      agx_apple9_direct_render_enabled(agx_device(batch->ctx->base.screen));
 
-   /* Barrier to enforce GPU-CPU coherency, in case this batch is back to back
-    * with another that caused stale data to be cached and the CPU wrote to it
-    * in the meantime.
-    */
-   agx_push(out, VDM_BARRIER, cfg) {
-      cfg.usc_cache_inval = true;
+   if (!apple9_direct) {
+      /* Barrier to enforce GPU-CPU coherency, in case this batch is back to
+       * back with another that caused stale data to be cached and the CPU
+       * wrote to it in the meantime.  Apple9 uses a different barrier packet;
+       * the bounded direct stream starts at its complete vertex envelope.
+       */
+      agx_push(out, VDM_BARRIER, cfg) {
+         cfg.usc_cache_inval = true;
+      }
+
+      struct AGX_PPP_HEADER present = {
+         .w_clamp = true,
+         .occlusion_query_2 = true,
+         .output_unknown = true,
+         .varying_word_2 = true,
+         .viewport_count = 1, /* irrelevant */
+      };
+
+      size_t size = agx_ppp_update_size(&present);
+      struct agx_ptr T =
+         agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
+      struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
+
+      /* clang-format off */
+      agx_ppp_push(&ppp, W_CLAMP, cfg) cfg.w_clamp = 1e-10;
+      agx_ppp_push(&ppp, FRAGMENT_OCCLUSION_QUERY_2, cfg);
+      agx_ppp_push(&ppp, OUTPUT_UNKNOWN, cfg);
+      agx_ppp_push(&ppp, VARYING_2, cfg);
+      /* clang-format on */
+
+      agx_ppp_fini(&out, &ppp);
    }
-
-   struct AGX_PPP_HEADER present = {
-      .w_clamp = true,
-      .occlusion_query_2 = true,
-      .output_unknown = true,
-      .varying_word_2 = true,
-      .viewport_count = 1, /* irrelevant */
-   };
-
-   size_t size = agx_ppp_update_size(&present);
-   struct agx_ptr T =
-      agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
-   struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
-
-   /* clang-format off */
-   agx_ppp_push(&ppp, W_CLAMP, cfg) cfg.w_clamp = 1e-10;
-   agx_ppp_push(&ppp, FRAGMENT_OCCLUSION_QUERY_2, cfg);
-   agx_ppp_push(&ppp, OUTPUT_UNKNOWN, cfg);
-   agx_ppp_push(&ppp, VARYING_2, cfg);
-   /* clang-format on */
-
-   agx_ppp_fini(&out, &ppp);
    batch->vdm.current = out;
 
    /* Mark it as initialized now, since agx_batch_writes() will check this. */
@@ -4865,6 +5151,8 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
              const struct pipe_draw_start_count_bias *draws, unsigned num_draws)
 {
    struct agx_context *ctx = agx_context(pctx);
+   struct agx_device *dev = agx_device(pctx->screen);
+   struct agx_screen *screen = agx_screen(pctx->screen);
 
    if (unlikely(!agx_render_condition_check(ctx)))
       return;
@@ -5200,44 +5488,223 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          AGX_INDEX_LIST_COUNT_LENGTH + AGX_INDEX_LIST_INSTANCES_LENGTH +
          AGX_INDEX_LIST_START_LENGTH + AGX_INDEX_LIST_BUFFER_SIZE_LENGTH);
 
-   uint8_t *out = agx_encode_state(batch, batch->vdm.current);
+   uint8_t *out;
 
-   if (info->index_size && info->primitive_restart) {
-      agx_push(out, VDM_STATE, cfg)
-         cfg.restart_index_present = true;
+   if (agx_apple9_direct_render_enabled(dev)) {
+      /*
+       * Keep the first Apple9 path deliberately strict.  It is a real Mesa
+       * command stream, but unsupported state must not be silently encoded as
+       * the older packet ABI.  General indexed/indirect/multidraw lowering is
+       * added as each Apple9 packet is understood.
+       */
+      assert(!ctx->gs && !ctx->in_tess);
+      assert(!indirect && !info->index_size && !info->primitive_restart);
+      assert(info->mode == MESA_PRIM_TRIANGLES);
+      assert(draws->count > 0 && info->instance_count > 0);
 
-      agx_push(out, VDM_STATE_RESTART_INDEX, cfg)
-         cfg.value = info->restart_index;
-   }
+      struct agx_apple9_render_pipeline pipeline;
+      struct agx_apple9_render_stage vertex_prolog = {0};
+      uint64_t vertex_buffer = 0;
+      uint32_t vertex_buffer_size = 0;
 
-   struct agx_draw draw = {0};
-   if (info->index_size) {
-      draw.index_size = agx_translate_index_size(info->index_size);
-      draw.index_buffer = ib;
-      draw.index_buffer_range_B = ib_extent;
-      draw.restart = info->primitive_restart;
-      draw.indexed = true;
+      if (ctx->linked.vs && ctx->linked.vs->apple9_vertex_prolog) {
+         const struct agx_vertex_elements *attribs = ctx->attributes;
+         bool supported_vbo =
+            attribs && attribs->num_attribs == 2 &&
+            attribs->key[0].stride == 20 && attribs->key[1].stride == 20 &&
+            attribs->key[0].format == PIPE_FORMAT_R32G32_FLOAT &&
+            attribs->key[1].format == PIPE_FORMAT_R32G32B32_FLOAT &&
+            !attribs->key[0].instanced && !attribs->key[1].instanced &&
+            attribs->key[0].divisor == 0 && attribs->key[1].divisor == 0 &&
+            batch->uniforms.attrib_base[0] != 0 &&
+            batch->uniforms.attrib_base[1] ==
+               batch->uniforms.attrib_base[0] + 8;
+         if (!supported_vbo) {
+            if (getenv("AGX_APPLE9_TRACE")) {
+               fprintf(stderr,
+                       "APPLE9_VERTEX_LAYOUT attribs=%p count=%u "
+                       "buffers=%u/%u offsets=%u/%u strides=%u/%u "
+                       "formats=%u/%u expected=%u/%u instanced=%u/%u "
+                       "divisors=%u/%u bases=0x%" PRIx64 "/0x%" PRIx64 "\n",
+                       (void *)attribs, attribs ? attribs->num_attribs : 0,
+                       attribs ? attribs->buffers[0] : 0,
+                       attribs ? attribs->buffers[1] : 0,
+                       attribs ? attribs->src_offsets[0] : 0,
+                       attribs ? attribs->src_offsets[1] : 0,
+                       attribs ? attribs->key[0].stride : 0,
+                       attribs ? attribs->key[1].stride : 0,
+                       attribs ? attribs->key[0].format : 0,
+                       attribs ? attribs->key[1].format : 0,
+                       PIPE_FORMAT_R32G32_FLOAT, PIPE_FORMAT_R32G32B32_FLOAT,
+                       attribs ? attribs->key[0].instanced : 0,
+                       attribs ? attribs->key[1].instanced : 0,
+                       attribs ? attribs->key[0].divisor : 0,
+                       attribs ? attribs->key[1].divisor : 0,
+                       batch->uniforms.attrib_base[0],
+                       batch->uniforms.attrib_base[1]);
+            }
+            fprintf(stderr,
+                    "Apple9 direct render rejects unsupported vertex layout\n");
+            return;
+         }
+
+         vertex_prolog = (struct agx_apple9_render_stage){
+            .binary = ctx->linked.vs->apple9_vertex_prolog,
+            .binary_size = ctx->linked.vs->apple9_vertex_prolog_size,
+         };
+         vertex_buffer = batch->uniforms.attrib_base[0];
+
+         const struct pipe_vertex_buffer vb =
+            ctx->vertex_buffers[attribs->buffers[0]];
+         struct agx_resource *vbo = agx_resource(vb.buffer.resource);
+         const uint64_t end_B =
+            (uint64_t)(draws->start + draws->count) * attribs->key[0].stride;
+         if (end_B > vbo->layout.size_B - vb.buffer_offset || end_B > 0x2000) {
+            fprintf(stderr, "Apple9 direct render VBO range is too large\n");
+            return;
+         }
+
+         /* Use the address that vertex fetch itself was given as the source
+          * of truth.  Buffer resources may be suballocated and the attribute
+          * clamp helper may adjust its returned address; deriving the CPU
+          * offset independently from layout fields risks copying a different
+          * part of the BO into Apple9's fixed USC resource heap.  Attribute 0
+          * has a zero source offset in the supported interleaved layout. */
+         assert(batch->uniforms.attrib_base[0] >= vbo->bo->va->addr);
+         const uint64_t vbo_offset64 =
+            batch->uniforms.attrib_base[0] - vbo->bo->va->addr;
+         if (vbo_offset64 > UINT32_MAX ||
+             vbo_offset64 + end_B > vbo->bo->size) {
+            fprintf(stderr, "Apple9 direct render VBO BO range is invalid\n");
+            return;
+         }
+         const uint32_t vbo_offset = vbo_offset64;
+         if (getenv("AGX_APPLE9_PACKAGE_TRACE")) {
+            fprintf(stderr,
+                    "APPLE9_VERTEX_UPLOAD_SOURCE bo=%#" PRIx64
+                    " attrib=%#" PRIx64 " offset=%#x size=%" PRIu64
+                    " layout=%#" PRIx64 " buffer=%#x\n",
+                    vbo->bo->va->addr, batch->uniforms.attrib_base[0],
+                    vbo_offset, end_B, (uint64_t)vbo->layout.level_offsets_B[0],
+                    vb.buffer_offset);
+         }
+         if (batch->apple9_vertex_bo &&
+             (batch->apple9_vertex_bo != vbo->bo ||
+              batch->apple9_vertex_offset != vbo_offset ||
+              batch->apple9_vertex_size != end_B)) {
+            fprintf(stderr,
+                    "Apple9 direct render VBO changed inside one batch\n");
+            return;
+         }
+         batch->apple9_vertex_bo = vbo->bo;
+         batch->apple9_vertex_offset = vbo_offset;
+         batch->apple9_vertex_size = end_B;
+         vertex_buffer_size = end_B;
+      }
+
+      bool linked = agx_apple9_link_render_pipeline_with_prolog(
+         &pipeline, vertex_prolog, ctx->vs->apple9_render_stage,
+         ctx->fs->apple9_render_stage);
+      assert(linked && "Apple9 render stages must be compiled before draw");
+      pipeline.vertex_buffer = vertex_buffer;
+      pipeline.vertex_buffer_size = vertex_buffer_size;
+
+      if (batch->key.nr_cbufs != 1 || !batch->key.cbufs[0].texture) {
+         fprintf(stderr,
+                 "Apple9 direct render currently needs one color target\n");
+         return;
+      }
+      const struct pipe_surface *surface = &batch->key.cbufs[0];
+      struct agx_resource *resource = agx_resource(surface->texture);
+      uint64_t target =
+         agx_map_texture_gpu(resource, surface->first_layer) +
+         ail_get_level_offset_B(&resource->layout, surface->level);
+
+      simple_mtx_lock(&screen->apple9_render_package_lock);
+      if (!screen->apple9_render_cache)
+         screen->apple9_render_cache = agx_apple9_render_cache_create(dev);
+      struct agx_apple9_render_package *render_package =
+         agx_apple9_render_cache_get(screen->apple9_render_cache, &pipeline,
+                                     target, batch->key.width,
+                                     batch->key.height);
+      if (!render_package) {
+         fprintf(stderr, "failed to install Apple9 render generation\n");
+         simple_mtx_unlock(&screen->apple9_render_package_lock);
+         return;
+      }
+      if (batch->apple9_render_package &&
+          batch->apple9_render_package != render_package) {
+         fprintf(stderr, "Apple9 render pipeline changed inside one batch\n");
+         simple_mtx_unlock(&screen->apple9_render_package_lock);
+         return;
+      }
+
+      if (!batch->apple9_render_package) {
+         agx_apple9_render_package_acquire(render_package);
+         batch->apple9_render_package = render_package;
+      }
+      pipeline.package = render_package;
+      struct agx_bo *render_package_bo =
+         agx_apple9_render_cache_bo(screen->apple9_render_cache);
+      struct agx_bo *render_state_bo =
+         agx_apple9_render_cache_state_bo(screen->apple9_render_cache);
+      pipeline.pipeline_word =
+         agx_apple9_render_package_pipeline_word(dev, render_package);
+      simple_mtx_unlock(&screen->apple9_render_package_lock);
+
+      if (!pipeline.pipeline_word) {
+         fprintf(stderr, "Apple9 render archive has no encodable USC base\n");
+         return;
+      }
+
+      /* Replace the previous terminator when appending another direct draw.
+       * Each draw carries its own vertex/PPP state, matching the G17 encoder's
+       * append-only command-buffer model without assuming state persistence. */
+      uint8_t *append = batch->vdm.current - (batch->draws ? 4 : 0);
+      out = agx_apple9_emit_direct_draw(append, &pipeline, draws->count,
+                                        info->instance_count, draws->start);
+      agx_batch_add_bo(batch, render_package_bo);
+      agx_batch_add_bo(batch, render_state_bo);
+      agx_batch_add_bo(batch, dev->apple9_render_fixed_usc);
    } else {
-      draw.start = indirect ? 0 : draws->start;
-   }
+      out = agx_encode_state(batch, batch->vdm.current);
 
-   if (indirect) {
-      draw.b = agx_grid_indirect(agx_indirect_buffer_ptr(batch, indirect));
-   } else {
-      draw.b = agx_3d(draws->count, info->instance_count, 1);
-      if (info->index_size)
-         draw.index_bias = draws->index_bias;
-   }
+      if (info->index_size && info->primitive_restart) {
+         agx_push(out, VDM_STATE, cfg)
+            cfg.restart_index_present = true;
 
-   out = (void *)agx_vdm_draw((uint32_t *)out, 0 /* ignored for now */, draw,
-                              agx_primitive_for_pipe(info->mode));
+         agx_push(out, VDM_STATE_RESTART_INDEX, cfg)
+            cfg.value = info->restart_index;
+      }
 
-   /* Barrier transform feedback writes on themselves for consistency.
-    * This is the other half of agx_legalize_xfb.
-    */
-   if (ctx->gs && ctx->streamout.num_targets > 0) {
-      struct agx_device *dev = agx_device(ctx->base.screen);
-      out = (void *)agx_vdm_barrier((uint32_t *)out, dev->chip);
+      struct agx_draw draw = {0};
+      if (info->index_size) {
+         draw.index_size = agx_translate_index_size(info->index_size);
+         draw.index_buffer = ib;
+         draw.index_buffer_range_B = ib_extent;
+         draw.restart = info->primitive_restart;
+         draw.indexed = true;
+      } else {
+         draw.start = indirect ? 0 : draws->start;
+      }
+
+      if (indirect) {
+         draw.b = agx_grid_indirect(agx_indirect_buffer_ptr(batch, indirect));
+      } else {
+         draw.b = agx_3d(draws->count, info->instance_count, 1);
+         if (info->index_size)
+            draw.index_bias = draws->index_bias;
+      }
+
+      out = (void *)agx_vdm_draw((uint32_t *)out, 0 /* ignored for now */, draw,
+                                 agx_primitive_for_pipe(info->mode));
+
+      /* Barrier transform feedback writes on themselves for consistency.
+       * This is the other half of agx_legalize_xfb.
+       */
+      if (ctx->gs && ctx->streamout.num_targets > 0) {
+         out = (void *)agx_vdm_barrier((uint32_t *)out, dev->chip);
+      }
    }
 
    batch->vdm.current = out;
@@ -5350,6 +5817,52 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
 }
 
 static void
+agx_apple9_add_compute_attachment(struct agx_batch *batch,
+                                  struct agx_resource *resource)
+{
+   /* Attachments are optional firmware hints, not bounds on shader writes.
+    * Coalesce all ranges of one BO into the same whole-resource hint so a
+    * long command stream does not exceed the UAPI's 16-attachment limit.
+    * Precise read/write hazards remain range-tracked below. */
+   struct drm_asahi_attachment attachment = {
+      .pointer = agx_map_gpu(resource),
+      .size = resource->layout.size_B - resource->layout.level_offsets_B[0],
+   };
+
+   util_dynarray_foreach(&batch->apple9_attachments,
+                         struct drm_asahi_attachment, existing) {
+      if (existing->pointer == attachment.pointer &&
+          existing->size == attachment.size)
+         return;
+   }
+
+   util_dynarray_append(&batch->apple9_attachments, attachment);
+}
+
+/* Return the alignment of the compiler-generated scalar memory operation. */
+static unsigned
+agx_apple9_compute_ssbo_offset_alignment(
+   const struct agx_apple9_compute_profile *profile, unsigned argument)
+{
+   if (!profile || argument >= ARRAY_SIZE(profile->resource_access_scale))
+      return 0;
+
+   switch (profile->abi) {
+   case AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32:
+   case AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32:
+   case AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6:
+   case AGX_APPLE9_COMPUTE_ABI_SSBO4_INTEGER_U32:
+      return profile->resource_access_element_size[argument]
+                ? profile->resource_access_element_size[argument]
+                : sizeof(uint32_t);
+
+   case AGX_APPLE9_COMPUTE_ABI_INVALID:
+   default:
+      return 0;
+   }
+}
+
+static void
 agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
 {
    struct agx_context *ctx = agx_context(pipe);
@@ -5357,11 +5870,86 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
                 !agx_render_condition_check(ctx)))
       return;
 
+   struct agx_device *dev = agx_device(pipe->screen);
+
+   /* A direct dispatch with an empty grid is an API no-op.  Validate this
+    * before allocating a batch: subtracting one from a zero grid dimension
+    * below used to wrap, while release builds could publish a zero-sized G16
+    * hardware launch after the builder's assertions disappeared. */
+   if (!info->indirect) {
+      for (unsigned d = 0; d < 3; ++d) {
+         if (!info->grid[d])
+            return;
+         if (!info->block[d]) {
+            fprintf(stderr, "compute local size dimension %u is zero\n", d);
+            return;
+         }
+
+         uint64_t last = info->last_block[d] ?: info->block[d];
+         uint64_t count = (uint64_t)(info->grid[d] - 1) * info->block[d] + last;
+         if (last > info->block[d] || count > UINT32_MAX) {
+            fprintf(stderr,
+                    "compute global size dimension %u is invalid or "
+                    "overflows 32 bits\n",
+                    d);
+            return;
+         }
+      }
+   }
+
+   struct agx_uncompiled_shader *uncompiled =
+      ctx->stage[MESA_SHADER_COMPUTE].shader;
+
+   /* There is exactly one variant, get it.  We need its Apple9 package ABI
+    * before touching batch statistics so a full package can roll cleanly. */
+   struct hash_entry *variant =
+      _mesa_hash_table_next_entry(uncompiled->variants, NULL);
+   if (unlikely(!variant)) {
+      fprintf(stderr, "compute shader has no compiled variant\n");
+      return;
+   }
+   struct agx_compiled_shader *cs = variant->data;
+
    struct agx_batch *batch = agx_get_compute_batch(ctx);
+   if (cs->apple9_tiny) {
+      if (info->indirect) {
+         fprintf(stderr,
+                 "Apple9 bounded compute does not support indirect dispatch\n");
+         return;
+      }
+
+      if (!agx_apple9_compute_dispatch_fits_persistent(
+             AGX_APPLE9_COMPUTE_PACKAGE_SIZE, batch->apple9_launch_next,
+             batch->apple9_resource_next, &cs->apple9_compute_profile)) {
+         if (!batch->apple9_dispatch_count) {
+            fprintf(
+               stderr,
+               "Apple9 compute profile cannot fit an empty batch package\n");
+            return;
+         }
+
+         agx_flush_batch_for_reason(ctx, batch,
+                                    "Apple9 batch package exhausted");
+         batch = agx_get_compute_batch(ctx);
+         if (!agx_apple9_compute_dispatch_fits_persistent(
+                AGX_APPLE9_COMPUTE_PACKAGE_SIZE, batch->apple9_launch_next,
+                batch->apple9_resource_next, &cs->apple9_compute_profile)) {
+            fprintf(
+               stderr,
+               "Apple9 compute profile cannot fit a fresh batch package\n");
+            return;
+         }
+      }
+   }
 
    uint64_t indirect = 0;
    if (info->indirect) {
       struct agx_resource *rsrc = agx_resource(info->indirect);
+      if (info->indirect_offset > info->indirect->width0 ||
+          info->indirect->width0 - info->indirect_offset < 3 * sizeof(uint32_t)) {
+         fprintf(stderr, "compute indirect grid record is out of bounds\n");
+         return;
+      }
       agx_batch_reads(batch, rsrc);
       indirect = agx_map_gpu(rsrc) + info->indirect_offset;
    }
@@ -5376,7 +5964,71 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    struct agx_workgroup wg =
       agx_workgroup(info->block[0], info->block[1], info->block[2]);
 
-   if (statistic) {
+   struct agx_grid grid;
+   if (indirect) {
+      grid = agx_grid_indirect(indirect);
+   } else {
+      grid = agx_3d(0, 0, 0);
+
+      for (unsigned d = 0; d < 3; ++d) {
+         grid.count[d] = ((info->grid[d] - 1) * info->block[d]) +
+                         (info->last_block[d] ?: info->block[d]);
+      }
+   }
+
+   uint64_t apple9_invocation_count = 0;
+   if (cs->apple9_tiny) {
+      const uint32_t local[3] = {wg.x, wg.y, wg.z};
+      if (!indirect) {
+         const uint32_t global[3] = {
+            grid.count[0],
+            grid.count[1],
+            grid.count[2],
+         };
+         if (!agx_apple9_compute_grid_supported(&cs->apple9_compute_profile,
+                                                global, local)) {
+            fprintf(
+               stderr,
+               "Apple9 compute grid is outside the capture-backed profile\n");
+            return;
+         }
+
+         apple9_invocation_count = 1;
+         for (unsigned d = 0; d < 3; ++d) {
+            if (global[d] > UINT64_MAX / apple9_invocation_count) {
+               fprintf(stderr,
+                       "Apple9 direct grid invocation count overflows\n");
+               return;
+            }
+            apple9_invocation_count *= global[d];
+         }
+         if (apple9_invocation_count > UINT64_MAX / sizeof(uint32_t)) {
+            fprintf(stderr, "Apple9 direct grid byte range overflows\n");
+            return;
+         }
+      }
+
+      uint64_t threadgroup_memory_bytes = cs->b.info.local_size;
+      if (info->variable_shared_mem &&
+          !cs->apple9_has_variable_shared_mem) {
+         fprintf(stderr,
+                 "Apple9 compute shader does not declare variable "
+                 "threadgroup memory\n");
+         return;
+      }
+      threadgroup_memory_bytes += info->variable_shared_mem;
+      uint32_t required_threadgroup_memory_bytes =
+         agx_apple9_compute_required_threadgroup_memory_bytes(
+            &cs->apple9_compute_profile);
+      if (threadgroup_memory_bytes != required_threadgroup_memory_bytes) {
+         fprintf(stderr,
+                 "Apple9 compute threadgroup memory total is outside the "
+                 "capture-backed profile\n");
+         return;
+      }
+   }
+
+   if (statistic && !cs->apple9_tiny) {
       if (indirect) {
          uint64_t addr = agx_get_query_address(batch, statistic);
 
@@ -5391,26 +6043,189 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    }
 
    agx_batch_add_timestamp_query(batch, ctx->time_elapsed);
-
    agx_batch_init_state(batch);
 
-   struct agx_uncompiled_shader *uncompiled =
-      ctx->stage[MESA_SHADER_COMPUTE].shader;
+   if (cs->apple9_tiny) {
+      struct agx_stage *stage = &ctx->stage[MESA_SHADER_COMPUTE];
 
-   /* There is exactly one variant, get it */
-   struct agx_compiled_shader *cs =
-      _mesa_hash_table_next_entry(uncompiled->variants, NULL)->data;
-
-   struct agx_grid grid;
-   if (indirect) {
-      grid = agx_grid_indirect(indirect);
-   } else {
-      grid = agx_3d(0, 0, 0);
-
-      for (unsigned d = 0; d < 3; ++d) {
-         grid.count[d] = ((info->grid[d] - 1) * info->block[d]) +
-                         (info->last_block[d] ?: info->block[d]);
+      unsigned resource_count =
+         agx_apple9_compute_resource_count(&cs->apple9_compute_profile);
+      uint32_t read_mask =
+         agx_apple9_compute_read_mask(&cs->apple9_compute_profile);
+      uint32_t write_mask =
+         agx_apple9_compute_write_mask(&cs->apple9_compute_profile);
+      uint32_t resource_record_size =
+         agx_apple9_compute_resource_record_size(
+            &cs->apple9_compute_profile);
+      if (!resource_count || resource_count > PIPE_MAX_SHADER_BUFFERS ||
+          !resource_record_size ||
+          (read_mask | write_mask) & ~BITFIELD_MASK(resource_count)) {
+         fprintf(stderr,
+                 "Apple9 compute profile has an invalid resource interface\n");
+         return;
       }
+
+      uint64_t resource_addresses[PIPE_MAX_SHADER_BUFFERS];
+      struct agx_resource *resources[PIPE_MAX_SHADER_BUFFERS];
+      uint64_t resource_offsets[PIPE_MAX_SHADER_BUFFERS];
+      uint64_t resource_sizes[PIPE_MAX_SHADER_BUFFERS];
+      for (unsigned i = 0; i < resource_count; ++i) {
+         unsigned binding =
+            agx_apple9_compute_resource_binding(&cs->apple9_compute_profile, i);
+         enum agx_apple9_compute_resource_kind kind =
+            agx_apple9_compute_resource_kind(&cs->apple9_compute_profile, i);
+         if (kind == AGX_APPLE9_COMPUTE_RESOURCE_SSBO) {
+            if (binding >= PIPE_MAX_SHADER_BUFFERS ||
+                !(stage->ssbo_mask & BITFIELD_BIT(binding)) ||
+                !stage->ssbo[binding].buffer) {
+               fprintf(stderr,
+                       "Apple9 compute ABI requires SSBO binding %u\n",
+                       binding);
+               return;
+            }
+            resources[i] = agx_resource(stage->ssbo[binding].buffer);
+            resource_offsets[i] = stage->ssbo[binding].buffer_offset;
+            resource_sizes[i] = stage->ssbo[binding].buffer_size;
+         } else if (kind == AGX_APPLE9_COMPUTE_RESOURCE_UBO) {
+            if (binding >= PIPE_MAX_CONSTANT_BUFFERS ||
+                !(stage->cb_mask & BITFIELD_BIT(binding)) ||
+                !stage->cb[binding].buffer) {
+               fprintf(stderr,
+                       "Apple9 compute ABI requires UBO binding %u\n",
+                       binding);
+               return;
+            }
+            resources[i] = agx_resource(stage->cb[binding].buffer);
+            resource_offsets[i] = stage->cb[binding].buffer_offset;
+            resource_sizes[i] = stage->cb[binding].buffer_size;
+         } else {
+            fprintf(stderr, "Apple9 compute ABI has an invalid resource kind\n");
+            return;
+         }
+
+         uint64_t accessed_bytes =
+            indirect
+               ? sizeof(uint32_t)
+               : agx_apple9_compute_resource_required_span(
+                    &cs->apple9_compute_profile, i,
+                    apple9_invocation_count);
+         if (accessed_bytes == UINT64_MAX) {
+            fprintf(stderr, "Apple9 buffer argument %u range overflows\n", i);
+            return;
+         }
+         unsigned offset_alignment = agx_apple9_compute_ssbo_offset_alignment(
+            &cs->apple9_compute_profile, i);
+         if (!offset_alignment) {
+            fprintf(stderr,
+                    "Apple9 buffer argument %u profile has no offset "
+                    "alignment contract\n",
+                    i);
+            return;
+         }
+         if ((resource_offsets[i] & (offset_alignment - 1)) ||
+             accessed_bytes > resource_sizes[i]) {
+            fprintf(stderr,
+                    "Apple9 buffer argument %u range is not %u-byte aligned "
+                    "or is too small for the dispatch\n",
+                    i, offset_alignment);
+            return;
+         }
+         resource_addresses[i] =
+            agx_map_gpu(resources[i]) + resource_offsets[i];
+      }
+
+      if (!batch->apple9_package) {
+         batch->apple9_package =
+            agx_bo_create(dev, AGX_APPLE9_COMPUTE_PACKAGE_SIZE,
+                          AGX_APPLE9_COMPUTE_PACKAGE_SIZE,
+                          AGX_BO_EXEC | AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
+                          "Apple9 batch compute package");
+         if (!batch->apple9_package) {
+            fprintf(stderr, "failed to allocate Apple9 batch package\n");
+            return;
+         }
+         memset(agx_bo_map(batch->apple9_package), 0,
+                batch->apple9_package->size);
+      }
+
+      uint32_t launch_offset = batch->apple9_launch_next;
+      uint32_t resource_offset = batch->apple9_resource_next;
+      uint64_t package_base = batch->apple9_package->va->addr;
+      uint32_t local[3] = {wg.x, wg.y, wg.z};
+      uint32_t global[3] = {grid.count[0], grid.count[1], grid.count[2]};
+      bool package_built = agx_apple9_build_compute_dispatch_persistent(
+         agx_bo_map(batch->apple9_package), batch->apple9_package->size,
+         dev->shader_base, package_base, cs->apple9_main_offset, launch_offset,
+         cs->apple9_state_address, resource_offset, &cs->apple9_compute_profile,
+         resource_addresses, resource_count);
+      if (!package_built) {
+         fprintf(stderr,
+                 "Apple9 compute package construction failed after layout "
+                 "preflight\n");
+         return;
+      }
+      if (getenv("AGX_APPLE9_PACKAGE_TRACE") != NULL) {
+         const uint8_t *launch =
+            (const uint8_t *)agx_bo_map(batch->apple9_package) + launch_offset;
+         uint32_t call_offset =
+            agx_apple9_compute_archive_call_offset(&cs->apple9_compute_profile);
+         fprintf(stderr,
+                 "APPLE9_DISPATCH index=%u main=%#x launch=%#x state=%#llx "
+                 "resource=%#x call=%#x call_bytes=%02x%02x%02x prefix=",
+                 batch->apple9_dispatch_count, cs->apple9_main_offset,
+                 launch_offset, (unsigned long long)cs->apple9_state_address,
+                 resource_offset,
+                 launch[call_offset] | (launch[call_offset + 1] << 8) |
+                    (launch[call_offset + 2] << 16),
+                 launch[call_offset], launch[call_offset + 1],
+                 launch[call_offset + 2]);
+         for (unsigned i = 0; i < 0x18; ++i)
+            fprintf(stderr, "%02x", launch[i]);
+         fputc('\n', stderr);
+      }
+      batch->apple9_launch_next +=
+         agx_apple9_compute_launch_size(&cs->apple9_compute_profile);
+      batch->apple9_resource_next += resource_record_size;
+
+      const unsigned cdm_record_size =
+         indirect ? AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE
+                  : AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE;
+      assert(batch->cdm.current + cdm_record_size + 4 <= batch->cdm.end);
+      bool cdm_built =
+         indirect ? agx_apple9_emit_indirect_dispatch(
+                       batch->cdm.current, package_base + launch_offset,
+                       indirect, local, &cs->apple9_compute_profile)
+                  : agx_apple9_emit_direct_dispatch(
+                       batch->cdm.current, package_base + launch_offset, global,
+                       local, &cs->apple9_compute_profile);
+      if (!cdm_built) {
+         fprintf(stderr, "Apple9 dispatch encoding failed\n");
+         return;
+      }
+      batch->cdm.current += cdm_record_size;
+      batch->apple9_dispatch_count++;
+
+      if (statistic && !indirect) {
+         agx_query_increment_cpu(ctx, statistic, apple9_invocation_count);
+      }
+
+      agx_batch_add_bo(batch, dev->apple9_compute_archive);
+      if (cs->apple9_state_bo)
+         agx_batch_add_bo(batch, cs->apple9_state_bo);
+      agx_batch_add_bo(batch, batch->apple9_package);
+      for (unsigned i = 0; i < resource_count; ++i) {
+         if (read_mask & BITFIELD_BIT(i))
+            agx_batch_reads(batch, resources[i]);
+         if (write_mask & BITFIELD_BIT(i)) {
+            agx_apple9_add_compute_attachment(batch, resources[i]);
+            agx_batch_writes_range(batch, resources[i],
+                                   resource_offsets[i], resource_sizes[i]);
+            batch->incoherent_writes = true;
+         }
+      }
+
+      agx_dirty_all(ctx);
+      return;
    }
 
    agx_launch(batch, grid, wg, cs, NULL, MESA_SHADER_COMPUTE,

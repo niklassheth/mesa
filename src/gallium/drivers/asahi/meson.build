@@ -4,6 +4,7 @@
 files_asahi = files(
   'driinfo_asahi.h',
   'agx_batch.c',
+  'agx_apple9.c',
   'agx_blit.c',
   'agx_disk_cache.c',
   'agx_fence.c',
@@ -19,7 +20,7 @@ files_asahi = files(
 
 libasahi = static_library(
   'asahi',
-  [files_asahi],
+  files_asahi,
   include_directories : [inc_gallium_aux, inc_gallium, inc_include, inc_src, inc_asahi, inc_virtio_gpu, inc_virtio_vdrm],
   c_args : [c_msvc_compat_args, '-Wno-c2x-extensions'],
   gnu_symbol_visibility : 'hidden',
