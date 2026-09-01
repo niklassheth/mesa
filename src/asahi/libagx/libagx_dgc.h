@@ -218,6 +218,8 @@ enum agx_chip {
    AGX_CHIP_G13X,
    AGX_CHIP_G14G,
    AGX_CHIP_G14X,
+   AGX_CHIP_G16G,
+   AGX_CHIP_G17P,
 };
 
 static inline GLOBAL uint32_t *

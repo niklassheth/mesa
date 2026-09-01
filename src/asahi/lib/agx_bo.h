@@ -20,7 +20,8 @@ enum agx_bo_flags {
     */
    AGX_BO_SHARED = 1 << 0,
 
-   /* BO must be allocated in the low 32-bits of VA space */
+   /* BO must be allocated in the queue's 4-GiB USC region and therefore be
+    * addressable as a 32-bit offset from shader_base. */
    AGX_BO_LOW_VA = 1 << 1,
 
    /* BO is executable */

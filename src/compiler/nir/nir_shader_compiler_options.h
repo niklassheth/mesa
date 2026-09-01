@@ -967,6 +967,17 @@ typedef struct nir_shader_compiler_options {
    unsigned max_varying_expression_cost;
 
    /**
+    * Disable moving expressions between adjacent shader stages in
+    * nir_opt_varyings.  Varying elimination, deduplication, and compaction
+    * remain enabled.
+    *
+    * This is useful for bring-up compilers which can compile the linked
+    * stage interfaces but do not yet support the union of operations that
+    * nir_opt_varyings may legally move into either stage.
+    */
+   bool disable_inter_shader_code_motion;
+
+   /**
     * Used by nir_lower_explicit_io to determine the maximum offset_shift to
     * use when lowering the deref address of the given intrinsic.
     */

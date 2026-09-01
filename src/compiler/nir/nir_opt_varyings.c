@@ -1248,10 +1248,15 @@ struct opt_options {
 static struct opt_options
 can_optimize_varying(struct linkage_info *linkage, gl_varying_slot location)
 {
+   const bool allow_inter_shader_code_motion =
+      !linkage->producer_builder.shader->options
+          ->disable_inter_shader_code_motion &&
+      !linkage->consumer_builder.shader->options
+          ->disable_inter_shader_code_motion;
    struct opt_options options_var = {
       .propagate_uniform_expr = true,
       .deduplicate = true,
-      .inter_shader_code_motion = true,
+      .inter_shader_code_motion = allow_inter_shader_code_motion,
       .compact = true,
    };
    struct opt_options options_color = {

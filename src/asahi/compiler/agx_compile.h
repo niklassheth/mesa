@@ -258,7 +258,23 @@ struct agx_fs_shader_key {
    uint8_t cf_base;
 };
 
+/*
+ * Shader instruction-set generation.  The fixed-function GPU generation and
+ * the shader ISA are deliberately tracked separately: G16/G17 use the Apple9
+ * shader ISA even though their firmware and command interfaces differ.
+ *
+ * DEFAULT is kept for target-independent internal compiler invocations.  A
+ * key gathered from a physical device always selects a concrete ISA.
+ */
+enum agx_shader_isa {
+   AGX_SHADER_ISA_DEFAULT = 0,
+   AGX_SHADER_ISA_APPLE8 = 8,
+   AGX_SHADER_ISA_APPLE9 = 9,
+};
+
 struct agx_device_key {
+   enum agx_shader_isa shader_isa;
+
    /* Does the target GPU need explicit cluster coherency for atomics?
     * Only used on G13X.
     */

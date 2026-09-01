@@ -12,6 +12,7 @@
 #include "util/simple_mtx.h"
 #include "util/sparse_array.h"
 #include "util/timespec.h"
+#include "util/u_dynarray.h"
 #include "util/u_printf.h"
 #include "util/vma.h"
 #include "agx_bo.h"
@@ -91,6 +92,24 @@ int agx_bo_bind(struct agx_device *dev, struct agx_bo *bo, uint64_t addr,
 int agx_bind_timestamps(struct agx_device *dev, struct agx_bo *bo,
                         uint32_t *handle);
 
+#define AGX_APPLE9_ARCHIVE_MAX_ENTRIES 512
+
+/*
+ * Apple9 keeps executable archives and compactly addressed compiler resource
+ * records in one fixed USC aperture.  Compute currently uses the first 64
+ * KiB; render vertex-fetch additionally names a resource record at +0x1500a0.
+ */
+#define AGX_APPLE9_COMPUTE_ARCHIVE_SIZE 0x10000
+#define AGX_APPLE9_FIXED_USC_ARENA_SIZE 0x200000
+#define AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE UINT64_C(0x1000000000)
+#define AGX_APPLE9_FIXED_RENDER_CONTEXT_SIZE 0x6c000
+
+struct agx_apple9_archive_entry {
+   uint32_t block_offset;
+   uint32_t block_size;
+   uint32_t main_offset;
+};
+
 struct agx_device {
    uint32_t debug;
 
@@ -137,6 +156,40 @@ struct agx_device {
 
    struct agx_bo *zero_bo, *scratch_bo;
 
+   /* Queue-rooted Apple9 compute executable/compiler-resource arena. */
+   struct agx_bo *apple9_compute_archive;
+   /*
+    * CPU-owned canonical compute generation. Compute shader compilation
+    * appends only to this shadow; submission copies a new generation into the
+    * compute arena and selects that physical BO at the fixed aperture after
+    * the previous owner retires.
+    */
+   uint8_t *apple9_compute_archive_shadow;
+   uint64_t apple9_compute_archive_generation;
+   uint64_t apple9_compute_archive_installed_generation;
+   /* Render has a distinct physical fixed-USC arena.  Switching the fixed DVA
+    * between these BOs avoids reusing executable cache lines across engines. */
+   struct agx_bo *apple9_render_fixed_usc;
+   struct agx_bo *apple9_fixed_usc_owner;
+   /* Low-VA fixed-function graph.  The VBO ABI additionally consumes the
+    * first page, while the inline path begins at +0x4000. */
+   struct agx_bo *apple9_render_context;
+   simple_mtx_t apple9_archive_lock;
+   uint32_t apple9_archive_next;
+   uint8_t apple9_archive_helper_slots;
+   struct agx_apple9_archive_entry
+      apple9_archive_entries[AGX_APPLE9_ARCHIVE_MAX_ENTRIES];
+   uint32_t apple9_archive_entry_count;
+   /*
+    * Append-only Dynamic Caching state slabs.  The dynarray owns one
+    * reference to every slab until device teardown; current is a borrowed
+    * pointer into that array.  apple9_archive_lock also serializes record
+    * allocation.
+    */
+   struct util_dynarray apple9_compute_state_bos;
+   struct agx_bo *apple9_compute_state_current;
+   uint32_t apple9_compute_state_next;
+
    struct renderonly *ro;
 
    pthread_mutex_t bo_map_lock;
@@ -180,6 +233,26 @@ struct agx_device {
 
    struct u_printf_ctx printf;
 };
+
+/*
+ * Allocate one immutable Apple9 Dynamic Caching record.  The returned BO has
+ * a caller reference, record points at the 0x40-byte record image, and
+ * selector names its +0x20 payload.  Records are never reused before device
+ * teardown, including when a caller abandons an allocated record.
+ */
+bool agx_apple9_alloc_compute_state(struct agx_device *dev,
+                                    struct agx_bo **bo, void **record,
+                                    uint64_t *selector);
+
+/*
+ * Select one physical arena at the fixed Apple9 USC DVA. These helpers
+ * serialize the VM_BIND operation itself with apple9_archive_lock, but the
+ * caller must first retire the previous GPU user and exclude publication by
+ * other contexts. Gallium does that with its screen-wide fixed-USC lock and
+ * timeline point.
+ */
+bool agx_apple9_install_compute_archive(struct agx_device *dev);
+bool agx_apple9_install_render_archive(struct agx_device *dev);
 
 /*
  * Determine if an address is in the read-only section. See the documentation

@@ -30,6 +30,14 @@ struct agx_linked_shader {
    /* Whether the program is a no-op and can be skipped. */
    bool no_op;
 
+   /*
+    * Apple9 keeps the hardware vertex-fetch prolog as an independent archive
+    * entry.  The Gallium meta-shader cache owns these bytes; the linked
+    * pipeline only retains a non-owning reference to the selected entry.
+    */
+   const uint8_t *apple9_vertex_prolog;
+   uint32_t apple9_vertex_prolog_size;
+
    /* Coefficient register bindings */
    struct agx_varyings_fs cf;
 

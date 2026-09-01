@@ -57,8 +57,7 @@ agx_virtio_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    struct agx_bo *bo;
    unsigned handle = 0;
 
-   /* executable implies low va */
-   assert(!(flags & AGX_BO_EXEC) || (flags & AGX_BO_LOW_VA));
+   /* Executable storage may be outside the compact USC aperture on Apple9. */
 
    struct asahi_ccmd_gem_new_req req = {
       .hdr = ASAHI_CCMD(GEM_NEW, sizeof(req)),

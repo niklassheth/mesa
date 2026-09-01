@@ -4,6 +4,9 @@
 
 libasahi_agx_files = files(
   'agx_compile.c',
+  'agx_apple9_machine.c',
+  'agx_apple9_ir.c',
+  'agx_compile_apple9.c',
   'agx_dce.c',
   'agx_liveness.c',
   'agx_insert_waits.c',
@@ -99,6 +102,18 @@ libasahi_compiler = static_library(
   build_by_default : false,
 )
 
+if with_tests or with_tools.contains('drm-shim')
+  executable(
+    'agx_apple9_tiny_tool',
+    files('test/apple9-tiny-tool.c'),
+    c_args : [no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+    dependencies : [idep_nir, idep_mesautil],
+    link_with : [libasahi_compiler],
+  )
+
+endif
+
 if with_tests
   test(
     'agx_tests',
@@ -106,6 +121,7 @@ if with_tests
       'agx_tests',
       files(
          'test/test-compact-constants.cpp',
+         'test/test-apple9.cpp',
          'test/test-minifloat.cpp',
          'test/test-optimizer.cpp',
          'test/test-lower-pseudo.cpp',

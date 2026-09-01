@@ -3679,6 +3679,17 @@ void
 agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                        struct agx_shader_part *out)
 {
+   /*
+    * Apple9 is a distinct ISA from Apple8.  The general Apple9 backend is not
+    * implemented here yet.  G16/G17 direct-render bring-up currently reaches
+    * this path only for metadata while installing a caller-supplied Apple9
+    * program.  Executable Apple9 compute uses agx_compile_apple9_tiny().
+    * Keep the ISA in the key so the two compiler paths cannot alias in caches.
+    */
+   assert(key->dev.shader_isa == AGX_SHADER_ISA_DEFAULT ||
+          key->dev.shader_isa == AGX_SHADER_ISA_APPLE8 ||
+          key->dev.shader_isa == AGX_SHADER_ISA_APPLE9);
+
    agx_compiler_debug = agx_get_compiler_debug();
    struct agx_shader_info *info = &out->info;
 

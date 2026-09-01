@@ -948,6 +948,22 @@ chip_id_to_params(decoder_params *params, uint32_t chip_id)
          .num_clusters_total = 1,
       };
       break;
+   case 0x8132:
+      *params = (decoder_params){
+         .gpu_generation = 16,
+         .gpu_variant = 'G',
+         .chip_id = chip_id,
+         .num_clusters_total = 1,
+      };
+      break;
+   case 0x8140:
+      *params = (decoder_params){
+         .gpu_generation = 17,
+         .gpu_variant = 'P',
+         .chip_id = chip_id,
+         .num_clusters_total = 1,
+      };
+      break;
    case 0x8103:
    default:
       *params = (decoder_params){
