@@ -27,7 +27,7 @@ static_assert(AGX_APPLE9_COMPUTE_CODE_SIZE == AGX_APPLE9_COMPUTE_ARCHIVE_SIZE,
 
 /* Temporary development inputs.  These caller/compiler programs and render
  * templates are recaptured separately and deliberately live outside Mesa. */
-#define APPLE9_EXTERNAL_BLOB_DIR "/tmp/agx-apple9"
+#define APPLE9_EXTERNAL_BLOB_DIR "/home/nsheth/Projects/asahi/tmp/agx-apple9"
 
 struct apple9_external_blob {
    uint8_t *data;

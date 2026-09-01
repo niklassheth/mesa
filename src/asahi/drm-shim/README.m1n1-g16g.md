@@ -50,14 +50,15 @@ than falling back to capture-assigned registers or opaque native mains.
 
 The repository deliberately does not contain captured Metal package blobs.
 During this bring-up phase, five recapturable compute wrapper inputs are loaded
-from hardcoded paths under `/tmp/agx-apple9`:
+from hardcoded paths under
+`/home/nsheth/Projects/asahi/tmp/agx-apple9`:
 
 ```text
-/tmp/agx-apple9/launch_ssbo0_u32.bin
-/tmp/agx-apple9/constant_ssbo3_state_u6.bin
-/tmp/agx-apple9/launch_ssbo2_integer_u32.bin
-/tmp/agx-apple9/launch_ssbo3_state_u6.bin
-/tmp/agx-apple9/launch_ssbo4_mix_u32.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo0_u32.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/constant_ssbo3_state_u6.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo2_integer_u32.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo3_state_u6.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo4_mix_u32.bin
 ```
 
 Their lengths are taken from the files. The driver checks only offsets it must
@@ -68,8 +69,8 @@ Two optional, currently non-gated render research inputs use the same
 directory:
 
 ```text
-/tmp/agx-apple9/g16_render_package.bin.zst
-/tmp/agx-apple9/render_interleaved_vbo_launch.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/g16_render_package.bin.zst
+/home/nsheth/Projects/asahi/tmp/agx-apple9/render_interleaved_vbo_launch.bin
 ```
 
 They do not restore the removed render compiler. They are retained outside Git
