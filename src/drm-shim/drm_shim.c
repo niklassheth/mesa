@@ -75,6 +75,7 @@ REAL_FUNCTION_POINTER(fopen);
 REAL_FUNCTION_POINTER(ioctl);
 REAL_FUNCTION_POINTER(mmap);
 REAL_FUNCTION_POINTER(mmap64);
+REAL_FUNCTION_POINTER(munmap);
 REAL_FUNCTION_POINTER(open);
 REAL_FUNCTION_POINTER(opendir);
 REAL_FUNCTION_POINTER(readdir);
@@ -191,6 +192,7 @@ get_function_pointers(void)
    GET_FUNCTION_POINTER(ioctl);
    GET_FUNCTION_POINTER(mmap);
    GET_FUNCTION_POINTER(mmap64);
+   GET_FUNCTION_POINTER(munmap);
    GET_FUNCTION_POINTER(open);
    GET_FUNCTION_POINTER(opendir);
    GET_FUNCTION_POINTER(readdir);
@@ -869,6 +871,16 @@ mmap64(void* addr, size_t length, int prot, int flags, int fd, off64_t offset)
       return drm_shim_mmap(shim_fd, length, prot, flags, fd, offset);
 
    return real_mmap64(addr, length, prot, flags, fd, offset);
+}
+
+PUBLIC int
+munmap(void *addr, size_t length)
+{
+   get_function_pointers();
+   int ret = real_munmap(addr, length);
+   if (!ret)
+      drm_shim_munmap_notify(addr, length);
+   return ret;
 }
 
 void

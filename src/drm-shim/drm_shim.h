@@ -36,6 +36,7 @@
 typedef int (*ioctl_fn_t)(int fd, unsigned long request, void *arg);
 
 struct shim_bo;
+struct shim_mapping;
 
 struct shim_device {
    /* Mapping from int fd to struct shim_fd *. */
@@ -64,6 +65,18 @@ struct shim_device {
 
    void (*driver_bo_free)(struct shim_bo *bo);
 
+   /* Called when a GEM handle is removed, independently of VMA lifetime. */
+   void (*driver_bo_handle_close)(struct shim_bo *bo, uint32_t handle);
+
+   /* Called when the final duplicate of one simulated DRM file closes. */
+   void (*driver_file_close)(uint64_t driver_id);
+
+   /* Stable open-file-description identity, independent of numeric fd reuse. */
+   uint64_t next_driver_id;
+
+   /* CPU VMAs retain GEM storage after the last handle is closed. */
+   struct shim_mapping *mappings;
+
    /* Returned by drmGetVersion(). */
    const char *driver_name;
 
@@ -78,10 +91,14 @@ extern struct shim_device shim_device;
 
 struct shim_fd {
    int fd;
+   uint64_t driver_id;
    int refcount;
    mtx_t handle_lock;
    /* mapping from int gem handle to struct shim_bo *. */
    struct hash_table *handles;
+
+   /* GEM and sync objects have independent handle namespaces in DRM. */
+   uint32_t next_syncobj_handle;
 };
 
 struct shim_bo {
@@ -108,6 +125,7 @@ struct shim_fd *drm_shim_fd_lookup(int fd);
 int drm_shim_ioctl(int fd, unsigned long request, void *arg);
 void *drm_shim_mmap(struct shim_fd *shim_fd, size_t length, int prot, int flags,
                     int fd, off64_t offset);
+void drm_shim_munmap_notify(void *addr, size_t length);
 
 int drm_shim_bo_init(struct shim_bo *bo, size_t size);
 void drm_shim_bo_get(struct shim_bo *bo);
