@@ -1,0 +1,25 @@
+[require]
+GL ES >= 3.1
+GLSL ES >= 3.10
+
+[compute shader]
+#version 310 es
+precision highp int;
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Output {
+    uint values[];
+} output0;
+
+void main()
+{
+    output0.values[gl_GlobalInvocationID.x] = gl_GlobalInvocationID.x + 7u;
+}
+
+[test]
+ssbo 0 16
+compute 4 1 1
+probe ssbo uint 0 0 == 7
+probe ssbo uint 0 4 == 8
+probe ssbo uint 0 8 == 9
+probe ssbo uint 0 12 == 10
