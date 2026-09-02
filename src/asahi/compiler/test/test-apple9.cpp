@@ -43,8 +43,8 @@ TEST(Apple9Machine, RawLiteralUsesSixBitScatteredDestination)
 
    EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
       AGX_APPLE9_ENC_MOV_IMM32, AGX_APPLE9_OPERAND_DEST, 64, 32));
-   const auto *dst = agx_apple9_find_operand(
-      AGX_APPLE9_ENC_MOV_IMM32, AGX_APPLE9_OPERAND_DEST);
+   const auto *dst = agx_apple9_find_operand(AGX_APPLE9_ENC_MOV_IMM32,
+                                             AGX_APPLE9_OPERAND_DEST);
    ASSERT_NE(dst, nullptr);
    EXPECT_TRUE(dst->flags & AGX_APPLE9_OPERAND_SCATTERED);
    EXPECT_FALSE(dst->flags & AGX_APPLE9_OPERAND_HARD_LOW);
@@ -72,8 +72,8 @@ TEST(Apple9Machine, CompactBinaryAluUsesScatteredFullRegisterMap)
 
    for (auto role : {AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_OPERAND_SRC0,
                      AGX_APPLE9_OPERAND_SRC1}) {
-      EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-         AGX_APPLE9_ENC_MINMAX_COMPACT, role, 95, 32));
+      EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(AGX_APPLE9_ENC_MINMAX_COMPACT,
+                                                  role, 95, 32));
       EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
          AGX_APPLE9_ENC_MINMAX_COMPACT, role, 96, 32));
    }
@@ -409,8 +409,8 @@ TEST(Apple9Packer, NarrowScalarMemoryMatchesOwnMslCorpus)
 
    ASSERT_TRUE(agx_apple9_pack_device_load_scalar_raw(
       1, 0, 1, 8, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-      AGX_APPLE9_DEVICE_LOAD_FIRST, false,
-      AGX_APPLE9_DEVICE_LOAD_TOKEN_5101, &packed));
+      AGX_APPLE9_DEVICE_LOAD_FIRST, false, AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+      &packed));
    static const uint8_t load_u8[] = {
       0x67, 0x10, 0x44, 0x02, 0x01, 0x00, 0x20,
       0x00, 0x61, 0x01, 0x00, 0x40, 0x42, 0x00,
@@ -512,7 +512,6 @@ TEST(Apple9Packer, NarrowSystemValuesUseNativeZeroExtendPair)
       AGX_APPLE9_ENC_GET_SR_ZEXT16, AGX_APPLE9_OPERAND_DEST, 16, 32));
 }
 
-
 TEST(Apple9Packer, ScalarConversionsAndArithmeticShiftMatchT8132Forms)
 {
    uint8_t phys[2] = {16, 17};
@@ -565,9 +564,8 @@ TEST(Apple9Packer, ScalarConversionsAndArithmeticShiftMatchT8132Forms)
    uint8_t shift_phys[2] = {12, 13};
    static const uint8_t ishr[] = {0xa7, 0x01, 0x54, 0x18, 0x02,
                                   0x34, 0x1c, 0x78, 0x62, 0x00};
-   ASSERT_TRUE(
-      agx_apple9_pack_vir_instruction(&instruction, shift_phys, &packed,
-                                      &reason))
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&instruction, shift_phys,
+                                               &packed, &reason))
       << reason;
    EXPECT_EQ(memcmp(packed.bytes, ishr, sizeof(ishr)), 0);
 
@@ -596,8 +594,8 @@ TEST(Apple9Machine, AllocatorSafeExtendedIntegerForms)
       agx_apple9_encoding_info(AGX_APPLE9_ENC_MINMAX_COMPACT)->allocator_safe);
    for (auto role : {AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_OPERAND_SRC0,
                      AGX_APPLE9_OPERAND_SRC1}) {
-      EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-         AGX_APPLE9_ENC_MINMAX_COMPACT, role, 95, 32));
+      EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(AGX_APPLE9_ENC_MINMAX_COMPACT,
+                                                  role, 95, 32));
       EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
          AGX_APPLE9_ENC_MINMAX_COMPACT, role, 96, 32));
    }
@@ -719,14 +717,10 @@ TEST(Apple9Packer, RawMoveImmediatePacksSixBitDestination)
       uint32_t value;
       uint8_t bytes[8];
    } cases[] = {
-      {0, 0x12345678,
-       {0x0c, 0xf8, 0x02, 0x12, 0x18, 0x08, 0xa2, 0x01}},
-      {18, 0x3f800000,
-       {0x2c, 0x80, 0x42, 0x3e, 0x00, 0x00, 0x00, 0x0c}},
-      {34, 0x01020304,
-       {0x2c, 0x84, 0x82, 0x00, 0x0c, 0x00, 0x10, 0x08}},
-      {63, 0xffffffff,
-       {0xfc, 0xff, 0xc2, 0xfe, 0x1e, 0x0c, 0xff, 0x0f}},
+      {0, 0x12345678, {0x0c, 0xf8, 0x02, 0x12, 0x18, 0x08, 0xa2, 0x01}},
+      {18, 0x3f800000, {0x2c, 0x80, 0x42, 0x3e, 0x00, 0x00, 0x00, 0x0c}},
+      {34, 0x01020304, {0x2c, 0x84, 0x82, 0x00, 0x0c, 0x00, 0x10, 0x08}},
+      {63, 0xffffffff, {0xfc, 0xff, 0xc2, 0xfe, 0x1e, 0x0c, 0xff, 0x0f}},
    };
 
    for (const auto &test : cases) {
@@ -934,8 +928,7 @@ TEST(Apple9Packer, CompactBinaryAluPacksAllScatteredRegisterBits)
    ASSERT_EQ(packed.length, sizeof(expected_add));
    EXPECT_EQ(memcmp(packed.bytes, expected_add, sizeof(expected_add)), 0);
 
-   ASSERT_TRUE(
-      agx_apple9_pack_vir_instruction(&minimum, phys, &packed, &reason))
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&minimum, phys, &packed, &reason))
       << reason;
    ASSERT_EQ(packed.length, sizeof(expected_minimum));
    EXPECT_EQ(memcmp(packed.bytes, expected_minimum, sizeof(expected_minimum)),
@@ -1163,9 +1156,9 @@ TEST(Apple9Vir, SevenIndependentPendingGroupsMaterializeOldestHandoff)
    uint32_t last_result = AGX_APPLE9_VREG_INVALID;
    for (unsigned i = 0; i < 7; ++i) {
       uint32_t sources[] = {loads[i], ordinary};
-      last_result = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_FADD,
-                                        AGX_APPLE9_ENC_FLOAT2_COMPACT,
-                                        sources, 2, 0);
+      last_result =
+         agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_FADD,
+                             AGX_APPLE9_ENC_FLOAT2_COMPACT, sources, 2, 0);
    }
    program.output = last_result;
 
@@ -1313,8 +1306,7 @@ TEST(Apple9Vir, UnsupportedFirstConsumerGetsSlot6Materialization)
    EXPECT_EQ(program.instructions[0].producer_scoreboard_slot, 6u);
    EXPECT_TRUE(program.instructions[1].scoreboard_materialize);
    EXPECT_EQ(program.instructions[1].op, AGX_APPLE9_VIR_IOR);
-   EXPECT_EQ(program.instructions[1].encoding,
-             AGX_APPLE9_ENC_LOGIC_EXTENDED);
+   EXPECT_EQ(program.instructions[1].encoding, AGX_APPLE9_ENC_LOGIC_EXTENDED);
    EXPECT_EQ(program.instructions[1].scoreboard_slot, 6u);
    EXPECT_EQ(program.instructions[2].scoreboard_slot, 0u);
    EXPECT_EQ(program.instructions[2].src[0], program.instructions[1].dest);
@@ -1573,7 +1565,6 @@ TEST(Apple9Packer, SelectConditionAndEqualityModeMatchHardwareSweeps)
    }
 }
 
-
 TEST(Apple9Allocator, ReleasesKilledSourcesAfterTheirConsumer)
 {
    agx_apple9_vir_program program;
@@ -1600,7 +1591,6 @@ TEST(Apple9Allocator, ReleasesKilledSourcesAfterTheirConsumer)
    EXPECT_TRUE(agx_apple9_validate_vir_allocation(&program, &reason)) << reason;
    agx_apple9_vir_finish(&program);
 }
-
 
 TEST(Apple9Allocator, ReportsNoSpillPressureLimit)
 {
@@ -1637,9 +1627,9 @@ TEST(Apple9Allocator, UsesR16ThroughR63ForGeneralPressure)
    uint32_t values[24];
    for (unsigned i = 0; i < ARRAY_SIZE(values); ++i) {
       uint32_t sources[] = {gid, c};
-      values[i] = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IADD,
-                                      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources,
-                                      2, 0);
+      values[i] =
+         agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IADD,
+                             AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources, 2, 0);
    }
 
    uint32_t reduced = values[0];
@@ -1771,8 +1761,8 @@ TEST(Apple9Allocator, PendingVectorTupleCannotOverlapLaterAsyncDestination)
       .group_flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
-   uint32_t scalar = agx_apple9_vir_emit_device_load(&program, 1, index,
-                                                     &final_contract);
+   uint32_t scalar =
+      agx_apple9_vir_emit_device_load(&program, 1, index, &final_contract);
    ASSERT_NE(scalar, AGX_APPLE9_VREG_INVALID);
    ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(
       &program, scalar, 0, AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
@@ -1969,7 +1959,6 @@ apple9_large_constant_add_shader()
    return b.shader;
 }
 
-
 static nir_shader *
 apple9_ssbo_reduce_shader(unsigned input_count, bool floating,
                           enum gl_access_qualifier access = ACCESS_NON_WRITEABLE)
@@ -2070,8 +2059,7 @@ apple9_multiple_stores_one_binding_shader()
    nir_def *base = nir_imul_imm(&b, gid, 8);
    nir_store_ssbo(&b, nir_iadd_imm(&b, gid, 11), nir_imm_int(&b, 0), base);
    nir_store_ssbo(&b, nir_ixor(&b, gid, nir_imm_int(&b, 0x55)),
-                  nir_imm_int(&b, 0),
-                  nir_iadd_imm(&b, base, 4));
+                  nir_imm_int(&b, 0), nir_iadd_imm(&b, base, 4));
    return b.shader;
 }
 
@@ -2087,11 +2075,9 @@ apple9_multiple_output_bindings_shader(bool alias_input)
       nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, input_binding), offset,
                     .access = alias_input ? (enum gl_access_qualifier)0
                                           : ACCESS_NON_WRITEABLE);
-   nir_store_ssbo(&b, nir_iadd_imm(&b, loaded, 10), nir_imm_int(&b, 0),
-                  offset);
+   nir_store_ssbo(&b, nir_iadd_imm(&b, loaded, 10), nir_imm_int(&b, 0), offset);
    nir_store_ssbo(&b, nir_ixor(&b, loaded, nir_imm_int(&b, 0x55)),
-                  nir_imm_int(&b, 1),
-                  offset);
+                  nir_imm_int(&b, 1), offset);
    return b.shader;
 }
 
@@ -2102,18 +2088,17 @@ apple9_multiple_scalar_vector_stores_shader()
       apple9_compute_builder("apple9_multiple_scalar_vector_stores");
    b.shader->info.num_ssbos = 3;
    nir_def *gid = apple9_global_id_x(&b);
-   nir_def *loaded = nir_load_ssbo(
-      &b, 4, 32, nir_imm_int(&b, 2), nir_imul_imm(&b, gid, 16),
-      .access = ACCESS_NON_WRITEABLE, .align_mul = 16);
+   nir_def *loaded =
+      nir_load_ssbo(&b, 4, 32, nir_imm_int(&b, 2), nir_imul_imm(&b, gid, 16),
+                    .access = ACCESS_NON_WRITEABLE, .align_mul = 16);
    nir_def *lanes[4];
    for (unsigned c = 0; c < 4; ++c)
       lanes[c] = nir_iadd_imm(&b, nir_channel(&b, loaded, c), c + 1);
    nir_store_ssbo(&b, nir_vec(&b, lanes, 4), nir_imm_int(&b, 0),
                   nir_imul_imm(&b, gid, 16));
-   nir_store_ssbo(&b,
-                  nir_ixor(&b, nir_channel(&b, loaded, 0),
-                           nir_channel(&b, loaded, 3)),
-                  nir_imm_int(&b, 1), nir_imul_imm(&b, gid, 4));
+   nir_store_ssbo(
+      &b, nir_ixor(&b, nir_channel(&b, loaded, 0), nir_channel(&b, loaded, 3)),
+      nir_imm_int(&b, 1), nir_imul_imm(&b, gid, 4));
    return b.shader;
 }
 
@@ -2126,10 +2111,9 @@ apple9_narrow_load_shader(unsigned bits, bool sign_extend)
    nir_def *offset = nir_imul_imm(&b, gid, bits / 8);
    nir_def *loaded =
       nir_load_ssbo(&b, 1, bits, nir_imm_int(&b, 1), offset,
-                    .access = ACCESS_NON_WRITEABLE,
-                    .align_mul = bits / 8);
-   nir_def *extended = sign_extend ? nir_i2i32(&b, loaded)
-                                   : nir_u2u32(&b, loaded);
+                    .access = ACCESS_NON_WRITEABLE, .align_mul = bits / 8);
+   nir_def *extended =
+      sign_extend ? nir_i2i32(&b, loaded) : nir_u2u32(&b, loaded);
    apple9_store_output(&b, gid, extended);
    return b.shader;
 }
@@ -2143,8 +2127,7 @@ apple9_narrow_store_shader(unsigned bits)
    nir_def *loaded =
       nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1), nir_imul_imm(&b, gid, 4),
                     .access = ACCESS_NON_WRITEABLE);
-   nir_def *narrowed = bits == 8 ? nir_u2u8(&b, loaded)
-                                 : nir_u2u16(&b, loaded);
+   nir_def *narrowed = bits == 8 ? nir_u2u8(&b, loaded) : nir_u2u16(&b, loaded);
    nir_store_ssbo(&b, narrowed, nir_imm_int(&b, 0),
                   nir_imul_imm(&b, gid, bits / 8));
    return b.shader;
@@ -2156,9 +2139,9 @@ apple9_ubo_load_shader()
    nir_builder b = apple9_compute_builder("apple9_ubo_load");
    nir_def *gid = apple9_global_id_x(&b);
    nir_def *element = nir_iand_imm(&b, nir_iadd_imm(&b, gid, 7), 63);
-   nir_def *loaded = nir_load_ubo(
-      &b, 1, 32, nir_imm_int(&b, 0), nir_imul_imm(&b, element, 4),
-      .align_mul = 4, .range = 64 * sizeof(uint32_t));
+   nir_def *loaded =
+      nir_load_ubo(&b, 1, 32, nir_imm_int(&b, 0), nir_imul_imm(&b, element, 4),
+                   .align_mul = 4, .range = 64 * sizeof(uint32_t));
    apple9_store_output(&b, gid, nir_ixor(&b, loaded, nir_imm_int(&b, 0x5a)));
    return b.shader;
 }
@@ -2182,6 +2165,38 @@ apple9_nested_dependent_load_shader()
       nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 3), nir_imul_imm(&b, k, 4),
                     .access = ACCESS_NON_WRITEABLE);
    apple9_store_output(&b, gid, nir_ixor(&b, nir_ixor(&b, leaf, root), middle));
+   return b.shader;
+}
+
+static nir_shader *
+apple9_dynamic_scatter_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_dynamic_scatter");
+   b.shader->info.num_ssbos = 3;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *linear_offset = nir_imul_imm(&b, gid, 4);
+   nir_def *loaded_index =
+      nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1), linear_offset,
+                    .access = ACCESS_NON_WRITEABLE);
+   nir_def *scatter_index = nir_iand_imm(&b, loaded_index, 7);
+   nir_def *value = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 2),
+                                  nir_imul_imm(&b, scatter_index, 4),
+                                  .access = ACCESS_NON_WRITEABLE);
+   nir_def *result = nir_iadd(&b, value, nir_imul_imm(&b, gid, 17));
+   nir_store_ssbo(&b, result, nir_imm_int(&b, 0),
+                  nir_imul_imm(&b, scatter_index, 4));
+   return b.shader;
+}
+
+static nir_shader *
+apple9_procedural_scatter_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_procedural_scatter");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *scatter_index =
+      nir_iand_imm(&b, nir_imul_imm(&b, gid, 3), 7);
+   nir_store_ssbo(&b, nir_iadd_imm(&b, gid, 100), nir_imm_int(&b, 0),
+                  nir_imul_imm(&b, scatter_index, 4));
    return b.shader;
 }
 
@@ -2282,8 +2297,8 @@ apple9_binary_contains_get_sr(const struct agx_shader_part *compiled,
    const uint8_t *binary = (const uint8_t *)compiled->binary;
    for (size_t i = 0; i + 4 <= compiled->info.binary_size; ++i) {
       const uint8_t *bytes = binary + i;
-      if ((bytes[0] & 0xf) == 0xc && bytes[1] == selector &&
-          bytes[2] == 0x10 && (bytes[3] & 0x1f) == 0x06)
+      if ((bytes[0] & 0xf) == 0xc && bytes[1] == selector && bytes[2] == 0x10 &&
+          (bytes[3] & 0x1f) == 0x06)
          return true;
    }
    return false;
@@ -2324,9 +2339,8 @@ TEST(Apple9Compiler, LargeConstantUsesOneRawLiteralAndAllocatedStore)
    for (unsigned i = 0; i + 8 <= compiled.info.binary_size; ++i) {
       const uint8_t *bytes = binary + i;
       if ((bytes[0] & 0x0f) == 0x0c && bytes[1] == 0xf8 &&
-          (bytes[2] & 0x1f) == 0x02 && bytes[3] == 0x12 &&
-          bytes[4] == 0x18 && bytes[5] == 0x08 && bytes[6] == 0xa2 &&
-          bytes[7] == 0x01) {
+          (bytes[2] & 0x1f) == 0x02 && bytes[3] == 0x12 && bytes[4] == 0x18 &&
+          bytes[5] == 0x08 && bytes[6] == 0xa2 && bytes[7] == 0x01) {
          literals++;
          literal_dst = (bytes[0] >> 4) | ((bytes[2] & 0xc0) >> 2);
       }
@@ -2361,12 +2375,10 @@ TEST(Apple9Compiler, AluConstantUsesSixBitModeTwoLiteral)
    for (unsigned i = 0; i + 8 <= compiled.info.binary_size; ++i) {
       const uint8_t *bytes = binary + i;
       if ((bytes[0] & 0x0f) == 0x0c && bytes[1] == 0xf8 &&
-          (bytes[2] & 0x1f) == 0x02 && bytes[3] == 0x12 &&
-          bytes[4] == 0x18 && bytes[5] == 0x08 && bytes[6] == 0xa2 &&
-          bytes[7] == 0x01) {
+          (bytes[2] & 0x1f) == 0x02 && bytes[3] == 0x12 && bytes[4] == 0x18 &&
+          bytes[5] == 0x08 && bytes[6] == 0xa2 && bytes[7] == 0x01) {
          literals++;
-         const unsigned dst =
-            (bytes[0] >> 4) | ((bytes[2] & 0xc0) >> 2);
+         const unsigned dst = (bytes[0] >> 4) | ((bytes[2] & 0xc0) >> 2);
          EXPECT_GE(dst, 16u);
          EXPECT_LT(dst, 64u);
       }
@@ -2376,7 +2388,6 @@ TEST(Apple9Compiler, AluConstantUsesSixBitModeTwoLiteral)
    free(compiled.binary);
    ralloc_free(nir);
 }
-
 
 TEST(Apple9Compiler, IntegerAndFloatDoNotDependOnInputCount)
 {
@@ -2637,8 +2648,7 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
    for (unsigned bits : {8u, 16u}) {
       for (bool sign_extend : {false, true}) {
          SCOPED_TRACE(testing::Message()
-                      << "load bits=" << bits
-                      << " signed=" << sign_extend);
+                      << "load bits=" << bits << " signed=" << sign_extend);
          nir_shader *nir = apple9_narrow_load_shader(bits, sign_extend);
          struct agx_shader_part compiled = {};
          struct agx_apple9_compute_profile profile = {};
@@ -2654,8 +2664,8 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
          const uint8_t tail = bits == 8 ? 0x42 : 0x44;
          for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
             const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
-            narrow_loads += bytes[0] == 0x67 &&
-                            (bytes[8] & 0x3f) == format && bytes[12] == tail;
+            narrow_loads += bytes[0] == 0x67 && (bytes[8] & 0x3f) == format &&
+                            bytes[12] == tail;
          }
          EXPECT_EQ(narrow_loads, 1u);
          free(compiled.binary);
@@ -2678,8 +2688,8 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
       const uint8_t tail = bits == 8 ? 0x10 : 0x11;
       for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
          const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
-         narrow_stores += bytes[0] == 0xe7 && bytes[8] == format &&
-                          bytes[12] == tail;
+         narrow_stores +=
+            bytes[0] == 0xe7 && bytes[8] == format && bytes[12] == tail;
       }
       EXPECT_EQ(narrow_stores, 1u);
       free(compiled.binary);
@@ -2728,6 +2738,66 @@ TEST(Apple9Compiler, NestedDependentLoadsRetainEarlierResults)
    EXPECT_EQ(profile.resource_access_mode[2],
              AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32);
    EXPECT_GT(compiled.info.binary_size, 0u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, BoundedLoadIndexDrivesDynamicScatter)
+{
+   nir_shader *nir = apple9_dynamic_scatter_shader();
+   struct agx_shader_part compiled = {};
+   struct agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6);
+   ASSERT_EQ(profile.resource_binding_count, 3u);
+   EXPECT_EQ(profile.resource_binding[0], 2u);
+   EXPECT_EQ(profile.resource_binding[1], 1u);
+   EXPECT_EQ(profile.resource_binding[2], 0u);
+   EXPECT_EQ(profile.resource_access_mode[0],
+             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
+   EXPECT_EQ(profile.resource_access_add[0], 7u);
+   EXPECT_EQ(profile.resource_access_mode[1],
+             AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32);
+   EXPECT_EQ(profile.resource_access_mode[2],
+             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
+   EXPECT_EQ(profile.resource_access_add[2], 7u);
+   EXPECT_EQ(profile.index_rank, 1u);
+   EXPECT_EQ(profile.index_stride[0], 1u);
+
+   unsigned stores = 0;
+   for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
+      const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
+      if (bytes[0] == 0xe7 && bytes[2] == 0x54 && bytes[4] == 2) {
+         stores++;
+         EXPECT_EQ(bytes[6], 0x21);
+      }
+   }
+   EXPECT_EQ(stores, 1u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, PurelyDynamicScatterUsesConservativeOneDimensionalGrid)
+{
+   nir_shader *nir = apple9_procedural_scatter_shader();
+   struct agx_shader_part compiled = {};
+   struct agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+   ASSERT_EQ(profile.resource_binding_count, 1u);
+   EXPECT_EQ(profile.resource_access_mode[0],
+             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
+   EXPECT_EQ(profile.resource_access_add[0], 7u);
+   EXPECT_EQ(profile.index_rank, 1u);
+   EXPECT_EQ(profile.index_stride[0], 1u);
+   EXPECT_EQ(profile.index_stride[1], 0u);
+   EXPECT_EQ(profile.index_stride[2], 0u);
    free(compiled.binary);
    ralloc_free(nir);
 }

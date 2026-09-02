@@ -308,8 +308,7 @@ apple9_element_index(nir_def *offset, nir_scalar *index, unsigned *index_scale,
       return false;
    }
 
-   if (byte_stride % element_size != 0 ||
-       byte_add % element_size != 0) {
+   if (byte_stride % element_size != 0 || byte_add % element_size != 0) {
       return false;
    } else {
       candidate = apple9_chase_trivial(candidate);
@@ -357,6 +356,8 @@ struct apple9_buffer_store {
    nir_intrinsic_instr *intr;
    nir_scalar index;
    struct apple9_affine_index affine;
+   bool bounded_index;
+   uint32_t bounded_max;
    unsigned argument;
    unsigned components;
    unsigned index_scale;
@@ -544,8 +545,7 @@ apple9_index_upper_bound_inner(nir_shader *nir, nir_scalar scalar,
       return true;
    case nir_op_ishl:
       if (!apple9_index_upper_bound_inner(nir, left, &a, depth + 1) ||
-          !apple9_const_u32(right, &b) || b >= 32 ||
-          a > (UINT32_MAX >> b))
+          !apple9_const_u32(right, &b) || b >= 32 || a > (UINT32_MAX >> b))
          return false;
       *maximum = a << b;
       return true;
@@ -921,8 +921,8 @@ apple9_emit_dag_select(struct apple9_dag_lower *lower, nir_scalar predicate,
 }
 
 static uint32_t
-apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op,
-                     uint32_t source, unsigned amount)
+apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op, uint32_t source,
+                     unsigned amount)
 {
    if (source == AGX_APPLE9_VREG_INVALID || amount >= 32)
       return AGX_APPLE9_VREG_INVALID;
@@ -933,8 +933,7 @@ apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op,
       uint32_t scale = apple9_dag_imm(lower, 1u << amount);
       uint32_t zero = apple9_dag_zero(lower);
       uint32_t sources[3] = {source, scale, zero};
-      if (scale == AGX_APPLE9_VREG_INVALID ||
-          zero == AGX_APPLE9_VREG_INVALID)
+      if (scale == AGX_APPLE9_VREG_INVALID || zero == AGX_APPLE9_VREG_INVALID)
          return AGX_APPLE9_VREG_INVALID;
       return apple9_dag_emit(lower, AGX_APPLE9_VIR_IMAD,
                              AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
@@ -948,14 +947,13 @@ apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op,
     * arbitrary r0-r15 pair; copy the result back to the general bank. */
    const uint32_t copy_sources[2] = {source, source};
    uint32_t compact_source =
-      apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR,
-                      AGX_APPLE9_ENC_LOGIC_EXTENDED, copy_sources,
-                      ARRAY_SIZE(copy_sources), 0);
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR, AGX_APPLE9_ENC_LOGIC_EXTENDED,
+                      copy_sources, ARRAY_SIZE(copy_sources), 0);
    if (compact_source == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
-   uint32_t shifted = apple9_dag_emit(lower, AGX_APPLE9_VIR_ISHR,
-                                      AGX_APPLE9_ENC_SHIFT_EXTENDED,
-                                      &compact_source, 1, amount);
+   uint32_t shifted =
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_ISHR, AGX_APPLE9_ENC_SHIFT_EXTENDED,
+                      &compact_source, 1, amount);
    if (shifted == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
    shifted = apple9_dag_general_copy(lower, shifted);
@@ -975,8 +973,7 @@ static uint32_t
 apple9_dag_shift_variable(struct apple9_dag_lower *lower, nir_op op,
                           uint32_t source, uint32_t amount)
 {
-   if (source == AGX_APPLE9_VREG_INVALID ||
-       amount == AGX_APPLE9_VREG_INVALID)
+   if (source == AGX_APPLE9_VREG_INVALID || amount == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
 
    uint32_t result = source;
@@ -995,16 +992,15 @@ apple9_dag_shift_variable(struct apple9_dag_lower *lower, nir_op op,
          mask == AGX_APPLE9_VREG_INVALID
             ? AGX_APPLE9_VREG_INVALID
             : apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
-                              AGX_APPLE9_ENC_LOGIC_EXTENDED,
-                              condition_sources,
+                              AGX_APPLE9_ENC_LOGIC_EXTENDED, condition_sources,
                               ARRAY_SIZE(condition_sources), 0);
       uint32_t shifted =
          apple9_dag_shift_imm(lower, op, result, BITFIELD_BIT(bit));
       if (condition == AGX_APPLE9_VREG_INVALID ||
           shifted == AGX_APPLE9_VREG_INVALID)
          return AGX_APPLE9_VREG_INVALID;
-      result = apple9_emit_dag_select_raw(
-         lower, zero, condition, shifted, result, AGX_APPLE9_SELECT_ULT);
+      result = apple9_emit_dag_select_raw(lower, zero, condition, shifted,
+                                          result, AGX_APPLE9_SELECT_ULT);
       if (result == AGX_APPLE9_VREG_INVALID)
          return result;
    }
@@ -1019,7 +1015,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
    if ((scalar.def->bit_size != 8 && scalar.def->bit_size != 16 &&
         scalar.def->bit_size != 32) ||
        scalar.comp >= 4) {
-      lower->reason = "Apple9 DAG compiler supports 8-, 16- and 32-bit scalar components";
+      lower->reason =
+         "Apple9 DAG compiler supports 8-, 16- and 32-bit scalar components";
       return AGX_APPLE9_VREG_INVALID;
    }
 
@@ -1103,8 +1100,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             const unsigned components = load->intr->def.num_components;
             const unsigned expected_stride = components == 2 ? 2 : 4;
             if (components < 2 || components > 4 ||
-                load->index_scale != expected_stride ||
-                load->index_add != 0) {
+                load->index_scale != expected_stride || load->index_add != 0) {
                lower->reason =
                   "Apple9 native vector load requires a std430 vector stride";
                return AGX_APPLE9_VREG_INVALID;
@@ -1195,8 +1191,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
 
          if (op == nir_op_i2i8 || op == nir_op_i2i16 || op == nir_op_i2i32 ||
              op == nir_op_u2u8 || op == nir_op_u2u16 || op == nir_op_u2u32) {
-            nir_scalar source_scalar = apple9_chase_trivial(
-               nir_scalar_chase_alu_src(scalar, 0));
+            nir_scalar source_scalar =
+               apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
             const unsigned source_bits = source_scalar.def->bit_size;
             const unsigned destination_bits = scalar.def->bit_size;
             uint32_t source = apple9_lower_dag_scalar(lower, source_scalar);
@@ -1211,14 +1207,13 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             } else if (op == nir_op_u2u8 || op == nir_op_u2u16 ||
                        op == nir_op_u2u32) {
                uint32_t mask = apple9_dag_imm(
-                  lower, source_bits == 32 ? UINT32_MAX
-                                           : BITFIELD_MASK(source_bits));
+                  lower,
+                  source_bits == 32 ? UINT32_MAX : BITFIELD_MASK(source_bits));
                uint32_t sources[2] = {source, mask};
                if (mask != AGX_APPLE9_VREG_INVALID)
-                  value = apple9_dag_emit(
-                     lower, AGX_APPLE9_VIR_IAND,
-                     AGX_APPLE9_ENC_LOGIC_EXTENDED, sources,
-                     ARRAY_SIZE(sources), 0);
+                  value = apple9_dag_emit(lower, AGX_APPLE9_VIR_IAND,
+                                          AGX_APPLE9_ENC_LOGIC_EXTENDED,
+                                          sources, ARRAY_SIZE(sources), 0);
             } else {
                const unsigned shift = 32 - source_bits;
                uint32_t scale = apple9_dag_imm(lower, 1u << shift);
@@ -1228,13 +1223,12 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                   scale == AGX_APPLE9_VREG_INVALID ||
                         zero == AGX_APPLE9_VREG_INVALID
                      ? AGX_APPLE9_VREG_INVALID
-                     : apple9_dag_emit(
-                          lower, AGX_APPLE9_VIR_IMAD,
-                          AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
-                          ARRAY_SIZE(sources), 0);
+                     : apple9_dag_emit(lower, AGX_APPLE9_VIR_IMAD,
+                                       AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
+                                       ARRAY_SIZE(sources), 0);
                if (shifted != AGX_APPLE9_VREG_INVALID)
-                  value = apple9_dag_shift_imm(lower, nir_op_ishr, shifted,
-                                               shift);
+                  value =
+                     apple9_dag_shift_imm(lower, nir_op_ishr, shifted, shift);
             }
          } else if (op == nir_op_bcsel) {
             uint32_t if_true = apple9_lower_dag_source(lower, scalar, 1);
@@ -1419,8 +1413,7 @@ apple9_find_buffer_resource(struct apple9_buffer_map *map,
                             uint32_t binding)
 {
    for (unsigned i = 0; i < map->count; ++i) {
-      if (map->resource[i].kind == kind &&
-          map->resource[i].binding == binding)
+      if (map->resource[i].kind == kind && map->resource[i].binding == binding)
          return &map->resource[i];
    }
    return NULL;
@@ -1502,8 +1495,7 @@ apple9_buffer_argument(const struct apple9_buffer_map *map,
                        uint32_t binding)
 {
    for (unsigned i = 0; i < map->count; ++i) {
-      if (map->resource[i].kind == kind &&
-          map->resource[i].binding == binding)
+      if (map->resource[i].kind == kind && map->resource[i].binding == binding)
          return i;
    }
    return UINT_MAX;
@@ -1565,7 +1557,8 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
          bool bounded_index =
             !affine_index && apple9_index_upper_bound(nir, index, &bounded_max);
          if (!affine_index && !bounded_index) {
-            *reason = "Apple9 buffer compiler cannot prove the load index bound";
+            *reason =
+               "Apple9 buffer compiler cannot prove the access index bound";
             return false;
          }
 
@@ -1620,8 +1613,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                component_affine.base += component_add;
 
                if (bounded_index &&
-                   (bounded_max >
-                    (UINT32_MAX - component_add) / index_scale)) {
+                   (bounded_max > (UINT32_MAX - component_add) / index_scale)) {
                   *reason = "Apple9 bounded vector-load index exceeds 32 bits";
                   return false;
                }
@@ -1631,10 +1623,9 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                   .index = index,
                   .affine = component_affine,
                   .bounded_index = bounded_index,
-                  .bounded_max =
-                     bounded_index
-                        ? bounded_max * index_scale + index_add + component
-                        : 0,
+                  .bounded_max = bounded_index ? bounded_max * index_scale +
+                                                    index_add + component
+                                               : 0,
                   .argument = argument,
                   .component = component,
                   .index_scale = index_scale,
@@ -1655,27 +1646,34 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                   "Apple9 store index must use its natural vector stride";
                return false;
             }
-            if (!affine_index) {
-               *reason = "Apple9 store index must be affine";
-               return false;
-            }
             if (nir_intrinsic_write_mask(intr) != BITFIELD_MASK(components) ||
                 (bit_size != 8 && bit_size != 16 && bit_size != 32) ||
                 (bit_size != 32 && components != 1)) {
-               *reason =
-                  "Apple9 requires complete scalar or u32 tuple stores";
+               *reason = "Apple9 requires complete scalar or u32 tuple stores";
                return false;
             }
             unsigned argument = apple9_buffer_argument(
                map, AGX_APPLE9_COMPUTE_RESOURCE_SSBO, binding);
             if (argument == UINT_MAX) {
-               *reason = "Apple9 output binding is absent from its resource map";
+               *reason =
+                  "Apple9 output binding is absent from its resource map";
+               return false;
+            }
+
+            const uint32_t tail = components - 1;
+            if (bounded_index &&
+                (bounded_max > (UINT32_MAX - index_add - tail) / index_scale)) {
+               *reason = "Apple9 bounded store index exceeds 32 bits";
                return false;
             }
             struct apple9_buffer_store store = {
                .intr = intr,
                .index = index,
                .affine = affine,
+               .bounded_index = bounded_index,
+               .bounded_max = bounded_index
+                                 ? bounded_max * index_scale + index_add + tail
+                                 : 0,
                .argument = argument,
                .components = components,
                .index_scale = index_scale,
@@ -1693,21 +1691,50 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       return false;
    }
 
-   struct apple9_buffer_store *first_store = stores->data;
-   if (!apple9_affine_index(first_store->index, dispatch_affine_out,
-                            dispatch_rank_out)) {
-      *reason = "Apple9 DAG compiler requires dense affine store indices";
-      return false;
-   }
+   /* Dispatch geometry and destination addressing are independent.  The old
+    * implementation inferred the former from the first store, which made a
+    * perfectly ordinary bounded scatter look like an unsupported dispatch.
+    * Recover the dense invocation shape from any affine memory operation;
+    * dynamic accesses still carry their own independently proven bounds. */
+   bool have_dispatch_shape = false;
    util_dynarray_foreach(stores, struct apple9_buffer_store, store) {
+      if (!store->bounded_index &&
+          apple9_affine_index(store->index, dispatch_affine_out,
+                              dispatch_rank_out)) {
+         have_dispatch_shape = true;
+         break;
+      }
+   }
+   if (!have_dispatch_shape) {
+      util_dynarray_foreach(loads, struct apple9_scalar_load, load) {
+         if (!load->bounded_index &&
+             apple9_affine_index(load->index, dispatch_affine_out,
+                                 dispatch_rank_out)) {
+            have_dispatch_shape = true;
+            break;
+         }
+      }
+   }
+   if (!have_dispatch_shape) {
+      /* Nothing in a purely dynamic memory graph carries a dense affine
+       * stride.  Such a shader is still a valid 1D compute program: record
+       * the compiler's conservative launch contract directly instead of
+       * inventing an affine relationship for its scattered stores. */
+      memset(dispatch_affine_out, 0, sizeof(*dispatch_affine_out));
+      dispatch_affine_out->stride[0] = 1;
+      *dispatch_rank_out = 1;
+   }
+
+   util_dynarray_foreach(stores, struct apple9_buffer_store, store) {
+      if (store->bounded_index)
+         continue;
       struct apple9_affine_index candidate;
       unsigned rank;
       if (!apple9_affine_index(store->index, &candidate, &rank) ||
           rank != *dispatch_rank_out ||
           memcmp(candidate.stride, dispatch_affine_out->stride,
                  sizeof(candidate.stride)) != 0) {
-         *reason =
-            "Apple9 multiple stores require one dense affine dispatch shape";
+         *reason = "Apple9 affine stores require one dense dispatch shape";
          return false;
       }
    }
@@ -1779,10 +1806,9 @@ invalid:
 }
 
 static bool
-apple9_emit_device_store_vir(
-   struct apple9_emitter *emitter,
-   const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
-   const char **reason)
+apple9_emit_device_store_vir(struct apple9_emitter *emitter,
+                             const struct agx_apple9_vir_instr *instruction,
+                             const uint8_t *phys, const char **reason)
 {
    const unsigned components = instruction->memory_components;
    if (instruction->op != AGX_APPLE9_VIR_DEVICE_STORE || components < 1 ||
@@ -1933,8 +1959,10 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
     * map naturally reuses the shared computation. */
    util_dynarray_foreach(&stores, struct apple9_buffer_store, store) {
       uint32_t output[4] = {
-         AGX_APPLE9_VREG_INVALID, AGX_APPLE9_VREG_INVALID,
-         AGX_APPLE9_VREG_INVALID, AGX_APPLE9_VREG_INVALID,
+         AGX_APPLE9_VREG_INVALID,
+         AGX_APPLE9_VREG_INVALID,
+         AGX_APPLE9_VREG_INVALID,
+         AGX_APPLE9_VREG_INVALID,
       };
       for (unsigned c = 0; c < store->components; ++c) {
          output[c] = apple9_lower_dag_scalar(
@@ -1983,9 +2011,9 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          goto fail;
       }
 
-      if (!agx_apple9_vir_emit_device_store(
-             &lower.program, store->argument, index, output,
-             store->components, store->bit_size)) {
+      if (!agx_apple9_vir_emit_device_store(&lower.program, store->argument,
+                                            index, output, store->components,
+                                            store->bit_size)) {
          *reason = "could not emit an Apple9 VIR device store";
          goto fail;
       }
@@ -2044,17 +2072,16 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       const struct agx_apple9_vir_instr *instruction =
          &lower.program.instructions[i];
       if (instruction->op == AGX_APPLE9_VIR_COLLECT) {
-         if (!apple9_emit_collect_vir(&emitter, instruction,
-                                      lower.program.phys, &emission_max_gpr,
-                                      reason)) {
+         if (!apple9_emit_collect_vir(&emitter, instruction, lower.program.phys,
+                                      &emission_max_gpr, reason)) {
             util_dynarray_fini(&emitter.bytes);
             goto fail;
          }
          continue;
       }
       if (instruction->op == AGX_APPLE9_VIR_DEVICE_STORE) {
-         if (!apple9_emit_device_store_vir(
-                &emitter, instruction, lower.program.phys, reason)) {
+         if (!apple9_emit_device_store_vir(&emitter, instruction,
+                                           lower.program.phys, reason)) {
             util_dynarray_fini(&emitter.bytes);
             goto fail;
          }
@@ -2065,8 +2092,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
           !apple9_emit_packed(&emitter, &packed)) {
          if (getenv("AGX_APPLE9_TRACE") != NULL) {
             fprintf(stderr,
-                    "APPLE9_PACK_FAIL i=%u op=%u enc=%u dst=r%u src=",
-                    i, instruction->op, instruction->encoding,
+                    "APPLE9_PACK_FAIL i=%u op=%u enc=%u dst=r%u src=", i,
+                    instruction->op, instruction->encoding,
                     lower.program.phys[instruction->dest]);
             for (unsigned s = 0; s < instruction->nr_srcs; ++s)
                fprintf(stderr, "%sr%u", s ? "," : "",
@@ -2079,9 +2106,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          goto fail;
       }
       if (getenv("AGX_APPLE9_TRACE") != NULL) {
-         fprintf(stderr,
-                 "APPLE9_VIR i=%u op=%u enc=%u dst=r%u src=",
-                 i, instruction->op, instruction->encoding,
+         fprintf(stderr, "APPLE9_VIR i=%u op=%u enc=%u dst=r%u src=", i,
+                 instruction->op, instruction->encoding,
                  lower.program.phys[instruction->dest]);
          for (unsigned s = 0; s < instruction->nr_srcs; ++s)
             fprintf(stderr, "%sr%u", s ? "," : "",
@@ -2141,6 +2167,15 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
             goto fail;
          }
          *profile_size = element_size;
+
+         if (store->bounded_index) {
+            bounded_argument[store->argument] = true;
+            profile->resource_access_add[store->argument] =
+               MAX2(profile->resource_access_add[store->argument],
+                    store->bounded_max);
+            continue;
+         }
+
          affine_argument[store->argument] = true;
 
          const uint32_t tail = store->components - 1;
@@ -2164,25 +2199,24 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          uint8_t *profile_size =
             &profile->resource_access_element_size[load->argument];
          if (*profile_size != 0 && *profile_size != element_size) {
-            *reason = "Apple9 one resource uses incompatible scalar element sizes";
+            *reason =
+               "Apple9 one resource uses incompatible scalar element sizes";
             util_dynarray_fini(&emitter.bytes);
             goto fail;
          }
          *profile_size = element_size;
          if (load->bounded_index) {
             bounded_argument[load->argument] = true;
-            profile->resource_access_add[load->argument] =
-               MAX2(profile->resource_access_add[load->argument],
-                    load->bounded_max);
+            profile->resource_access_add[load->argument] = MAX2(
+               profile->resource_access_add[load->argument], load->bounded_max);
             continue;
          }
 
          affine_argument[load->argument] = true;
-         uint32_t scale =
-            memcmp(load->affine.stride, affine.stride,
-                   sizeof(load->affine.stride)) == 0
-               ? 1
-               : (uint32_t)load->affine.stride[0];
+         uint32_t scale = memcmp(load->affine.stride, affine.stride,
+                                 sizeof(load->affine.stride)) == 0
+                             ? 1
+                             : (uint32_t)load->affine.stride[0];
          uint32_t add = (uint32_t)load->affine.base;
          if (scale == 1 && add == 0)
             continue;
@@ -2211,7 +2245,6 @@ fail:
    util_dynarray_fini(&stores);
    return false;
 }
-
 
 bool
 agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
@@ -2260,8 +2293,7 @@ apple9_graphics_unsupported(struct agx_shader_part *out,
 {
    memset(out, 0, sizeof(*out));
    if (reason_out != NULL)
-      *reason_out =
-         "Apple9 graphics compilation is not implemented";
+      *reason_out = "Apple9 graphics compilation is not implemented";
    return false;
 }
 
