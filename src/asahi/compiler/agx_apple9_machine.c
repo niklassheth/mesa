@@ -225,18 +225,21 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .operands =
             {
                GPR(AGX_APPLE9_OPERAND_DEST,
-                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 15, 1,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW |
+                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95, 1,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE |
+                      AGX_APPLE9_OPERAND_SCATTERED |
                       AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(AGX_APPLE9_OPERAND_SRC0,
-                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 63, 1,
+                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95, 1,
                    AGX_APPLE9_OPERAND_ALLOCATABLE |
+                      AGX_APPLE9_OPERAND_SCATTERED |
                       AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(AGX_APPLE9_OPERAND_SRC1,
-                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 63, 1,
+                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95, 1,
                    AGX_APPLE9_OPERAND_ALLOCATABLE |
+                      AGX_APPLE9_OPERAND_SCATTERED |
                       AGX_APPLE9_OPERAND_COMPACT_PREFERRED |
                       AGX_APPLE9_OPERAND_UNIFORM_ALTERNATIVE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
@@ -248,23 +251,21 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .length = 8,
          .operand_count = 3,
          .allocator_safe = false,
-         .evidence = AGX_APPLE9_EVIDENCE_BYTE_DIFF,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands =
             {
-               /* "Extended" here extends modifiers, not the compact dst nibble.
-                */
                GPR(AGX_APPLE9_OPERAND_DEST,
                    AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32,
-                   15, 1, AGX_APPLE9_OPERAND_HARD_LOW,
-                   AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+                   95, 1, AGX_APPLE9_OPERAND_SCATTERED,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(AGX_APPLE9_OPERAND_SRC0,
                    AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32,
                    95, 1, AGX_APPLE9_OPERAND_SCATTERED,
-                   AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(AGX_APPLE9_OPERAND_SRC1,
                    AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32,
                    95, 1, AGX_APPLE9_OPERAND_SCATTERED,
-                   AGX_APPLE9_EVIDENCE_BYTE_DIFF),
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
    [AGX_APPLE9_ENC_FLOAT3_EXTENDED] =
@@ -352,18 +353,18 @@ static const struct agx_apple9_encoding_info encodings[] = {
             {
                GPR(
                   AGX_APPLE9_OPERAND_DEST,
-                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 15,
-                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(
                   AGX_APPLE9_OPERAND_SRC0,
-                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 63,
-                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
                GPR(
                   AGX_APPLE9_OPERAND_SRC1,
-                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 63,
-                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },

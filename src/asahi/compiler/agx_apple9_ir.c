@@ -2303,6 +2303,27 @@ pack_imad(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
 }
 
 static bool
+pack_compact_binary_gprs(uint8_t *bytes, unsigned dst, unsigned a, unsigned b)
+{
+   if (dst >= AGX_APPLE9_GPR_COUNT || a >= AGX_APPLE9_GPR_COUNT ||
+       b >= AGX_APPLE9_GPR_COUNT)
+      return false;
+
+   /* EXP-M4-38: FALU2, integer min/max, native half ALU, and integer
+    * logic use the same scattered physical-register map.  The descriptor
+    * top bits at 15 and 31 are auxiliaries; the actual source bit 6 values
+    * live at 40 and 42. */
+   set_bits(bytes, 4, 4, dst & 0xf);
+   set_bits(bytes, 22, 2, (dst >> 4) & 3);
+   set_bits(bytes, 44, 1, dst >> 6);
+   set_bits(bytes, 9, 6, a & 0x3f);
+   set_bits(bytes, 40, 1, a >> 6);
+   set_bits(bytes, 25, 6, b & 0x3f);
+   set_bits(bytes, 42, 1, b >> 6);
+   return true;
+}
+
+static bool
 pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
             struct agx_apple9_packed_instruction *packed)
 {
@@ -2335,9 +2356,10 @@ pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       set_bits(bytes, 20, 1, 0);
    }
 
-   set_bits(bytes, 4, 4, phys[instruction->dest]);
-   set_bits(bytes, 9, 6, phys[instruction->src[0]]);
-   set_bits(bytes, 25, 6, phys[instruction->src[1]]);
+   if (!pack_compact_binary_gprs(bytes, phys[instruction->dest],
+                                 phys[instruction->src[0]],
+                                 phys[instruction->src[1]]))
+      return false;
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -2485,16 +2507,10 @@ pack_logic(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       set_bits(bytes, bit, 1, 1);
    }
 
-   unsigned dst = phys[instruction->dest];
-   unsigned a = phys[instruction->src[0]];
-   unsigned b = phys[instruction->src[1]];
-   set_bits(bytes, 4, 4, dst & 0xf);
-   set_bits(bytes, 22, 2, (dst >> 4) & 3);
-   set_bits(bytes, 44, 1, dst >> 6);
-   set_bits(bytes, 9, 6, a & 0x3f);
-   set_bits(bytes, 40, 1, a >> 6);
-   set_bits(bytes, 25, 6, b & 0x3f);
-   set_bits(bytes, 42, 1, b >> 6);
+   if (!pack_compact_binary_gprs(bytes, phys[instruction->dest],
+                                 phys[instruction->src[0]],
+                                 phys[instruction->src[1]]))
+      return false;
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }
@@ -2547,9 +2563,10 @@ pack_minmax(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
       set_bits(bytes, 20, 1, 0);
    }
 
-   set_bits(bytes, 4, 4, phys[instruction->dest]);
-   set_bits(bytes, 9, 6, phys[instruction->src[0]]);
-   set_bits(bytes, 25, 6, phys[instruction->src[1]]);
+   if (!pack_compact_binary_gprs(bytes, phys[instruction->dest],
+                                 phys[instruction->src[0]],
+                                 phys[instruction->src[1]]))
+      return false;
    packed_init(packed, bytes, sizeof(bytes));
    return true;
 }

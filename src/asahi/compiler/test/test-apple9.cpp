@@ -35,16 +35,16 @@ TEST(Apple9Machine, EveryEncodingIsDescribed)
    }
 }
 
-TEST(Apple9Machine, CompactFloatHasHardReachLimits)
+TEST(Apple9Machine, CompactBinaryAluUsesScatteredFullRegisterMap)
 {
    EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_FLOAT2_COMPACT, AGX_APPLE9_OPERAND_DEST, 15, 32));
-   EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_FLOAT2_COMPACT, AGX_APPLE9_OPERAND_DEST, 16, 32));
+      AGX_APPLE9_ENC_FLOAT2_COMPACT, AGX_APPLE9_OPERAND_DEST, 95, 32));
    EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_FLOAT2_COMPACT, AGX_APPLE9_OPERAND_SRC0, 63, 32));
-   EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
       AGX_APPLE9_ENC_FLOAT2_COMPACT, AGX_APPLE9_OPERAND_SRC0, 64, 32));
+   EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
+      AGX_APPLE9_ENC_FLOAT2_COMPACT, AGX_APPLE9_OPERAND_SRC1, 95, 32));
+   EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
+      AGX_APPLE9_ENC_FLOAT2_COMPACT, AGX_APPLE9_OPERAND_DEST, 96, 32));
 
    const auto *extended =
       agx_apple9_encoding_info(AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED);
@@ -52,8 +52,16 @@ TEST(Apple9Machine, CompactFloatHasHardReachLimits)
    const auto *dst = agx_apple9_find_operand(
       AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED, AGX_APPLE9_OPERAND_DEST);
    ASSERT_NE(dst, nullptr);
-   EXPECT_EQ(dst->max_index, 15u)
-      << "the 8-byte saturate form extends modifiers, not destination reach";
+   EXPECT_EQ(dst->max_index, 95u);
+   EXPECT_TRUE(dst->flags & AGX_APPLE9_OPERAND_SCATTERED);
+
+   for (auto role : {AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_OPERAND_SRC0,
+                     AGX_APPLE9_OPERAND_SRC1}) {
+      EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
+         AGX_APPLE9_ENC_MINMAX_COMPACT, role, 95, 32));
+      EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
+         AGX_APPLE9_ENC_MINMAX_COMPACT, role, 96, 32));
+   }
 
    const auto *fma_dst = agx_apple9_find_operand(AGX_APPLE9_ENC_FLOAT3_EXTENDED,
                                                  AGX_APPLE9_OPERAND_DEST);
@@ -554,12 +562,13 @@ TEST(Apple9Machine, AllocatorSafeExtendedIntegerForms)
    }
    EXPECT_TRUE(
       agx_apple9_encoding_info(AGX_APPLE9_ENC_MINMAX_COMPACT)->allocator_safe);
-   EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_MINMAX_COMPACT, AGX_APPLE9_OPERAND_DEST, 15, 32));
-   EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_MINMAX_COMPACT, AGX_APPLE9_OPERAND_SRC0, 63, 32));
-   EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_MINMAX_COMPACT, AGX_APPLE9_OPERAND_SRC0, 64, 32));
+   for (auto role : {AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_OPERAND_SRC0,
+                     AGX_APPLE9_OPERAND_SRC1}) {
+      EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
+         AGX_APPLE9_ENC_MINMAX_COMPACT, role, 95, 32));
+      EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
+         AGX_APPLE9_ENC_MINMAX_COMPACT, role, 96, 32));
+   }
 }
 
 TEST(Apple9Machine, WideSelectHasAsymmetricReach)
@@ -835,6 +844,42 @@ TEST(Apple9Packer, CompactFloatCarriesNativeStateAndRelease)
    ASSERT_TRUE(agx_apple9_pack_vir_instruction(&minimum, phys, &packed, &reason))
       << reason;
    EXPECT_EQ(memcmp(packed.bytes, load_minimum, sizeof(load_minimum)), 0);
+}
+
+TEST(Apple9Packer, CompactBinaryAluPacksAllScatteredRegisterBits)
+{
+   uint8_t phys[] = {95, 64, 79};
+   agx_apple9_vir_instr add = {
+      .op = AGX_APPLE9_VIR_FADD,
+      .encoding = AGX_APPLE9_ENC_FLOAT2_COMPACT,
+      .dest = 0,
+      .src = {1, 2},
+      .nr_srcs = 2,
+   };
+   agx_apple9_vir_instr minimum = add;
+   minimum.op = AGX_APPLE9_VIR_UMIN;
+   minimum.encoding = AGX_APPLE9_ENC_MINMAX_COMPACT;
+
+   static const uint8_t expected_add[] = {
+      0xf9, 0x01, 0x7c, 0x1f, 0x00, 0x15,
+   };
+   static const uint8_t expected_minimum[] = {
+      0xf2, 0x01, 0x7e, 0x1f, 0x05, 0x15,
+   };
+
+   const char *reason = nullptr;
+   agx_apple9_packed_instruction packed = {};
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&add, phys, &packed, &reason))
+      << reason;
+   ASSERT_EQ(packed.length, sizeof(expected_add));
+   EXPECT_EQ(memcmp(packed.bytes, expected_add, sizeof(expected_add)), 0);
+
+   ASSERT_TRUE(
+      agx_apple9_pack_vir_instruction(&minimum, phys, &packed, &reason))
+      << reason;
+   ASSERT_EQ(packed.length, sizeof(expected_minimum));
+   EXPECT_EQ(memcmp(packed.bytes, expected_minimum, sizeof(expected_minimum)),
+             0);
 }
 
 TEST(Apple9Packer, FmaCarriesNativeStateAndRelease)
