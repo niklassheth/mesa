@@ -1306,6 +1306,64 @@ TEST(Apple9Vir, ExplicitMultiSourceGroupRejectsDifferentSlots)
    agx_apple9_vir_finish(&program);
 }
 
+TEST(Apple9Vir, MaterializedVectorStoreRecollectsItsScalarLanes)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t index = agx_apple9_vir_input(&program, 4);
+   const agx_apple9_device_load_contract retained = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   const agx_apple9_device_load_contract second = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+
+   uint32_t earlier =
+      agx_apple9_vir_emit_device_load(&program, 0, index, &retained);
+   ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(
+      &program, earlier, AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+      AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
+   uint32_t vector =
+      agx_apple9_vir_emit_device_load_vector(&program, 1, index, 4, &second);
+   ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(
+      &program, vector, 0, AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
+   uint32_t lanes[] = {vector, vector + 1, vector + 2, vector + 3};
+   ASSERT_TRUE(
+      agx_apple9_vir_emit_device_store(&program, 2, index, lanes, 4, 32));
+   uint32_t output_sources[] = {earlier, earlier};
+   program.output =
+      agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IOR,
+                          AGX_APPLE9_ENC_LOGIC_EXTENDED, output_sources, 2, 0);
+
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+      << (reason ? reason : "");
+
+   unsigned collect_index = UINT_MAX;
+   unsigned store_index = UINT_MAX;
+   for (unsigned i = 0; i < program.instruction_count; ++i) {
+      collect_index = program.instructions[i].op == AGX_APPLE9_VIR_COLLECT
+                         ? i
+                         : collect_index;
+      store_index = program.instructions[i].op == AGX_APPLE9_VIR_DEVICE_STORE
+                       ? i
+                       : store_index;
+   }
+   ASSERT_NE(collect_index, UINT_MAX);
+   ASSERT_EQ(store_index, collect_index + 1);
+   const uint32_t tuple = program.instructions[collect_index].dest;
+   for (unsigned c = 0; c < 4; ++c)
+      EXPECT_EQ(program.instructions[store_index].src[c], tuple + c);
+
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
+      << (reason ? reason : "");
+   for (unsigned c = 1; c < 4; ++c)
+      EXPECT_EQ(program.phys[tuple + c], program.phys[tuple] + c);
+   agx_apple9_vir_finish(&program);
+}
+
 TEST(Apple9Packer, LowRegisterSelectMatchesCallerOwnedCompilerForm)
 {
    uint8_t phys[] = {0, 0, 2, 4, 3};
@@ -1638,6 +1696,91 @@ TEST(Apple9Allocator, PendingVectorTupleCannotOverlapLaterAsyncDestination)
    agx_apple9_vir_finish(&program);
 }
 
+TEST(Apple9Allocator, VectorStoreCollectsScalarSourcesBeforeAllocation)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t data[] = {
+      agx_apple9_vir_input(&program, 2),
+      agx_apple9_vir_input(&program, 4),
+      agx_apple9_vir_input(&program, 6),
+      agx_apple9_vir_input(&program, 8),
+   };
+   uint32_t index = agx_apple9_vir_input(&program, 10);
+   ASSERT_TRUE(
+      agx_apple9_vir_emit_device_store(&program, 0, index, data, 4, 32));
+   ASSERT_EQ(program.instruction_count, 2u);
+   const uint32_t tuple = program.instructions[0].dest;
+   EXPECT_EQ(program.instructions[0].op, AGX_APPLE9_VIR_COLLECT);
+   EXPECT_EQ(program.instructions[0].dest_components, 4u);
+   EXPECT_EQ(program.instructions[1].op, AGX_APPLE9_VIR_DEVICE_STORE);
+   for (unsigned c = 0; c < 4; ++c)
+      EXPECT_EQ(program.instructions[1].src[c], tuple + c);
+
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+      << (reason ? reason : "");
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
+      << (reason ? reason : "");
+   for (unsigned c = 1; c < 4; ++c)
+      EXPECT_EQ(program.phys[tuple + c], program.phys[tuple] + c);
+   for (unsigned c = 0; c < 4; ++c)
+      EXPECT_NE(program.phys[tuple + c], program.phys[data[c]]);
+   agx_apple9_vir_finish(&program);
+}
+
+TEST(Apple9Allocator, CollectCoalescesAnAlreadyAdjacentKilledTuple)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t index = agx_apple9_vir_input(&program, 13);
+   uint32_t data[4];
+   for (unsigned c = 0; c < 4; ++c) {
+      data[c] =
+         agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IMM,
+                             AGX_APPLE9_ENC_MOV_IMM_COMPACT, nullptr, 0, c + 1);
+   }
+   ASSERT_TRUE(
+      agx_apple9_vir_emit_device_store(&program, 0, index, data, 4, 32));
+   const uint32_t tuple = program.instructions[4].dest;
+
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+      << (reason ? reason : "");
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
+      << (reason ? reason : "");
+   for (unsigned c = 0; c < 4; ++c)
+      EXPECT_EQ(program.phys[tuple + c], program.phys[data[c]]);
+   agx_apple9_vir_finish(&program);
+}
+
+TEST(Apple9Allocator, CollectRespectsValuesLiveAcrossVectorStore)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t live = agx_apple9_vir_input(&program, 16);
+   uint32_t data[] = {
+      agx_apple9_vir_input(&program, 2),
+      agx_apple9_vir_input(&program, 4),
+      agx_apple9_vir_input(&program, 6),
+      agx_apple9_vir_input(&program, 8),
+   };
+   uint32_t index = agx_apple9_vir_input(&program, 10);
+   ASSERT_TRUE(
+      agx_apple9_vir_emit_device_store(&program, 0, index, data, 4, 32));
+   ASSERT_TRUE(agx_apple9_vir_add_live_out(&program, live));
+   const uint32_t tuple = program.instructions[0].dest;
+
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+      << (reason ? reason : "");
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
+      << (reason ? reason : "");
+   for (unsigned c = 0; c < 4; ++c)
+      EXPECT_NE(program.phys[tuple + c], program.phys[live]);
+   agx_apple9_vir_finish(&program);
+}
+
 static nir_builder
 apple9_compute_builder(const char *name)
 {
@@ -1670,7 +1813,6 @@ apple9_constant_store_shader(uint32_t value)
    apple9_store_output(&b, gid, nir_imm_int(&b, value));
    return b.shader;
 }
-
 
 static nir_shader *
 apple9_ssbo_reduce_shader(unsigned input_count, bool floating,
@@ -1744,6 +1886,23 @@ apple9_vector_copy_shader(unsigned components)
       nir_load_ssbo(&b, components, 32, nir_imm_int(&b, 1), offset,
                     .access = ACCESS_NON_WRITEABLE, .align_mul = stride);
    nir_store_ssbo(&b, loaded, nir_imm_int(&b, 0), offset);
+   return b.shader;
+}
+
+static nir_shader *
+apple9_vector_alu_store_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_vector_alu_store");
+   b.shader->info.num_ssbos = 2;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *offset = nir_imul_imm(&b, gid, 16);
+   nir_def *loaded =
+      nir_load_ssbo(&b, 4, 32, nir_imm_int(&b, 1), offset,
+                    .access = ACCESS_NON_WRITEABLE, .align_mul = 16);
+   nir_def *lanes[4];
+   for (unsigned c = 0; c < 4; ++c)
+      lanes[c] = nir_iadd_imm(&b, nir_channel(&b, loaded, c), c + 1);
+   nir_store_ssbo(&b, nir_vec(&b, lanes, 4), nir_imm_int(&b, 0), offset);
    return b.shader;
 }
 
@@ -1940,7 +2099,6 @@ TEST(Apple9Compiler, ConstantStoreUsesGenericPipeline)
                          AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
 }
 
-
 TEST(Apple9Compiler, IntegerAndFloatDoNotDependOnInputCount)
 {
    static const enum agx_apple9_compute_abi abi[] = {
@@ -2035,6 +2193,29 @@ TEST(Apple9Compiler, NativeVectorLoadsAndStoresCoverTwoThreeAndFourLanes)
       free(compiled.binary);
       ralloc_free(nir);
    }
+}
+
+TEST(Apple9Compiler, ComputedVectorStoreUsesPreRaTupleCollection)
+{
+   nir_shader *nir = apple9_vector_alu_store_shader();
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   unsigned vector_stores = 0;
+   for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
+      const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
+      if (bytes[0] == 0xe7 && bytes[8] == 0x17) {
+         vector_stores++;
+         EXPECT_EQ(bytes[2], 0x54);
+         EXPECT_EQ(bytes[3] & 1, 0u);
+         EXPECT_LE((bytes[3] >> 1) + 4, 64u);
+      }
+   }
+   EXPECT_EQ(vector_stores, 1u);
+   free(compiled.binary);
+   ralloc_free(nir);
 }
 
 TEST(Apple9Compiler, MaterializedScalarStoreUsesAllocatedSource)

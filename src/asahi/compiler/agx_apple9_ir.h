@@ -21,9 +21,11 @@ extern "C" {
 /*
  * A deliberately small semantic IR for the first real Apple9 compiler.
  *
- * Values are scalar 32-bit SSA virtual registers.  Encoding selection is
- * explicit before allocation, so physical-register constraints come from the
- * Apple9 machine table instead of being implicit in byte templates.
+ * Values are scalar 32-bit SSA virtual registers.  Consecutive values may be
+ * grouped into an adjacent physical-register tuple by an explicit COLLECT
+ * pseudo.  Encoding selection is explicit before allocation, so physical-
+ * register constraints come from the Apple9 machine table instead of being
+ * implicit in byte templates.
  */
 enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_IMM,
@@ -55,6 +57,7 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_FMAX,
    AGX_APPLE9_VIR_FMA,
    AGX_APPLE9_VIR_SELECT,
+   AGX_APPLE9_VIR_COLLECT,
    AGX_APPLE9_VIR_DEVICE_STORE,
 };
 
@@ -147,9 +150,9 @@ struct agx_apple9_vir_instr {
    enum agx_apple9_encoding encoding;
    uint32_t dest;
    /* Number of adjacent SSA values and physical GPRs defined at dest.
-    * Scalar instructions define one value.  Native vector memory loads
-    * define one two-, three-, or four-register tuple with one scoreboard
-    * allocation for the complete tuple. */
+    * Scalar instructions define one value. Native vector memory loads and
+    * COLLECT define one two-, three-, or four-register tuple. A native load
+    * uses one scoreboard allocation for the complete tuple. */
    uint8_t dest_components;
    /* Scalar device-memory element width.  Zero is the established u32
     * default; compiler-authored narrow operations use 8 or 16 explicitly. */
@@ -250,6 +253,12 @@ uint32_t agx_apple9_vir_emit_device_load(
 uint32_t agx_apple9_vir_emit_device_load_vector(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    unsigned components, const struct agx_apple9_device_load_contract *contract);
+/* Form an adjacent register tuple from independent scalar SSA values before
+ * register allocation. The pseudo is coalesced when possible and otherwise
+ * lowered to copies after allocation, following the Apple8 AGX IR model. */
+uint32_t agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
+                                    const uint32_t *src,
+                                    unsigned components);
 bool agx_apple9_vir_emit_device_store(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    const uint32_t *data, unsigned components, unsigned bits);

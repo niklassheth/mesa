@@ -852,27 +852,21 @@ apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op,
 
    /* The immediate ASHR fields are executed only in the proven compact bank.
     * A longer variable-shift graph exposed that the earlier byte-diff-derived
-    * r16-r63 interpretation reads zero on T8132.  Copy through r12/r13, then
-    * return to the general bank so this constraint stays local to the form. */
+    * r16-r63 interpretation reads zero on T8132.  The shift's machine
+    * constraints and source-class propagation place both values in an
+    * arbitrary r0-r15 pair; copy the result back to the general bank. */
    const uint32_t copy_sources[2] = {source, source};
    uint32_t compact_source =
       apple9_dag_emit(lower, AGX_APPLE9_VIR_IOR,
                       AGX_APPLE9_ENC_LOGIC_EXTENDED, copy_sources,
                       ARRAY_SIZE(copy_sources), 0);
-   if (compact_source == AGX_APPLE9_VREG_INVALID ||
-       !agx_apple9_vir_set_fixed_phys(&lower->program, compact_source, 12)) {
-      lower->reason = "could not reserve the Apple9 compact shift source";
+   if (compact_source == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
-   }
    uint32_t shifted = apple9_dag_emit(lower, AGX_APPLE9_VIR_ISHR,
                                       AGX_APPLE9_ENC_SHIFT_EXTENDED,
                                       &compact_source, 1, amount);
-   if (shifted == AGX_APPLE9_VREG_INVALID ||
-       !agx_apple9_vir_set_fixed_phys(&lower->program, shifted, 13)) {
-      lower->reason =
-         "could not reserve the Apple9 compact shift destination";
+   if (shifted == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
-   }
    shifted = apple9_dag_general_copy(lower, shifted);
    if (op != nir_op_ushr || shifted == AGX_APPLE9_VREG_INVALID)
       return shifted;
@@ -1789,10 +1783,57 @@ pack_error:
 }
 
 static bool
+apple9_emit_collect_vir(struct apple9_emitter *emitter,
+                        const struct agx_apple9_vir_instr *instruction,
+                        const uint8_t *phys, unsigned *emission_max_gpr,
+                        const char **reason)
+{
+   const unsigned components = instruction->dest_components;
+   if (instruction->op != AGX_APPLE9_VIR_COLLECT || components < 2 ||
+       components > 4 || instruction->nr_srcs != components)
+      goto invalid;
+
+   for (unsigned c = 0; c < components; ++c) {
+      const unsigned dst = phys[instruction->dest + c];
+      const unsigned src = phys[instruction->src[c]];
+      *emission_max_gpr = MAX2(*emission_max_gpr, MAX2(dst, src));
+      if (dst == src)
+         continue;
+
+      /* Extended IOR(x, x) is the validated general-register bit copy used by
+       * scoreboard materialization. COLLECT is a parallel-copy pseudo, but
+       * the allocator permits only complete coalescing or a disjoint tuple,
+       * so these lane copies cannot clobber a later source. */
+      struct agx_apple9_vir_instr copy = {
+         .op = AGX_APPLE9_VIR_IOR,
+         .encoding = AGX_APPLE9_ENC_LOGIC_EXTENDED,
+         .dest = 0,
+         .dest_components = 1,
+         .src = {1, 1},
+         .nr_srcs = 2,
+         .live_after_mask =
+            (instruction->live_after_mask & (1u << c)) ? 0x3 : 0,
+      };
+      const uint8_t copy_phys[] = {dst, src};
+      struct agx_apple9_packed_instruction packed;
+      if (!agx_apple9_pack_vir_instruction(&copy, copy_phys, &packed, reason) ||
+          !apple9_emit_packed(emitter, &packed))
+         goto invalid;
+   }
+
+   return true;
+
+invalid:
+   if (reason != NULL && *reason == NULL)
+      *reason = "Apple9 COLLECT lowering failed";
+   return false;
+}
+
+static bool
 apple9_emit_device_store_vir(
    struct apple9_emitter *emitter,
    const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
-   unsigned *emission_max_gpr, const char **reason)
+   const char **reason)
 {
    const unsigned components = instruction->memory_components;
    if (instruction->op != AGX_APPLE9_VIR_DEVICE_STORE || components < 1 ||
@@ -1809,37 +1850,8 @@ apple9_emit_device_store_vir(
    for (unsigned c = 1; c < components; ++c)
       adjacent &= data[c] == data[0] + c;
 
-   if (!adjacent) {
-      if (instruction->device_store_form ==
-          AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6)
-         goto invalid;
-
-      unsigned target = AGX_APPLE9_PHYS_INVALID;
-      for (unsigned base = 2; base + components <= 14; ++base) {
-         bool free = index < base || index >= base + components;
-         for (unsigned c = 0; c < components; ++c)
-            free &= data[c] < base || data[c] >= base + components;
-         if (free) {
-            target = base;
-            break;
-         }
-      }
-      if (target == AGX_APPLE9_PHYS_INVALID) {
-         if (reason != NULL)
-            *reason =
-               "Apple9 vector-store legalization found no adjacent scratch tuple";
-         return false;
-      }
-
-      for (unsigned c = 0; c < components; ++c) {
-         if (!agx_apple9_pack_mov(target + c, data[c], &packed) ||
-             !apple9_emit_packed(emitter, &packed))
-            goto invalid;
-         data[c] = target + c;
-      }
-      *emission_max_gpr =
-         MAX2(*emission_max_gpr, target + components - 1);
-   }
+   if (!adjacent)
+      goto invalid;
 
    bool packed_ok =
       components == 1
@@ -2097,10 +2109,18 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
       const struct agx_apple9_vir_instr *instruction =
          &lower.program.instructions[i];
+      if (instruction->op == AGX_APPLE9_VIR_COLLECT) {
+         if (!apple9_emit_collect_vir(&emitter, instruction,
+                                      lower.program.phys, &emission_max_gpr,
+                                      reason)) {
+            util_dynarray_fini(&emitter.bytes);
+            goto fail;
+         }
+         continue;
+      }
       if (instruction->op == AGX_APPLE9_VIR_DEVICE_STORE) {
          if (!apple9_emit_device_store_vir(
-                &emitter, instruction, lower.program.phys, &emission_max_gpr,
-                reason)) {
+                &emitter, instruction, lower.program.phys, reason)) {
             util_dynarray_fini(&emitter.bytes);
             goto fail;
          }

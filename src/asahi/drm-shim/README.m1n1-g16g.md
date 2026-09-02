@@ -27,6 +27,9 @@ fails during compilation and the triangle is not a regression gate.
   values, not a second provenance system.
 - The allocator supports the measured r0-r63 bank, scalar and adjacent tuple
   classes, copies around constrained instructions, and last-use release.
+  Independent vector lanes are joined by a pre-allocation `COLLECT` pseudo,
+  coalesced when already adjacent, and otherwise copied after allocation;
+  vector stores never borrow an untracked scratch tuple after allocation.
   Spilling is not implemented and excess pressure fails compilation.
 - Gallium owns the compute archive, compiler state, resource records, launch
   wrapper selection, CDM command, BOs, VM bindings, and ordinary

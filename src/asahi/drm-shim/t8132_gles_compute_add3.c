@@ -125,6 +125,7 @@ enum workload {
    WORKLOAD_VECTOR2_COPY,
    WORKLOAD_VECTOR3_COPY,
    WORKLOAD_VECTOR4_COPY,
+   WORKLOAD_VECTOR4_ALU_STORE,
    WORKLOAD_MIXED,
    WORKLOAD_DEPENDENT_INDEX,
    WORKLOAD_NESTED_DEPENDENT,
@@ -170,6 +171,8 @@ workload_name(enum workload workload)
       return "vector3-copy";
    case WORKLOAD_VECTOR4_COPY:
       return "vector4-copy";
+   case WORKLOAD_VECTOR4_ALU_STORE:
+      return "vector4-alu-store";
    case WORKLOAD_MIXED:
       return "mixed";
    case WORKLOAD_DEPENDENT_INDEX:
@@ -406,6 +409,17 @@ build_program(enum workload workload)
       "layout(std430, binding=1) buffer Output { uvec4 v[]; } outbuf;\n"
       "void main() { uint i = gl_GlobalInvocationID.x; outbuf.v[i] = a.v[i]; }\n";
 
+   static const char vector4_alu_store[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430, binding=0) readonly buffer InputA { uvec4 v[]; } a;\n"
+      "layout(std430, binding=1) buffer Output { uvec4 v[]; } outbuf;\n"
+      "void main() {\n"
+      "  uint i = gl_GlobalInvocationID.x;\n"
+      "  uvec4 x = a.v[i];\n"
+      "  outbuf.v[i] = x + uvec4(1u, 2u, 3u, 4u);\n"
+      "}\n";
+
    static const char dependent_index[] =
       "#version 310 es\n"
       "layout(local_size_x=32) in;\n"
@@ -514,6 +528,9 @@ build_program(enum workload workload)
       break;
    case WORKLOAD_VECTOR4_COPY:
       source = vector4_copy;
+      break;
+   case WORKLOAD_VECTOR4_ALU_STORE:
+      source = vector4_alu_store;
       break;
    case WORKLOAD_MIXED:
       source = mixed;
@@ -693,14 +710,18 @@ write_expected_output(enum workload workload, uint8_t *output,
    for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
       if (workload == WORKLOAD_VECTOR2_COPY ||
           workload == WORKLOAD_VECTOR3_COPY ||
-          workload == WORKLOAD_VECTOR4_COPY) {
+          workload == WORKLOAD_VECTOR4_COPY ||
+          workload == WORKLOAD_VECTOR4_ALU_STORE) {
          const unsigned components = workload == WORKLOAD_VECTOR2_COPY   ? 2
                                      : workload == WORKLOAD_VECTOR3_COPY ? 3
                                                                          : 4;
          const unsigned stride = components == 2 ? 2 : 4;
          for (unsigned c = 0; c < components; ++c) {
+            uint32_t value = input_a_bits(slot, i * stride + c);
+            if (workload == WORKLOAD_VECTOR4_ALU_STORE)
+               value += c + 1;
             write_word(output, base + (i * stride + c) * sizeof(uint32_t),
-                       input_a_bits(slot, i * stride + c));
+                       value);
          }
          continue;
       }
@@ -776,6 +797,7 @@ write_expected_output(enum workload workload, uint8_t *output,
       case WORKLOAD_VECTOR2_COPY:
       case WORKLOAD_VECTOR3_COPY:
       case WORKLOAD_VECTOR4_COPY:
+      case WORKLOAD_VECTOR4_ALU_STORE:
          fail("unreachable vector-copy oracle");
          break;
       case WORKLOAD_MIXED: {
@@ -910,15 +932,17 @@ main(int argc, char **argv)
          : DEFAULT_DISPATCHES_PER_SUBMISSION;
    enum workload workload = argc >= 4 ? parse_workload(argv[3]) : WORKLOAD_ADD3;
    static const enum workload vector_suite[] = {
-      WORKLOAD_VECTOR2_COPY,   WORKLOAD_VECTOR3_COPY,  WORKLOAD_VECTOR4_COPY,
-      WORKLOAD_VECTOR_SWIZZLE, WORKLOAD_VECTOR_FANOUT,
+      WORKLOAD_VECTOR2_COPY,      WORKLOAD_VECTOR3_COPY,
+      WORKLOAD_VECTOR4_COPY,      WORKLOAD_VECTOR4_ALU_STORE,
+      WORKLOAD_VECTOR_SWIZZLE,    WORKLOAD_VECTOR_FANOUT,
    };
    static const enum workload bringup_suite[] = {
       WORKLOAD_VECTOR2_COPY,    WORKLOAD_VECTOR3_COPY,
-      WORKLOAD_VECTOR4_COPY,    WORKLOAD_VECTOR_SWIZZLE,
-      WORKLOAD_VECTOR_FANOUT,   WORKLOAD_SYSTEM_LOAD_INDEX,
-      WORKLOAD_SYSTEM_GRID3D,   WORKLOAD_SPARSE_BINDINGS,
-      WORKLOAD_AOS_LOAD,        WORKLOAD_AOS_STORE,
+      WORKLOAD_VECTOR4_COPY,    WORKLOAD_VECTOR4_ALU_STORE,
+      WORKLOAD_VECTOR_SWIZZLE,  WORKLOAD_VECTOR_FANOUT,
+      WORKLOAD_SYSTEM_LOAD_INDEX, WORKLOAD_SYSTEM_GRID3D,
+      WORKLOAD_SPARSE_BINDINGS, WORKLOAD_AOS_LOAD,
+      WORKLOAD_AOS_STORE,
    };
    const enum workload *suite = NULL;
    unsigned suite_cases = 1;
@@ -1020,6 +1044,8 @@ main(int argc, char **argv)
       const bool has_one_input = active_workload == WORKLOAD_VECTOR2_COPY ||
                                  active_workload == WORKLOAD_VECTOR3_COPY ||
                                  active_workload == WORKLOAD_VECTOR4_COPY ||
+                                 active_workload ==
+                                    WORKLOAD_VECTOR4_ALU_STORE ||
                                  active_workload == WORKLOAD_SYSTEM_LOAD_INDEX ||
                                  active_workload == WORKLOAD_AOS_LOAD ||
                                  active_workload == WORKLOAD_AOS_STORE;

@@ -279,6 +279,65 @@ agx_apple9_vir_emit_device_load_vector(
    return value;
 }
 
+uint32_t
+agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
+                            const uint32_t *src, unsigned components)
+{
+   if (program == NULL || src == NULL || components < 2 || components > 4)
+      return AGX_APPLE9_VREG_INVALID;
+
+   for (unsigned c = 0; c < components; ++c) {
+      if (src[c] >= program->value_count)
+         return AGX_APPLE9_VREG_INVALID;
+   }
+
+   const uint32_t dest = program->value_count;
+   if (!apple9_vir_append_values(program, components))
+      return AGX_APPLE9_VREG_INVALID;
+
+   struct agx_apple9_vir_instr *instruction =
+      apple9_vir_append_instruction(program);
+   if (instruction == NULL) {
+      program->value_count = dest;
+      return AGX_APPLE9_VREG_INVALID;
+   }
+
+   *instruction = (struct agx_apple9_vir_instr){
+      .op = AGX_APPLE9_VIR_COLLECT,
+      .encoding = AGX_APPLE9_ENC_PSEUDO,
+      .dest = dest,
+      .dest_components = components,
+      .nr_srcs = components,
+   };
+   for (unsigned c = 0; c < components; ++c)
+      instruction->src[c] = src[c];
+
+   return dest;
+}
+
+static bool
+apple9_vir_values_form_tuple(const struct agx_apple9_vir_program *program,
+                             const uint32_t *values, unsigned components)
+{
+   if (components < 2 || components > 4)
+      return false;
+
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *instruction =
+         &program->instructions[i];
+      if (instruction->dest != values[0] ||
+          instruction->dest_components != components)
+         continue;
+
+      bool exact = true;
+      for (unsigned c = 0; c < components; ++c)
+         exact &= values[c] == instruction->dest + c;
+      return exact;
+   }
+
+   return false;
+}
+
 bool
 agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
                                  unsigned binding, uint32_t index,
@@ -296,10 +355,23 @@ agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
          return false;
    }
 
+   const unsigned old_instruction_count = program->instruction_count;
+   const unsigned old_value_count = program->value_count;
+   uint32_t tuple = AGX_APPLE9_VREG_INVALID;
+   if (components > 1 &&
+       !apple9_vir_values_form_tuple(program, data, components)) {
+      tuple = agx_apple9_vir_emit_collect(program, data, components);
+      if (tuple == AGX_APPLE9_VREG_INVALID)
+         return false;
+   }
+
    struct agx_apple9_vir_instr *instruction =
       apple9_vir_append_instruction(program);
-   if (instruction == NULL)
+   if (instruction == NULL) {
+      program->instruction_count = old_instruction_count;
+      program->value_count = old_value_count;
       return false;
+   }
 
    *instruction = (struct agx_apple9_vir_instr){
       .op = AGX_APPLE9_VIR_DEVICE_STORE,
@@ -312,7 +384,8 @@ agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
       .device_store_form = AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU,
    };
    for (unsigned c = 0; c < components; ++c)
-      instruction->src[c] = data[c];
+      instruction->src[c] = tuple == AGX_APPLE9_VREG_INVALID ? data[c]
+                                                             : tuple + c;
    instruction->src[components] = index;
    return true;
 }
@@ -457,8 +530,8 @@ encoding_tuple(const struct agx_apple9_vir_instr *instruction,
           instruction->nr_srcs != components + 1)
          return false;
 
-      /* Machine-table order is address then data base.  The remaining vector
-       * lanes are an adjacency constraint legalized at final emission. */
+      /* Machine-table order is address then data base.  COLLECT has already
+       * made the remaining vector lanes adjacent before allocation. */
       gprs[0] = phys[instruction->src[components]];
       gprs[1] = phys[instruction->src[0]];
       *count = 2;
@@ -521,16 +594,29 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
             return false;
          }
 
+         if (instruction->encoding != AGX_APPLE9_ENC_DEVICE_STORE) {
+            if (reason != NULL)
+               *reason =
+                  "Apple9 device store form disagrees with its machine encoding";
+            return false;
+         }
+
          const unsigned allocation_bits = bits == 8 ? 16 : bits;
          const unsigned data = program->phys[instruction->src[0]];
          const unsigned index = program->phys[instruction->src[components]];
+         bool adjacent = true;
+         for (unsigned c = 1; c < components; ++c)
+            adjacent &= program->phys[instruction->src[c]] == data + c;
          if (!agx_apple9_encoding_accepts_gpr(
                 instruction->encoding, AGX_APPLE9_OPERAND_INDEX, index, 32) ||
              !agx_apple9_encoding_accepts_gpr(
                 instruction->encoding, AGX_APPLE9_OPERAND_STORE_DATA, data,
-                allocation_bits)) {
+                allocation_bits) ||
+             !adjacent) {
             if (reason != NULL)
-               *reason = "Apple9 device store violates an encoding constraint";
+               *reason = adjacent
+                            ? "Apple9 device store violates an encoding constraint"
+                            : "Apple9 vector store source is not an adjacent GPR tuple";
             return false;
          }
 
@@ -566,7 +652,8 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       const unsigned components = apple9_vir_dest_components(instruction);
       if (components > 4 || components > program->value_count ||
           instruction->dest > program->value_count - components ||
-          (components > 1 && instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD)) {
+          (components > 1 && instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD &&
+           instruction->op != AGX_APPLE9_VIR_COLLECT)) {
          if (reason != NULL)
             *reason = "Apple9 instruction has an invalid destination tuple";
          return false;
@@ -590,6 +677,40 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
             return false;
          }
       }
+
+      if (instruction->op == AGX_APPLE9_VIR_COLLECT) {
+         if (components < 2 || instruction->nr_srcs != components ||
+             instruction->encoding != AGX_APPLE9_ENC_PSEUDO ||
+             instruction->memory_bits != 0 ||
+             instruction->memory_components != 0 ||
+             instruction->producer_scoreboard_slot !=
+                AGX_APPLE9_SCOREBOARD_SLOT_NONE ||
+             instruction->scoreboard_slot !=
+                AGX_APPLE9_SCOREBOARD_SLOT_NONE) {
+            if (reason != NULL)
+               *reason = "Apple9 COLLECT has an invalid VIR contract";
+            return false;
+         }
+
+         bool identity = true;
+         bool disjoint = true;
+         for (unsigned d = 0; d < components; ++d) {
+            identity &= program->phys[instruction->dest + d] ==
+                        program->phys[instruction->src[d]];
+            for (unsigned s = 0; s < components; ++s) {
+               disjoint &= program->phys[instruction->dest + d] !=
+                           program->phys[instruction->src[s]];
+            }
+         }
+         if (!identity && !disjoint) {
+            if (reason != NULL)
+               *reason =
+                  "Apple9 COLLECT allocation requires an unsupported overlapping shuffle";
+            return false;
+         }
+         continue;
+      }
+
       unsigned tuple[AGX_APPLE9_MAX_ENCODING_OPERANDS] = {0};
       unsigned tuple_count = 0;
       if (!encoding_tuple(instruction, program->phys, tuple, &tuple_count) ||
@@ -662,6 +783,80 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
    return true;
 }
 
+static bool
+apple9_propagate_source_register_classes(struct agx_apple9_vir_program *program,
+                                         const char **reason)
+{
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *instruction =
+         &program->instructions[i];
+      if (instruction->encoding == AGX_APPLE9_ENC_PSEUDO)
+         continue;
+
+      if (instruction->op == AGX_APPLE9_VIR_DEVICE_STORE) {
+         const unsigned components = instruction->memory_components;
+         if (components < 1 || components > 4 ||
+             instruction->nr_srcs != components + 1)
+            goto invalid;
+
+         const struct agx_apple9_operand_constraint *data =
+            agx_apple9_find_operand(instruction->encoding,
+                                    AGX_APPLE9_OPERAND_STORE_DATA);
+         const struct agx_apple9_operand_constraint *index =
+            agx_apple9_find_operand(instruction->encoding,
+                                    AGX_APPLE9_OPERAND_INDEX);
+         if (data == NULL || index == NULL)
+            goto invalid;
+
+         for (unsigned c = 0; c < components; ++c) {
+            const uint32_t value = instruction->src[c];
+            if (value >= program->value_count || data->max_index + c >= 0xff)
+               goto invalid;
+            const uint8_t maximum = data->max_index + c;
+            if (program->max_phys[value] == AGX_APPLE9_PHYS_INVALID ||
+                maximum < program->max_phys[value])
+               program->max_phys[value] = maximum;
+         }
+
+         const uint32_t value = instruction->src[components];
+         if (value >= program->value_count)
+            goto invalid;
+         if (program->max_phys[value] == AGX_APPLE9_PHYS_INVALID ||
+             index->max_index < program->max_phys[value])
+            program->max_phys[value] = index->max_index;
+         continue;
+      }
+
+      const struct agx_apple9_encoding_info *info =
+         agx_apple9_encoding_info(instruction->encoding);
+      unsigned source = 0;
+      for (unsigned operand = 0; operand < info->operand_count; ++operand) {
+         const struct agx_apple9_operand_constraint *constraint =
+            &info->operands[operand];
+         if (!(constraint->files & AGX_APPLE9_FILE_GPR) ||
+             constraint->role == AGX_APPLE9_OPERAND_DEST)
+            continue;
+         if (source >= instruction->nr_srcs ||
+             instruction->src[source] >= program->value_count)
+            goto invalid;
+
+         const uint32_t value = instruction->src[source++];
+         if (program->max_phys[value] == AGX_APPLE9_PHYS_INVALID ||
+             constraint->max_index < program->max_phys[value])
+            program->max_phys[value] = constraint->max_index;
+      }
+      if (source != instruction->nr_srcs)
+         goto invalid;
+   }
+
+   return true;
+
+invalid:
+   if (reason != NULL)
+      *reason = "Apple9 VIR has an invalid source register-class contract";
+   return false;
+}
+
 bool
 agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                         const char **reason)
@@ -679,6 +874,9 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          *reason = "Apple9 virtual IR has neither an output nor a store";
       return false;
    }
+
+   if (!apple9_propagate_source_register_classes(program, reason))
+      return false;
 
    unsigned *last_use = calloc(program->value_count, sizeof(*last_use));
    bool *defined = calloc(program->value_count, sizeof(*defined));
@@ -913,15 +1111,36 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          has_fixed = true;
       }
 
+      bool coalesced_collect = false;
+      if (instruction->op == AGX_APPLE9_VIR_COLLECT &&
+          instruction->nr_srcs == components) {
+         const unsigned candidate = phys[instruction->src[0]];
+         bool exact = candidate != AGX_APPLE9_PHYS_INVALID &&
+                      candidate + components <= AGX_APPLE9_GPR_COUNT &&
+                      (!has_fixed || selected == candidate);
+         for (unsigned c = 0; c < components && exact; ++c) {
+            const uint32_t source = instruction->src[c];
+            exact &= phys[source] == candidate + c && last_use[source] == i &&
+                     !program->reserved_gprs[candidate + c] &&
+                     !fixed_gpr[candidate + c];
+         }
+         if (exact) {
+            selected = candidate;
+            coalesced_collect = true;
+         }
+      }
+
       const struct agx_apple9_operand_constraint *dest_constraint =
-         agx_apple9_find_operand(instruction->encoding,
-                                 AGX_APPLE9_OPERAND_DEST);
+         instruction->op == AGX_APPLE9_VIR_COLLECT
+            ? NULL
+            : agx_apple9_find_operand(instruction->encoding,
+                                      AGX_APPLE9_OPERAND_DEST);
       unsigned range_first[2] = {APPLE9_FIRST_ALLOCATABLE_GPR,
                                  APPLE9_FIRST_ALLOCATABLE_GPR};
       unsigned range_last[2] = {APPLE9_LAST_ALLOCATABLE_GPR,
                                 APPLE9_LAST_ALLOCATABLE_GPR};
       unsigned range_count = 1;
-      if (has_fixed) {
+      if (has_fixed || coalesced_collect) {
          range_first[0] = range_last[0] = selected;
       } else if (dest_constraint != NULL &&
                  dest_constraint->max_index >= APPLE9_FIRST_GENERAL_GPR) {
@@ -965,8 +1184,9 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                 !has_fixed)
                break;
             if (base + components > AGX_APPLE9_GPR_COUNT ||
-                !agx_apple9_encoding_accepts_gpr(
-                   instruction->encoding, AGX_APPLE9_OPERAND_DEST, base, 32))
+                (instruction->op != AGX_APPLE9_VIR_COLLECT &&
+                 !agx_apple9_encoding_accepts_gpr(
+                    instruction->encoding, AGX_APPLE9_OPERAND_DEST, base, 32)))
                continue;
 
             bool compatible = true;
@@ -981,7 +1201,14 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                if (owner[gpr] == -1 || (owner[gpr] == -2 && fixed == gpr))
                   continue;
 
-               if (!has_fixed) {
+               if (coalesced_collect) {
+                  compatible &=
+                     owner[gpr] == (int32_t)instruction->src[c] &&
+                     last_use[instruction->src[c]] == i;
+                  continue;
+               }
+
+               if (!has_fixed || instruction->op == AGX_APPLE9_VIR_COLLECT) {
                   compatible = false;
                   break;
                }
@@ -1076,13 +1303,14 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          for (unsigned earlier = 0; earlier < s; ++earlier)
             duplicate |= instruction->src[earlier] == value;
          if (last_use[value] == i && !duplicate) {
-            if (owner[phys[value]] == (int32_t)value)
+            if (owner[phys[value]] == (int32_t)value) {
                owner[phys[value]] = (program->reserved_gprs[phys[value]] ||
                                      fixed_gpr[phys[value]])
                                        ? -2
                                        : -1;
-            assert(live > 0);
-            --live;
+               assert(live > 0);
+               --live;
+            }
          }
       }
 
@@ -1228,8 +1456,10 @@ apple9_materialize_load(struct agx_apple9_vir_program *program,
                instruction->src[s] = materialized[c];
          }
       }
-      if (instruction->op == AGX_APPLE9_VIR_DEVICE_STORE)
+      if (instruction->op == AGX_APPLE9_VIR_DEVICE_STORE) {
          instruction->device_store_form = AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU;
+         instruction->encoding = AGX_APPLE9_ENC_DEVICE_STORE;
+      }
    }
    for (unsigned c = 0; c < components; ++c) {
       if (program->output == load + c)
@@ -1319,6 +1549,7 @@ apple9_classify_direct_device_stores(struct agx_apple9_vir_program *program)
          continue;
 
       store->device_store_form = AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU;
+      store->encoding = AGX_APPLE9_ENC_DEVICE_STORE;
       const unsigned components = store->memory_components;
       const struct agx_apple9_vir_instr *producer =
          apple9_vir_producer_instruction(program, store->src[0]);
@@ -1356,6 +1587,51 @@ apple9_classify_direct_device_stores(struct agx_apple9_vir_program *program)
          store->device_store_form =
             AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6;
    }
+}
+
+/* Scoreboard legalization may replace a native vector load tuple with one
+ * scalar materialization per lane.  Re-establish the ordinary vector-source
+ * invariant after that rewrite, but leave the proven direct slot-6 handoff
+ * untouched. */
+static bool
+apple9_collect_vector_store_sources(struct agx_apple9_vir_program *program,
+                                    const char **reason)
+{
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      struct agx_apple9_vir_instr *store = &program->instructions[i];
+      const unsigned components = store->memory_components;
+      if (store->op != AGX_APPLE9_VIR_DEVICE_STORE || components < 2 ||
+          store->device_store_form ==
+             AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6 ||
+          apple9_vir_values_form_tuple(program, store->src, components))
+         continue;
+
+      uint32_t sources[4];
+      for (unsigned c = 0; c < components; ++c)
+         sources[c] = store->src[c];
+
+      const unsigned old_count = program->instruction_count;
+      const uint32_t tuple =
+         agx_apple9_vir_emit_collect(program, sources, components);
+      if (tuple == AGX_APPLE9_VREG_INVALID) {
+         if (reason != NULL)
+            *reason = "out of memory collecting Apple9 vector-store sources";
+         return false;
+      }
+
+      const struct agx_apple9_vir_instr collect =
+         program->instructions[old_count];
+      memmove(&program->instructions[i + 1], &program->instructions[i],
+              (old_count - i) * sizeof(*program->instructions));
+      program->instructions[i] = collect;
+      store = &program->instructions[i + 1];
+      for (unsigned c = 0; c < components; ++c)
+         store->src[c] = tuple + c;
+
+      ++i;
+   }
+
+   return true;
 }
 
 static bool
@@ -1600,7 +1876,7 @@ agx_apple9_assign_vir_scoreboard_slots(struct agx_apple9_vir_program *program,
    }
 
    free(handoff_slot);
-   return true;
+   return apple9_collect_vector_store_sources(program, reason);
 
 fail:
    free(handoff_slot);
@@ -1897,7 +2173,7 @@ agx_apple9_pack_device_store_scalar(
       return false;
    uint8_t bytes[14] = {
       0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x21,
-      0x00, 0x11, 0x00, 0x00, 0x10, 0x11, 0x00,
+      0x00, 0x11, 0x00, 0x00, 0x90, 0x11, 0x00,
    };
    if (form == AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6)
       bytes[2] = 0x56;
@@ -2388,10 +2664,10 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
 
    switch (instruction->op) {
    case AGX_APPLE9_VIR_IMM:
-      if (instruction->immediate <= 0x7f &&
-          agx_apple9_pack_mov_imm(phys[instruction->dest],
-                                  instruction->immediate, packed))
-         return true;
+      if (instruction->encoding == AGX_APPLE9_ENC_MOV_IMM_COMPACT)
+         return instruction->immediate <= 0x7f &&
+                agx_apple9_pack_mov_imm(phys[instruction->dest],
+                                        instruction->immediate, packed);
       break;
    case AGX_APPLE9_VIR_GET_GLOBAL_ID:
       return agx_apple9_pack_get_global_id(phys[instruction->dest],
@@ -2458,7 +2734,8 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
       const unsigned components = instruction->memory_components;
       if (components < 1 || components > 4 ||
           instruction->nr_srcs != components + 1 ||
-          instruction->immediate > UINT8_MAX)
+          instruction->immediate > UINT8_MAX ||
+          instruction->encoding != AGX_APPLE9_ENC_DEVICE_STORE)
          break;
 
       const unsigned data = phys[instruction->src[0]];
@@ -2520,6 +2797,8 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
       return pack_fma(instruction, phys, packed);
    case AGX_APPLE9_VIR_SELECT:
       return pack_select(instruction, phys, packed);
+   case AGX_APPLE9_VIR_COLLECT:
+      break;
    }
 
    if (reason != NULL)

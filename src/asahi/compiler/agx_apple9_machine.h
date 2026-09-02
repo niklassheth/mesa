@@ -109,6 +109,10 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_DEVICE_LOAD,
    AGX_APPLE9_ENC_DEVICE_STORE,
    AGX_APPLE9_ENC_COUNT,
+
+   /* Semantic IR pseudos have no machine encoding.  Keep them out of the
+    * encoding table while making an accidental table lookup fail loudly. */
+   AGX_APPLE9_ENC_PSEUDO = 0xff,
 };
 
 #define AGX_APPLE9_MAX_ENCODING_OPERANDS 5
