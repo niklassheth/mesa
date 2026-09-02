@@ -59,7 +59,6 @@ enum agx_apple9_vir_opcode {
 };
 
 enum agx_apple9_device_store_form {
-   AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU,
    AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU,
 
    /* The native direct-copy corpus always feeds the 0x56 store from a

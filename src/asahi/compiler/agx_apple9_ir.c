@@ -1318,9 +1318,6 @@ apple9_classify_direct_device_stores(struct agx_apple9_vir_program *program)
       if (store->op != AGX_APPLE9_VIR_DEVICE_STORE)
          continue;
 
-      if (store->device_store_form == AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU)
-         continue;
-
       store->device_store_form = AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU;
       const unsigned components = store->memory_components;
       const struct agx_apple9_vir_instr *producer =
@@ -1895,16 +1892,13 @@ agx_apple9_pack_device_store_scalar(
        (bits != 32 && data != 0) ||
        (bits != 32 &&
         form == AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6) ||
-       (form != AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU &&
-        form != AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU &&
+       (form != AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU &&
         form != AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6))
       return false;
    uint8_t bytes[14] = {
-      0xe7, 0x10, 0x54, 0x00, 0x00, 0x00, 0x21,
-      0x00, 0x11, 0x00, 0x00, 0x90, 0x11, 0x00,
+      0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x21,
+      0x00, 0x11, 0x00, 0x00, 0x10, 0x11, 0x00,
    };
-   if (form != AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU)
-      bytes[1] = 0x00;
    if (form == AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6)
       bytes[2] = 0x56;
    bytes[3] = data << 1;
@@ -1931,8 +1925,7 @@ agx_apple9_pack_device_store_vector_u32(
 {
    if (components < 1 || components > 4 || data + components > 64 ||
        index >= AGX_APPLE9_GPR_COUNT || binding > UINT8_MAX ||
-       (form != AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU &&
-        form != AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU &&
+       (form != AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU &&
         form != AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6))
       return false;
 
@@ -1945,7 +1938,7 @@ agx_apple9_pack_device_store_vector_u32(
 
    uint8_t bytes[14] = {
       0xe7,
-      form == AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU ? 0x10 : 0x00,
+      0x00,
       form == AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6 ? 0x56 : 0x54,
       (uint8_t)(data << 1),
       (uint8_t)binding,
@@ -1955,7 +1948,7 @@ agx_apple9_pack_device_store_vector_u32(
       (uint8_t)(0x11 | width_token_bits[components - 1]),
       0x00,
       0x00,
-      form == AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU ? 0x90 : 0x10,
+      0x10,
       width_tail[components - 1],
       0x00,
    };

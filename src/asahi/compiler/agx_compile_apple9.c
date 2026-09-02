@@ -1805,34 +1805,6 @@ apple9_emit_device_store_vir(
       data[c] = phys[instruction->src[c]];
    const unsigned index = phys[instruction->src[components]];
 
-   if (instruction->device_store_form ==
-       AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU) {
-      if (components != 1 ||
-          !agx_apple9_pack_mov_imm(14, 0, &packed) ||
-          !apple9_emit_packed(emitter, &packed))
-         goto invalid;
-
-      struct agx_apple9_vir_instr deliver = {
-         .op = AGX_APPLE9_VIR_IADD,
-         .encoding = AGX_APPLE9_ENC_INT_ADD_EXTENDED,
-         .dest = 0,
-         .dest_components = 1,
-         .src = {1, 2},
-         .nr_srcs = 2,
-      };
-      const uint8_t deliver_phys[] = {0, data[0], 14};
-      if (!agx_apple9_pack_vir_instruction(&deliver, deliver_phys, &packed,
-                                           reason) ||
-          !apple9_emit_packed(emitter, &packed) ||
-          !agx_apple9_pack_device_store_scalar(
-             0, index, instruction->immediate, instruction->memory_bits,
-             instruction->device_store_form, &packed) ||
-          !apple9_emit_packed(emitter, &packed))
-         goto invalid;
-      *emission_max_gpr = MAX2(*emission_max_gpr, 14);
-      return true;
-   }
-
    bool adjacent = true;
    for (unsigned c = 1; c < components; ++c)
       adjacent &= data[c] == data[0] + c;
@@ -2076,11 +2048,6 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       *reason = "could not emit the Apple9 VIR device store";
       goto fail;
    }
-   struct agx_apple9_vir_instr *vir_store =
-      &lower.program.instructions[lower.program.instruction_count - 1];
-   if (input_count == 0 && output_components == 1)
-      vir_store->device_store_form = AGX_APPLE9_DEVICE_STORE_PUBLISHED_ALU;
-
    apple9_infer_device_load_index_contracts(&lower.program);
 
    if (!agx_apple9_assign_vir_scoreboard_slots(&lower.program, reason))
