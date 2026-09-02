@@ -298,6 +298,16 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
        profile->required_threadgroup_memory_bytes != 0)
       return false;
 
+   const uint32_t resource_mask = BITFIELD_MASK(abi->resource_count);
+   const uint32_t read_mask = profile->resource_binding_count
+                                 ? profile->resource_read_mask
+                                 : abi->ssbo_read_mask;
+   const uint32_t write_mask = profile->resource_binding_count
+                                  ? profile->resource_write_mask
+                                  : abi->ssbo_write_mask;
+   if (!write_mask || ((read_mask | write_mask) & ~resource_mask))
+      return false;
+
    uint64_t local_threads = 1;
    for (unsigned d = 0; d < 3; ++d) {
       if (profile->variable_local_size) {
@@ -313,7 +323,7 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
 
    for (unsigned i = 0; i < abi->resource_count; ++i) {
       if (profile->resource_kind[i] > AGX_APPLE9_COMPUTE_RESOURCE_UBO ||
-          ((abi->ssbo_write_mask & BITFIELD_BIT(i)) &&
+          ((write_mask & BITFIELD_BIT(i)) &&
            profile->resource_kind[i] != AGX_APPLE9_COMPUTE_RESOURCE_SSBO))
          return false;
    }
@@ -678,14 +688,20 @@ uint32_t
 agx_apple9_compute_read_mask(const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi ? abi->ssbo_read_mask : 0;
+   return abi ? (profile->resource_binding_count
+                    ? profile->resource_read_mask
+                    : abi->ssbo_read_mask)
+              : 0;
 }
 
 uint32_t
 agx_apple9_compute_write_mask(const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi ? abi->ssbo_write_mask : 0;
+   return abi ? (profile->resource_binding_count
+                    ? profile->resource_write_mask
+                    : abi->ssbo_write_mask)
+              : 0;
 }
 
 uint32_t

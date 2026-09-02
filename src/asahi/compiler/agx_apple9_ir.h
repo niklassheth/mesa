@@ -336,7 +336,9 @@ bool agx_apple9_pack_device_load_u32_raw(
 /* Aligned native vector memory forms.  A load defines components consecutive
  * 32-bit GPRs beginning at dst and publishes the complete tuple through one
  * scoreboard slot.  A store consumes components consecutive GPRs beginning
- * at data and allocates no scoreboard slot of its own. */
+ * at data and allocates no scoreboard slot of its own.  Device-store
+ * access_desc bit 0 is the index last-use control: clear retains the index
+ * GPR and set releases it after the address read. */
 bool agx_apple9_pack_device_load_vector_u32_raw(
    unsigned dst, unsigned index, unsigned binding, unsigned components,
    enum agx_apple9_device_load_index_kind index_kind, uint8_t group_flags,
@@ -349,11 +351,11 @@ bool agx_apple9_pack_device_load_scalar_raw(
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_store_scalar(
    unsigned data, unsigned index, unsigned binding, unsigned bits,
-   enum agx_apple9_device_store_form form,
+   enum agx_apple9_device_store_form form, bool release_index,
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_store_vector_u32(
    unsigned data, unsigned index, unsigned binding, unsigned components,
-   enum agx_apple9_device_store_form form,
+   enum agx_apple9_device_store_form form, bool release_index,
    struct agx_apple9_packed_instruction *packed);
 
 #ifdef __cplusplus

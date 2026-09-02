@@ -53,6 +53,9 @@ struct agx_apple9_compute_profile {
    uint8_t resource_binding_count;
    uint8_t resource_binding[4];
    enum agx_apple9_compute_resource_kind resource_kind[4];
+   /* Read/write ownership masks in native package-argument order. */
+   uint8_t resource_read_mask;
+   uint8_t resource_write_mask;
 
    /* Shader-local dispatch and linear invocation-index contract. */
    bool variable_local_size;

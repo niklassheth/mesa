@@ -243,47 +243,64 @@ apple9_element_index(nir_def *offset, nir_scalar *index, unsigned *index_scale,
 {
    if (element_size != 1 && element_size != 2 && element_size != 4)
       return false;
-   nir_scalar scalar = apple9_chase_trivial(nir_get_scalar(offset, 0));
-   uint32_t byte_add = 0;
+   nir_scalar candidate = apple9_chase_trivial(nir_get_scalar(offset, 0));
+   uint64_t byte_stride = 1;
+   uint64_t byte_add = 0;
 
-   /* Peel a constant structure-field displacement.  The remaining expression
-    * still names the semantic array index; scale/add are carried explicitly
-    * into instruction selection and runtime bounds metadata. */
-   if (nir_def_instr_type(scalar.def) == nir_instr_type_alu &&
-       nir_scalar_alu_op(scalar) == nir_op_iadd) {
+   /* Canonicalize the complete constant affine shell, independent of whether
+    * NIR spells it as (i * stride + add), ((i * inner) + add) * outer, or
+    * shifts.  This matters for multiple stores: algebraically identical
+    * buffer layouts must select the same dispatch and bounds contract. */
+   for (unsigned depth = 0; depth < 32; ++depth) {
+      candidate = apple9_chase_trivial(candidate);
+      if (nir_def_instr_type(candidate.def) != nir_instr_type_alu)
+         break;
+
+      nir_op op = nir_scalar_alu_op(candidate);
       nir_scalar left =
-         apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
+         apple9_chase_trivial(nir_scalar_chase_alu_src(candidate, 0));
       nir_scalar right =
-         apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
-      if (apple9_const_u32(right, &byte_add))
-         scalar = left;
-      else if (apple9_const_u32(left, &byte_add))
-         scalar = right;
-   }
+         apple9_chase_trivial(nir_scalar_chase_alu_src(candidate, 1));
+      uint32_t constant;
 
-   uint32_t byte_stride = 1;
-   nir_scalar candidate = scalar;
-   if (nir_def_instr_type(scalar.def) == nir_instr_type_alu) {
-      nir_op op = nir_scalar_alu_op(scalar);
-      if (op == nir_op_imul || op == nir_op_amul || op == nir_op_ishl) {
-         nir_scalar left =
-            apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
-         nir_scalar right =
-            apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
-         if (op == nir_op_ishl) {
-            uint32_t shift;
-            if (!apple9_const_u32(right, &shift) || shift >= 32)
-               return false;
-            byte_stride = 1u << shift;
-            candidate = left;
-         } else if (apple9_const_u32(right, &byte_stride)) {
-            candidate = left;
-         } else if (apple9_const_u32(left, &byte_stride)) {
-            candidate = right;
-         } else {
+      if (op == nir_op_iadd) {
+         nir_scalar affine;
+         if (apple9_const_u32(right, &constant))
+            affine = left;
+         else if (apple9_const_u32(left, &constant))
+            affine = right;
+         else
+            break;
+
+         if (constant > (UINT32_MAX - byte_add) / byte_stride)
             return false;
-         }
+         byte_add += (uint64_t)constant * byte_stride;
+         candidate = affine;
+         continue;
       }
+
+      uint32_t factor;
+      nir_scalar affine;
+      if (op == nir_op_ishl) {
+         if (!apple9_const_u32(right, &constant) || constant >= 32)
+            return false;
+         factor = 1u << constant;
+         affine = left;
+      } else if (op == nir_op_imul || op == nir_op_amul) {
+         if (apple9_const_u32(right, &factor))
+            affine = left;
+         else if (apple9_const_u32(left, &factor))
+            affine = right;
+         else
+            break;
+      } else {
+         break;
+      }
+
+      if (factor == 0 || byte_stride > UINT32_MAX / factor)
+         return false;
+      byte_stride *= factor;
+      candidate = affine;
    }
 
    if (byte_stride == 1 && element_size != 1) {
@@ -291,7 +308,7 @@ apple9_element_index(nir_def *offset, nir_scalar *index, unsigned *index_scale,
       return false;
    }
 
-   if (byte_stride == 0 || byte_stride % element_size != 0 ||
+   if (byte_stride % element_size != 0 ||
        byte_add % element_size != 0) {
       return false;
    } else {
@@ -331,6 +348,17 @@ struct apple9_scalar_load {
    uint32_t bounded_max;
    unsigned argument;
    unsigned component;
+   unsigned index_scale;
+   unsigned index_add;
+   unsigned bit_size;
+};
+
+struct apple9_buffer_store {
+   nir_intrinsic_instr *intr;
+   nir_scalar index;
+   struct apple9_affine_index affine;
+   unsigned argument;
+   unsigned components;
    unsigned index_scale;
    unsigned index_add;
    unsigned bit_size;
@@ -1347,97 +1375,6 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
 }
 
 static bool
-apple9_find_dag_store(nir_shader *nir, nir_intrinsic_instr **store_out,
-                      nir_scalar *index_out, uint8_t *binding_out,
-                      unsigned *index_scale_out, unsigned *index_add_out,
-                      const char **reason)
-{
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   nir_intrinsic_instr *store = NULL;
-   unsigned block_count = 0;
-
-   nir_foreach_block(block, impl) {
-      if (!exec_list_is_empty(&block->instr_list))
-         ++block_count;
-      nir_foreach_instr(instr, block) {
-         if (!apple9_instruction_is_in_subset(instr)) {
-            *reason = "Apple9 DAG compiler encountered unsupported NIR";
-            return false;
-         }
-         if (instr->type == nir_instr_type_intrinsic &&
-             nir_instr_as_intrinsic(instr)->intrinsic ==
-                nir_intrinsic_store_ssbo) {
-            if (store != NULL) {
-               *reason = "Apple9 DAG compiler accepts exactly one store";
-               return false;
-            }
-            store = nir_instr_as_intrinsic(instr);
-         }
-      }
-   }
-
-   if (block_count != 1) {
-      *reason = "Apple9 DAG compiler accepts one straight-line block";
-      return false;
-   }
-   if (store == NULL) {
-      *reason = "Apple9 DAG compiler requires one SSBO store";
-      return false;
-   }
-   const unsigned components = store->src[0].ssa->num_components;
-   const unsigned bit_size = store->src[0].ssa->bit_size;
-   if (components < 1 || components > 4 ||
-       nir_intrinsic_write_mask(store) != BITFIELD_MASK(components) ||
-       (bit_size != 8 && bit_size != 16 && bit_size != 32) ||
-       (bit_size != 32 && components != 1)) {
-      *reason = "Apple9 DAG compiler requires one complete scalar or u32 tuple store";
-      return false;
-   }
-   nir_scalar binding =
-      apple9_chase_trivial(nir_get_scalar(store->src[1].ssa, 0));
-   if (!nir_scalar_is_const(binding) || nir_scalar_as_uint(binding) > UINT8_MAX) {
-      *reason = "Apple9 DAG compiler requires a constant SSBO binding";
-      return false;
-   }
-   unsigned index_scale, index_add;
-   const unsigned expected_stride = components == 1   ? 1
-                                    : components == 2 ? 2
-                                                      : 4;
-   if (!apple9_element_index(store->src[2].ssa, index_out, &index_scale,
-                             &index_add,
-                             store->src[0].ssa->bit_size / 8) ||
-       (components > 1 &&
-        (index_scale != expected_stride || index_add != 0))) {
-      *reason = "Apple9 DAG compiler requires a natural 32-bit store stride";
-      return false;
-   }
-
-   *store_out = store;
-   *binding_out = nir_scalar_as_uint(binding);
-   *index_scale_out = index_scale;
-   *index_add_out = index_add;
-   return true;
-}
-
-static bool
-apple9_shader_has_buffer_load(nir_shader *nir)
-{
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr(instr, block) {
-         if (instr->type == nir_instr_type_intrinsic &&
-            (nir_instr_as_intrinsic(instr)->intrinsic ==
-                nir_intrinsic_load_ssbo ||
-             nir_instr_as_intrinsic(instr)->intrinsic ==
-                nir_intrinsic_load_ubo))
-            return true;
-      }
-   }
-
-   return false;
-}
-
-static bool
 apple9_emit_packed(struct apple9_emitter *emitter,
                    const struct agx_apple9_packed_instruction *packed)
 {
@@ -1450,10 +1387,14 @@ apple9_emit_packed(struct apple9_emitter *emitter,
 struct apple9_buffer_resource {
    enum agx_apple9_compute_resource_kind kind;
    uint8_t binding;
+   bool read;
+   bool write;
 };
 
 struct apple9_buffer_map {
-   unsigned input_count;
+   unsigned count;
+   uint8_t read_mask;
+   uint8_t write_mask;
    struct apple9_buffer_resource resource[4];
 };
 
@@ -1462,22 +1403,37 @@ apple9_compare_buffer_resource(const void *a_, const void *b_)
 {
    const struct apple9_buffer_resource *a = a_;
    const struct apple9_buffer_resource *b = b_;
+   /* Preserve the original ABI ordering: read-only inputs first, writable
+    * resources last.  Existing one-output programs therefore remain
+    * byte-identical, while multiple outputs receive deterministic arguments. */
+   if (a->write != b->write)
+      return (int)a->write - (int)b->write;
    if (a->kind != b->kind)
       return (int)a->kind - (int)b->kind;
    return (int)b->binding - (int)a->binding;
 }
 
-/* Collect the semantic API bindings before selecting a package.  Native
- * package arguments remain compact: inputs occupy arguments 0..N-1 in
- * SSBO-before-UBO, descending-binding order and the sole SSBO output occupies
- * argument N.  The kind tie-break leaves every established all-SSBO argument
- * order byte-identical. */
+static struct apple9_buffer_resource *
+apple9_find_buffer_resource(struct apple9_buffer_map *map,
+                            enum agx_apple9_compute_resource_kind kind,
+                            uint32_t binding)
+{
+   for (unsigned i = 0; i < map->count; ++i) {
+      if (map->resource[i].kind == kind &&
+          map->resource[i].binding == binding)
+         return &map->resource[i];
+   }
+   return NULL;
+}
+
+/* Collect semantic API bindings before selecting a package.  The native
+ * launch programs publish a compact pointer table; read/write ownership is
+ * host-side scheduling state, not a distinct pointer encoding. */
 static bool
 apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
                           const char **reason)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   uint32_t output_binding = UINT32_MAX;
 
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
@@ -1499,50 +1455,44 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
             return false;
          }
 
-         if (store) {
-            if (output_binding != UINT32_MAX && output_binding != binding) {
-               *reason = "Apple9 SSBO compiler accepts one output binding";
-               return false;
-            }
-            output_binding = binding;
-            continue;
-         }
-
          enum agx_apple9_compute_resource_kind kind =
-            intr->intrinsic == nir_intrinsic_load_ubo
+            !store && intr->intrinsic == nir_intrinsic_load_ubo
                ? AGX_APPLE9_COMPUTE_RESOURCE_UBO
                : AGX_APPLE9_COMPUTE_RESOURCE_SSBO;
-         bool known = false;
-         for (unsigned i = 0; i < map->input_count; ++i)
-            known |= map->resource[i].kind == kind &&
-                     map->resource[i].binding == binding;
-         if (!known) {
-            if (map->input_count == 3) {
-               *reason = "Apple9 compiler supports one to three buffer inputs";
+         struct apple9_buffer_resource *resource =
+            apple9_find_buffer_resource(map, kind, binding);
+         if (resource == NULL) {
+            if (map->count == ARRAY_SIZE(map->resource)) {
+               *reason = "Apple9 compiler supports up to four buffer resources";
                return false;
             }
-            map->resource[map->input_count++] =
-               (struct apple9_buffer_resource){kind, binding};
+            resource = &map->resource[map->count++];
+            *resource = (struct apple9_buffer_resource){
+               .kind = kind,
+               .binding = binding,
+            };
          }
+         resource->read |= !store;
+         resource->write |= store;
       }
    }
 
-   if (output_binding == UINT32_MAX) {
-      *reason = "Apple9 SSBO compiler requires one output binding";
+   bool has_store = false;
+   for (unsigned i = 0; i < map->count; ++i)
+      has_store |= map->resource[i].write;
+   if (!has_store) {
+      *reason = "Apple9 buffer compiler requires at least one SSBO store";
       return false;
    }
-   for (unsigned i = 0; i < map->input_count; ++i) {
-      if (map->resource[i].kind == AGX_APPLE9_COMPUTE_RESOURCE_SSBO &&
-          map->resource[i].binding == output_binding) {
-         *reason = "Apple9 generic compiler requires distinct input and output bindings";
-         return false;
-      }
-   }
 
-   qsort(map->resource, map->input_count, sizeof(map->resource[0]),
+   qsort(map->resource, map->count, sizeof(map->resource[0]),
          apple9_compare_buffer_resource);
-   map->resource[map->input_count] = (struct apple9_buffer_resource){
-      AGX_APPLE9_COMPUTE_RESOURCE_SSBO, output_binding};
+   for (unsigned i = 0; i < map->count; ++i) {
+      if (map->resource[i].read)
+         map->read_mask |= BITFIELD_BIT(i);
+      if (map->resource[i].write)
+         map->write_mask |= BITFIELD_BIT(i);
+   }
    return true;
 }
 
@@ -1551,7 +1501,7 @@ apple9_buffer_argument(const struct apple9_buffer_map *map,
                        enum agx_apple9_compute_resource_kind kind,
                        uint32_t binding)
 {
-   for (unsigned i = 0; i < map->input_count; ++i) {
+   for (unsigned i = 0; i < map->count; ++i) {
       if (map->resource[i].kind == kind &&
           map->resource[i].binding == binding)
          return i;
@@ -1563,20 +1513,18 @@ apple9_buffer_argument(const struct apple9_buffer_map *map,
 static bool
 apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                        struct util_dynarray *loads,
-                       nir_intrinsic_instr **store_out, nir_scalar *index_out,
-                       struct apple9_affine_index *store_affine_out,
-                       unsigned *store_rank_out, unsigned *store_scale_out,
-                       unsigned *store_add_out, const char **reason)
+                       struct util_dynarray *stores,
+                       struct apple9_affine_index *dispatch_affine_out,
+                       unsigned *dispatch_rank_out, const char **reason)
 {
-   if (map->input_count < 1 || map->input_count > 3) {
-      *reason = "Apple9 buffer compiler supports one to three inputs";
+   if (map->count < 1 || map->count > ARRAY_SIZE(map->resource)) {
+      *reason = "Apple9 buffer compiler requires one to four resources";
       return false;
    }
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   nir_intrinsic_instr *store = NULL;
    unsigned block_count = 0;
-   bool have_store_index = false;
+   bool written_argument[4] = {false};
 
    nir_foreach_block(block, impl) {
       if (!exec_list_is_empty(&block->instr_list))
@@ -1646,6 +1594,11 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                *reason = "Apple9 input binding is absent from its resource map";
                return false;
             }
+            if (written_argument[argument]) {
+               *reason =
+                  "Apple9 buffer compiler cannot yet preserve a load after an aliased store";
+               return false;
+            }
             const nir_component_mask_t read_mask =
                nir_def_components_read(&intr->def);
             for (unsigned component = 0; component < intr->def.num_components;
@@ -1706,42 +1659,64 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                *reason = "Apple9 store index must be affine";
                return false;
             }
-            if (store != NULL ||
-                binding != map->resource[map->input_count].binding ||
-                nir_intrinsic_write_mask(intr) != BITFIELD_MASK(components) ||
+            if (nir_intrinsic_write_mask(intr) != BITFIELD_MASK(components) ||
                 (bit_size != 8 && bit_size != 16 && bit_size != 32) ||
                 (bit_size != 32 && components != 1)) {
-               *reason = "Apple9 requires one complete scalar or u32 tuple store";
+               *reason =
+                  "Apple9 requires complete scalar or u32 tuple stores";
                return false;
             }
-            store = intr;
-            *index_out = index;
-            *store_affine_out = affine;
-            *store_scale_out = index_scale;
-            *store_add_out = index_add;
-            have_store_index = true;
+            unsigned argument = apple9_buffer_argument(
+               map, AGX_APPLE9_COMPUTE_RESOURCE_SSBO, binding);
+            if (argument == UINT_MAX) {
+               *reason = "Apple9 output binding is absent from its resource map";
+               return false;
+            }
+            struct apple9_buffer_store store = {
+               .intr = intr,
+               .index = index,
+               .affine = affine,
+               .argument = argument,
+               .components = components,
+               .index_scale = index_scale,
+               .index_add = index_add,
+               .bit_size = bit_size,
+            };
+            util_dynarray_append(stores, store);
+            written_argument[argument] = true;
          }
       }
    }
 
-   bool complete =
-      block_count == 1 && have_store_index && store != NULL && loads->size != 0;
-   if (!complete) {
-      *reason =
-         "Apple9 requires one block, at least one input load, and one output";
+   if (block_count != 1 || stores->size == 0) {
+      *reason = "Apple9 requires one block and at least one output store";
       return false;
    }
 
-   if (!apple9_affine_index(*index_out, store_affine_out, store_rank_out)) {
-      *reason = "Apple9 DAG compiler requires a dense affine store index";
+   struct apple9_buffer_store *first_store = stores->data;
+   if (!apple9_affine_index(first_store->index, dispatch_affine_out,
+                            dispatch_rank_out)) {
+      *reason = "Apple9 DAG compiler requires dense affine store indices";
       return false;
+   }
+   util_dynarray_foreach(stores, struct apple9_buffer_store, store) {
+      struct apple9_affine_index candidate;
+      unsigned rank;
+      if (!apple9_affine_index(store->index, &candidate, &rank) ||
+          rank != *dispatch_rank_out ||
+          memcmp(candidate.stride, dispatch_affine_out->stride,
+                 sizeof(candidate.stride)) != 0) {
+         *reason =
+            "Apple9 multiple stores require one dense affine dispatch shape";
+         return false;
+      }
    }
 
    util_dynarray_foreach(loads, struct apple9_scalar_load, load) {
       if (load->bounded_index)
          continue;
       bool same_dense_shape =
-         memcmp(load->affine.stride, store_affine_out->stride,
+         memcmp(load->affine.stride, dispatch_affine_out->stride,
                 sizeof(load->affine.stride)) == 0;
       bool one_dimensional = load->affine.stride[1] == 0 &&
                              load->affine.stride[2] == 0 &&
@@ -1753,7 +1728,6 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
       }
    }
 
-   *store_out = store;
    return true;
 }
 
@@ -1820,6 +1794,8 @@ apple9_emit_device_store_vir(
    for (unsigned c = 0; c < components; ++c)
       data[c] = phys[instruction->src[c]];
    const unsigned index = phys[instruction->src[components]];
+   const bool release_index =
+      !(instruction->live_after_mask & (1u << components));
 
    bool adjacent = true;
    for (unsigned c = 1; c < components; ++c)
@@ -1832,10 +1808,10 @@ apple9_emit_device_store_vir(
       components == 1
          ? agx_apple9_pack_device_store_scalar(
               data[0], index, instruction->immediate, instruction->memory_bits,
-              instruction->device_store_form, &packed)
+              instruction->device_store_form, release_index, &packed)
          : agx_apple9_pack_device_store_vector_u32(
               data[0], index, instruction->immediate, components,
-              instruction->device_store_form, &packed);
+              instruction->device_store_form, release_index, &packed);
    if (!packed_ok || !apple9_emit_packed(emitter, &packed))
       goto invalid;
    return true;
@@ -1891,39 +1867,19 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                    struct agx_apple9_compute_profile *profile,
                    const char **reason)
 {
-   nir_intrinsic_instr *store = NULL;
    struct util_dynarray loads = UTIL_DYNARRAY_INIT;
-   nir_scalar store_index;
+   struct util_dynarray stores = UTIL_DYNARRAY_INIT;
    struct apple9_affine_index affine = {0};
    unsigned index_rank = 0;
-   unsigned store_index_scale = 1;
-   unsigned store_index_add = 0;
    struct apple9_buffer_map resource_map = {0};
-   uint8_t store_binding = 0;
 
    if (!apple9_collect_buffer_map(nir, &resource_map, reason))
       return false;
-   const unsigned input_count = resource_map.input_count;
 
-   if (apple9_shader_has_buffer_load(nir)) {
-      if (!apple9_find_buffer_dag(nir, &resource_map, &loads, &store,
-                                  &store_index, &affine, &index_rank,
-                                  &store_index_scale, &store_index_add,
-                                  reason)) {
-         util_dynarray_fini(&loads);
-         return false;
-      }
-   } else if (!apple9_find_dag_store(nir, &store, &store_index, &store_binding,
-                                     &store_index_scale, &store_index_add,
-                                     reason)) {
+   if (!apple9_find_buffer_dag(nir, &resource_map, &loads, &stores, &affine,
+                               &index_rank, reason)) {
       util_dynarray_fini(&loads);
-      return false;
-   }
-
-   if (input_count == 0 &&
-       !apple9_affine_index(store_index, &affine, &index_rank)) {
-      *reason = "Apple9 DAG compiler requires a dense affine store index";
-      util_dynarray_fini(&loads);
+      util_dynarray_fini(&stores);
       return false;
    }
 
@@ -1953,10 +1909,6 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    for (unsigned i = 0; i < lower.ssa_map_count; ++i)
       lower.ssa_to_vreg[i] = AGX_APPLE9_VREG_INVALID;
 
-   uint32_t index = AGX_APPLE9_VREG_INVALID;
-   const unsigned output_components = store->src[0].ssa->num_components;
-   const unsigned output_bits = store->src[0].ssa->bit_size;
-
    /* Preserve NIR's topological load schedule instead of discovering loads
     * recursively from the final store expression.  This makes independent
     * outstanding results genuinely simultaneous, exposes their real
@@ -1976,65 +1928,74 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       }
    }
 
-   uint32_t output[4] = {AGX_APPLE9_VREG_INVALID, AGX_APPLE9_VREG_INVALID,
-                         AGX_APPLE9_VREG_INVALID, AGX_APPLE9_VREG_INVALID};
-   for (unsigned c = 0; c < output_components; ++c) {
-      output[c] = apple9_lower_dag_scalar(
-         &lower, apple9_chase_trivial(nir_get_scalar(store->src[0].ssa, c)));
-      if (output[c] == AGX_APPLE9_VREG_INVALID) {
+   /* Pure expressions may be shared by several stores.  Lower the stores in
+    * NIR order so memory side effects retain their source order while the SSA
+    * map naturally reuses the shared computation. */
+   util_dynarray_foreach(&stores, struct apple9_buffer_store, store) {
+      uint32_t output[4] = {
+         AGX_APPLE9_VREG_INVALID, AGX_APPLE9_VREG_INVALID,
+         AGX_APPLE9_VREG_INVALID, AGX_APPLE9_VREG_INVALID,
+      };
+      for (unsigned c = 0; c < store->components; ++c) {
+         output[c] = apple9_lower_dag_scalar(
+            &lower,
+            apple9_chase_trivial(nir_get_scalar(store->intr->src[0].ssa, c)));
+         if (output[c] == AGX_APPLE9_VREG_INVALID) {
+            *reason = lower.reason;
+            goto fail;
+         }
+      }
+
+      uint32_t index = apple9_lower_dag_scalar(&lower, store->index);
+      if (index == AGX_APPLE9_VREG_INVALID) {
          *reason = lower.reason;
+         goto fail;
+      }
+
+      /* Native vector stores scale their tuple index in the memory format.
+       * Scalar stores instead consume a scalar-element index, so only they
+       * need an explicit affine address calculation here. */
+      if (store->components == 1 && store->index_scale > 1) {
+         uint32_t scale = apple9_dag_imm(&lower, store->index_scale);
+         uint32_t zero = apple9_dag_zero(&lower);
+         uint32_t sources[3] = {index, scale, zero};
+         if (scale == AGX_APPLE9_VREG_INVALID ||
+             zero == AGX_APPLE9_VREG_INVALID) {
+            *reason = lower.reason;
+            goto fail;
+         }
+         index = apple9_dag_emit(&lower, AGX_APPLE9_VIR_IMAD,
+                                 AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
+                                 ARRAY_SIZE(sources), 0);
+      }
+      if (store->components == 1 && store->index_add != 0 &&
+          index != AGX_APPLE9_VREG_INVALID) {
+         uint32_t add = apple9_dag_imm(&lower, store->index_add);
+         uint32_t sources[2] = {index, add};
+         index = add == AGX_APPLE9_VREG_INVALID
+                    ? AGX_APPLE9_VREG_INVALID
+                    : apple9_dag_emit(&lower, AGX_APPLE9_VIR_IADD,
+                                      AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources,
+                                      ARRAY_SIZE(sources), 0);
+      }
+      if (index == AGX_APPLE9_VREG_INVALID) {
+         *reason = lower.reason;
+         goto fail;
+      }
+
+      if (!agx_apple9_vir_emit_device_store(
+             &lower.program, store->argument, index, output,
+             store->components, store->bit_size)) {
+         *reason = "could not emit an Apple9 VIR device store";
          goto fail;
       }
    }
 
    if (lower.emitted_load_count != lower.load_instruction_count) {
-      *reason = "Apple9 DAG contains an input load outside the output graph";
+      *reason = "Apple9 DAG contains an input load outside the store graph";
       goto fail;
    }
 
-   index = apple9_lower_dag_scalar(&lower, store_index);
-   if (index == AGX_APPLE9_VREG_INVALID) {
-      *reason = lower.reason;
-      goto fail;
-   }
-   /* Native vector stores scale their tuple index in the memory format.
-    * Scalar stores instead consume a u32 element index, so only they need
-    * an explicit affine address calculation here. */
-   if (output_components == 1 && store_index_scale > 1) {
-      uint32_t scale = apple9_dag_imm(&lower, store_index_scale);
-      uint32_t zero = apple9_dag_zero(&lower);
-      uint32_t sources[3] = {index, scale, zero};
-      if (scale == AGX_APPLE9_VREG_INVALID ||
-          zero == AGX_APPLE9_VREG_INVALID) {
-         *reason = lower.reason;
-         goto fail;
-      }
-      index = apple9_dag_emit(&lower, AGX_APPLE9_VIR_IMAD,
-                              AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
-                              ARRAY_SIZE(sources), 0);
-   }
-   if (output_components == 1 && store_index_add != 0 &&
-       index != AGX_APPLE9_VREG_INVALID) {
-      uint32_t add = apple9_dag_imm(&lower, store_index_add);
-      uint32_t sources[2] = {index, add};
-      index = add == AGX_APPLE9_VREG_INVALID
-                 ? AGX_APPLE9_VREG_INVALID
-                 : apple9_dag_emit(&lower, AGX_APPLE9_VIR_IADD,
-                                   AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources,
-                                   ARRAY_SIZE(sources), 0);
-   }
-   if (index == AGX_APPLE9_VREG_INVALID) {
-      *reason = lower.reason;
-      goto fail;
-   }
-
-   const unsigned output_binding = input_count ? input_count : store_binding;
-   if (!agx_apple9_vir_emit_device_store(
-          &lower.program, output_binding, index, output, output_components,
-          output_bits)) {
-      *reason = "could not emit the Apple9 VIR device store";
-      goto fail;
-   }
    apple9_infer_device_load_index_contracts(&lower.program);
 
    if (!agx_apple9_assign_vir_scoreboard_slots(&lower.program, reason))
@@ -2043,13 +2004,12 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    /* The byte/subword source selector is not generalized yet.  Scoreboard
     * materialization may have replaced the original load SSA, so constrain
     * the store's final source rather than the pre-materialization value. */
-   if (output_bits != 32) {
-      struct agx_apple9_vir_instr *final_store =
-         &lower.program.instructions[lower.program.instruction_count - 1];
-      if (final_store->op != AGX_APPLE9_VIR_DEVICE_STORE ||
-          !agx_apple9_vir_set_fixed_phys(&lower.program, final_store->src[0],
-                                         0)) {
-         *reason = "could not reserve the proven narrow-store source";
+   for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
+      struct agx_apple9_vir_instr *store = &lower.program.instructions[i];
+      if (store->op == AGX_APPLE9_VIR_DEVICE_STORE &&
+          store->memory_bits != 32 &&
+          !agx_apple9_vir_set_fixed_phys(&lower.program, store->src[0], 0)) {
+         *reason = "could not reserve a proven narrow-store source";
          goto fail;
       }
    }
@@ -2145,22 +2105,21 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       out->info.workgroup_size[d] = nir->info.workgroup_size[d];
 
    if (profile != NULL) {
-      if (input_count == 0)
+      const unsigned resource_count = resource_map.count;
+      if (resource_count == 1)
          *profile = AGX_APPLE9_TINY_COMPUTE_PROFILE;
-      else if (input_count == 1)
+      else if (resource_count == 2)
          *profile = AGX_APPLE9_SSBO2_COMPUTE_PROFILE;
-      else if (input_count == 2)
+      else if (resource_count == 3)
          *profile = AGX_APPLE9_SSBO3_STATE_U6_COMPUTE_PROFILE;
       else
          *profile = AGX_APPLE9_SSBO4_COMPUTE_PROFILE;
-      profile->resource_binding_count = input_count + 1;
+      profile->resource_binding_count = resource_count;
+      profile->resource_read_mask = resource_map.read_mask;
+      profile->resource_write_mask = resource_map.write_mask;
       for (unsigned i = 0; i < profile->resource_binding_count; ++i) {
-         profile->resource_binding[i] =
-            input_count == 0 ? store_binding
-                             : resource_map.resource[i].binding;
-         profile->resource_kind[i] =
-            input_count == 0 ? AGX_APPLE9_COMPUTE_RESOURCE_SSBO
-                             : resource_map.resource[i].kind;
+         profile->resource_binding[i] = resource_map.resource[i].binding;
+         profile->resource_kind[i] = resource_map.resource[i].kind;
       }
       profile->variable_local_size = nir->info.workgroup_size_variable;
       for (unsigned d = 0; d < 3; ++d) {
@@ -2168,15 +2127,38 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          profile->index_stride[d] = affine.stride[d];
       }
       profile->index_rank = index_rank;
-      profile->resource_access_element_size[input_count] = output_bits / 8;
-      if (output_components == 1 &&
-          (store_index_scale != 1 || store_index_add != 0)) {
-         profile->resource_access_scale[input_count] = store_index_scale;
-         profile->resource_access_add[input_count] = store_index_add;
-      }
 
       bool bounded_argument[4] = {false};
       bool affine_argument[4] = {false};
+      util_dynarray_foreach(&stores, struct apple9_buffer_store, store) {
+         const uint8_t element_size = store->bit_size / 8;
+         uint8_t *profile_size =
+            &profile->resource_access_element_size[store->argument];
+         if (*profile_size != 0 && *profile_size != element_size) {
+            *reason =
+               "Apple9 one resource uses incompatible scalar element sizes";
+            util_dynarray_fini(&emitter.bytes);
+            goto fail;
+         }
+         *profile_size = element_size;
+         affine_argument[store->argument] = true;
+
+         const uint32_t tail = store->components - 1;
+         if (store->index_add > UINT32_MAX - tail) {
+            *reason = "Apple9 store range exceeds 32 bits";
+            util_dynarray_fini(&emitter.bytes);
+            goto fail;
+         }
+         const uint32_t add = store->index_add + tail;
+         if (store->index_scale != 1 || add != 0) {
+            profile->resource_access_scale[store->argument] =
+               MAX2(profile->resource_access_scale[store->argument],
+                    store->index_scale);
+            profile->resource_access_add[store->argument] =
+               MAX2(profile->resource_access_add[store->argument], add);
+         }
+      }
+
       util_dynarray_foreach(&loads, struct apple9_scalar_load, load) {
          const uint8_t element_size = load->bit_size / 8;
          uint8_t *profile_size =
@@ -2196,14 +2178,12 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          }
 
          affine_argument[load->argument] = true;
-         uint32_t scale = load->bounded_index
-                             ? 1
-                             : (memcmp(load->affine.stride, affine.stride,
-                                       sizeof(load->affine.stride)) == 0
-                                   ? 1
-                                   : (uint32_t)load->affine.stride[0]);
-         uint32_t add = load->bounded_index ? load->bounded_max
-                                            : (uint32_t)load->affine.base;
+         uint32_t scale =
+            memcmp(load->affine.stride, affine.stride,
+                   sizeof(load->affine.stride)) == 0
+               ? 1
+               : (uint32_t)load->affine.stride[0];
+         uint32_t add = (uint32_t)load->affine.base;
          if (scale == 1 && add == 0)
             continue;
          profile->resource_access_scale[load->argument] =
@@ -2211,7 +2191,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          profile->resource_access_add[load->argument] =
             MAX2(profile->resource_access_add[load->argument], add);
       }
-      for (unsigned i = 0; i < input_count; ++i) {
+      for (unsigned i = 0; i < resource_count; ++i) {
          if (bounded_argument[i] && !affine_argument[i])
             profile->resource_access_mode[i] =
                AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX;
@@ -2221,12 +2201,14 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    free(lower.ssa_to_vreg);
    agx_apple9_vir_finish(&lower.program);
    util_dynarray_fini(&loads);
+   util_dynarray_fini(&stores);
    return true;
 
 fail:
    free(lower.ssa_to_vreg);
    agx_apple9_vir_finish(&lower.program);
    util_dynarray_fini(&loads);
+   util_dynarray_fini(&stores);
    return false;
 }
 

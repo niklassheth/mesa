@@ -1535,6 +1535,34 @@ apple9_first_consumer(const struct agx_apple9_vir_program *program,
    return UINT_MAX;
 }
 
+static bool
+apple9_producer_used_after(const struct agx_apple9_vir_program *program,
+                           unsigned producer_index, unsigned consumer_index)
+{
+   const struct agx_apple9_vir_instr *producer =
+      &program->instructions[producer_index];
+   const uint32_t first = producer->dest;
+   const unsigned components = apple9_vir_dest_components(producer);
+
+   for (unsigned i = consumer_index + 1; i < program->instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *instruction =
+         &program->instructions[i];
+      for (unsigned s = 0; s < instruction->nr_srcs; ++s) {
+         if (instruction->src[s] >= first &&
+             instruction->src[s] - first < components)
+            return true;
+      }
+   }
+
+   for (unsigned i = 0; i < program->live_out_count; ++i) {
+      if (program->live_out[i] >= first &&
+          program->live_out[i] - first < components)
+         return true;
+   }
+
+   return false;
+}
+
 static void
 apple9_classify_direct_device_stores(struct agx_apple9_vir_program *program)
 {
@@ -1548,11 +1576,14 @@ apple9_classify_direct_device_stores(struct agx_apple9_vir_program *program)
       const unsigned components = store->memory_components;
       const struct agx_apple9_vir_instr *producer =
          apple9_vir_producer_instruction(program, store->src[0]);
+      const unsigned producer_index =
+         producer == NULL ? UINT_MAX : producer - program->instructions;
       if (store->memory_bits != 32 || producer == NULL ||
           producer->op != AGX_APPLE9_VIR_DEVICE_LOAD ||
           producer->dest_components != components ||
           i == 0 || &program->instructions[i - 1] != producer ||
-          apple9_first_consumer(program, producer - program->instructions) != i)
+          apple9_first_consumer(program, producer_index) != i ||
+          apple9_producer_used_after(program, producer_index, i))
          continue;
 
       bool exact_tuple = true;
@@ -1564,7 +1595,6 @@ apple9_classify_direct_device_stores(struct agx_apple9_vir_program *program)
       /* The native census only admits a direct store when this load receives
        * the head slot.  Reject an earlier still-pending automatic/slot-6 load
        * rather than depending on the broader synthetic hardware behavior. */
-      const unsigned producer_index = producer - program->instructions;
       bool slot6_available = true;
       for (unsigned p = 0; p < producer_index; ++p) {
          const struct agx_apple9_vir_instr *earlier =
@@ -2181,7 +2211,7 @@ agx_apple9_pack_device_load_vector_u32_raw(
 bool
 agx_apple9_pack_device_store_scalar(
    unsigned data, unsigned index, unsigned binding, unsigned bits,
-   enum agx_apple9_device_store_form form,
+   enum agx_apple9_device_store_form form, bool release_index,
    struct agx_apple9_packed_instruction *packed)
 {
    if (data >= 64 || index >= AGX_APPLE9_GPR_COUNT || binding > UINT8_MAX ||
@@ -2193,7 +2223,7 @@ agx_apple9_pack_device_store_scalar(
         form != AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6))
       return false;
    uint8_t bytes[14] = {
-      0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x21,
+      0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x20,
       0x00, 0x11, 0x00, 0x00, 0x90, 0x11, 0x00,
    };
    if (form == AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6)
@@ -2201,6 +2231,8 @@ agx_apple9_pack_device_store_scalar(
    bytes[3] = data << 1;
    bytes[4] = binding;
    bytes[5] = index;
+   /* Native same-index store chains use 0x20 ... 0x21. */
+   bytes[6] |= release_index;
    if (bits == 8) {
       bytes[8] = 0x21;
       bytes[11] = 0x90;
@@ -2217,7 +2249,7 @@ agx_apple9_pack_device_store_scalar(
 bool
 agx_apple9_pack_device_store_vector_u32(
    unsigned data, unsigned index, unsigned binding, unsigned components,
-   enum agx_apple9_device_store_form form,
+   enum agx_apple9_device_store_form form, bool release_index,
    struct agx_apple9_packed_instruction *packed)
 {
    if (components < 1 || components > 4 || data + components > 64 ||
@@ -2240,7 +2272,7 @@ agx_apple9_pack_device_store_vector_u32(
       (uint8_t)(data << 1),
       (uint8_t)binding,
       (uint8_t)index,
-      0x21,
+      (uint8_t)(0x20 | release_index),
       0x00,
       (uint8_t)(0x11 | width_token_bits[components - 1]),
       0x00,
@@ -2781,6 +2813,8 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
 
       const unsigned data = phys[instruction->src[0]];
       const unsigned index = phys[instruction->src[components]];
+      const bool release_index =
+         !(instruction->live_after_mask & (1u << components));
       for (unsigned c = 1; c < components; ++c) {
          if (phys[instruction->src[c]] != data + c)
             return false;
@@ -2789,10 +2823,10 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
       if (components == 1)
          return agx_apple9_pack_device_store_scalar(
             data, index, instruction->immediate, instruction->memory_bits,
-            instruction->device_store_form, packed);
+            instruction->device_store_form, release_index, packed);
       return agx_apple9_pack_device_store_vector_u32(
          data, index, instruction->immediate, components,
-         instruction->device_store_form, packed);
+         instruction->device_store_form, release_index, packed);
    }
    case AGX_APPLE9_VIR_U2F32:
    case AGX_APPLE9_VIR_I2F32:

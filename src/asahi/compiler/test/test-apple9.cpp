@@ -391,13 +391,13 @@ TEST(Apple9Packer, NativeVectorMemoryWidthsMatchValidatedEncodings)
 
       ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
          0, test.index, 1, test.components,
-         AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6, &packed));
+         AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6, true, &packed));
       EXPECT_EQ(memcmp(packed.bytes, test.store_load, sizeof(test.store_load)),
                 0);
 
       ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
          0, test.index, 1, test.components,
-         AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, &packed));
+         AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
       EXPECT_EQ(memcmp(packed.bytes, test.store_alu, sizeof(test.store_alu)),
                 0);
    }
@@ -429,7 +429,7 @@ TEST(Apple9Packer, NarrowScalarMemoryMatchesOwnMslCorpus)
    EXPECT_EQ(memcmp(packed.bytes, load_u16, sizeof(load_u16)), 0);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      0, 0, 0, 8, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, &packed));
+      0, 0, 0, 8, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
    static const uint8_t store_u8[] = {
       0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x21,
       0x00, 0x21, 0x00, 0x00, 0x90, 0x10, 0x00,
@@ -437,7 +437,7 @@ TEST(Apple9Packer, NarrowScalarMemoryMatchesOwnMslCorpus)
    EXPECT_EQ(memcmp(packed.bytes, store_u8, sizeof(store_u8)), 0);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      0, 0, 0, 16, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, &packed));
+      0, 0, 0, 16, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
    static const uint8_t store_u16[] = {
       0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x21,
       0x00, 0x01, 0x00, 0x00, 0x10, 0x11, 0x00,
@@ -449,17 +449,34 @@ TEST(Apple9Packer, DeviceStoreEncodesAllocatedDataRegister)
 {
    agx_apple9_packed_instruction packed = {};
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      17, 9, 3, 32, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, &packed));
+      17, 9, 3, 32, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
    EXPECT_EQ(packed.bytes[2], 0x54);
    EXPECT_EQ(packed.bytes[3], 34);
    EXPECT_EQ(packed.bytes[4], 3);
    EXPECT_EQ(packed.bytes[5], 9);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
-      40, 7, 2, 4, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, &packed));
+      40, 7, 2, 4, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
    EXPECT_EQ(packed.bytes[3], 80);
    EXPECT_FALSE(agx_apple9_pack_device_store_scalar(
-      1, 0, 0, 16, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, &packed));
+      1, 0, 0, 16, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+}
+
+TEST(Apple9Packer, DeviceStoreIndexLifetimeMatchesNativeAccessDescriptor)
+{
+   agx_apple9_packed_instruction packed = {};
+
+   ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
+      17, 9, 3, 32, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, false, &packed));
+   EXPECT_EQ(packed.bytes[6], 0x20);
+
+   ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
+      17, 9, 3, 32, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+   EXPECT_EQ(packed.bytes[6], 0x21);
+
+   ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
+      40, 7, 2, 4, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, false, &packed));
+   EXPECT_EQ(packed.bytes[6], 0x20);
 }
 
 TEST(Apple9Packer, GlobalInvocationIdAxesMatchNativeSelectors)
@@ -1817,6 +1834,47 @@ TEST(Apple9Allocator, VectorStoreCollectsScalarSourcesBeforeAllocation)
    agx_apple9_vir_finish(&program);
 }
 
+TEST(Apple9Allocator, StoreIndexLifetimeUsesAccessDescriptorWithoutCopy)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t index = agx_apple9_vir_input(&program, 1);
+   uint32_t first_data = agx_apple9_vir_input(&program, 2);
+   ASSERT_TRUE(
+      agx_apple9_vir_emit_device_store(&program, 0, index, &first_data, 1, 32));
+
+   uint32_t sources[] = {index, index};
+   uint32_t second_data =
+      agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_IOR,
+                          AGX_APPLE9_ENC_LOGIC_EXTENDED, sources, 2, 0);
+   ASSERT_TRUE(agx_apple9_vir_emit_device_store(&program, 1, index,
+                                                &second_data, 1, 32));
+
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+      << (reason ? reason : "");
+   EXPECT_EQ(program.instruction_count, 3u);
+   ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
+      << (reason ? reason : "");
+
+   const auto &first_store = program.instructions[0];
+   const auto &last_store = program.instructions[2];
+   EXPECT_NE(first_store.live_after_mask & (1u << 1), 0u);
+   EXPECT_EQ(last_store.live_after_mask & (1u << 1), 0u);
+   EXPECT_EQ(program.phys[first_store.src[1]], program.phys[last_store.src[1]]);
+
+   agx_apple9_packed_instruction packed = {};
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&first_store, program.phys,
+                                               &packed, &reason))
+      << (reason ? reason : "");
+   EXPECT_EQ(packed.bytes[6], 0x20);
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&last_store, program.phys,
+                                               &packed, &reason))
+      << (reason ? reason : "");
+   EXPECT_EQ(packed.bytes[6], 0x21);
+   agx_apple9_vir_finish(&program);
+}
+
 TEST(Apple9Allocator, CollectCoalescesAnAlreadyAdjacentKilledTuple)
 {
    agx_apple9_vir_program program;
@@ -2001,6 +2059,61 @@ apple9_vector_alu_store_shader()
    for (unsigned c = 0; c < 4; ++c)
       lanes[c] = nir_iadd_imm(&b, nir_channel(&b, loaded, c), c + 1);
    nir_store_ssbo(&b, nir_vec(&b, lanes, 4), nir_imm_int(&b, 0), offset);
+   return b.shader;
+}
+
+static nir_shader *
+apple9_multiple_stores_one_binding_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_multiple_stores_one_binding");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *base = nir_imul_imm(&b, gid, 8);
+   nir_store_ssbo(&b, nir_iadd_imm(&b, gid, 11), nir_imm_int(&b, 0), base);
+   nir_store_ssbo(&b, nir_ixor(&b, gid, nir_imm_int(&b, 0x55)),
+                  nir_imm_int(&b, 0),
+                  nir_iadd_imm(&b, base, 4));
+   return b.shader;
+}
+
+static nir_shader *
+apple9_multiple_output_bindings_shader(bool alias_input)
+{
+   nir_builder b = apple9_compute_builder("apple9_multiple_output_bindings");
+   b.shader->info.num_ssbos = alias_input ? 2 : 3;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *offset = nir_imul_imm(&b, gid, 4);
+   const unsigned input_binding = alias_input ? 0 : 2;
+   nir_def *loaded =
+      nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, input_binding), offset,
+                    .access = alias_input ? (enum gl_access_qualifier)0
+                                          : ACCESS_NON_WRITEABLE);
+   nir_store_ssbo(&b, nir_iadd_imm(&b, loaded, 10), nir_imm_int(&b, 0),
+                  offset);
+   nir_store_ssbo(&b, nir_ixor(&b, loaded, nir_imm_int(&b, 0x55)),
+                  nir_imm_int(&b, 1),
+                  offset);
+   return b.shader;
+}
+
+static nir_shader *
+apple9_multiple_scalar_vector_stores_shader()
+{
+   nir_builder b =
+      apple9_compute_builder("apple9_multiple_scalar_vector_stores");
+   b.shader->info.num_ssbos = 3;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *loaded = nir_load_ssbo(
+      &b, 4, 32, nir_imm_int(&b, 2), nir_imul_imm(&b, gid, 16),
+      .access = ACCESS_NON_WRITEABLE, .align_mul = 16);
+   nir_def *lanes[4];
+   for (unsigned c = 0; c < 4; ++c)
+      lanes[c] = nir_iadd_imm(&b, nir_channel(&b, loaded, c), c + 1);
+   nir_store_ssbo(&b, nir_vec(&b, lanes, 4), nir_imm_int(&b, 0),
+                  nir_imul_imm(&b, gid, 16));
+   nir_store_ssbo(&b,
+                  nir_ixor(&b, nir_channel(&b, loaded, 0),
+                           nir_channel(&b, loaded, 3)),
+                  nir_imm_int(&b, 1), nir_imul_imm(&b, gid, 4));
    return b.shader;
 }
 
@@ -2379,6 +2492,120 @@ TEST(Apple9Compiler, ComputedVectorStoreUsesPreRaTupleCollection)
       }
    }
    EXPECT_EQ(vector_stores, 1u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, MultipleStoresShareOneWritableResource)
+{
+   nir_shader *nir = apple9_multiple_stores_one_binding_shader();
+   struct agx_shader_part compiled = {};
+   struct agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+   EXPECT_EQ(profile.resource_binding_count, 1u);
+   EXPECT_EQ(profile.resource_binding[0], 0u);
+   EXPECT_EQ(profile.resource_read_mask, 0u);
+   EXPECT_EQ(profile.resource_write_mask, 1u);
+   EXPECT_EQ(profile.resource_access_element_size[0], 4u);
+   EXPECT_EQ(profile.resource_access_scale[0], 2u);
+   EXPECT_EQ(profile.resource_access_add[0], 1u);
+
+   unsigned stores = 0;
+   for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
+      const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
+      if (bytes[0] == 0xe7 && bytes[2] == 0x54) {
+         stores++;
+         EXPECT_EQ(bytes[4], 0u);
+      }
+   }
+   EXPECT_EQ(stores, 2u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, MultipleWritableBindingsUseSemanticResourceMasks)
+{
+   for (bool alias_input : {false, true}) {
+      SCOPED_TRACE(alias_input ? "read/write alias" : "separate input");
+      nir_shader *nir = apple9_multiple_output_bindings_shader(alias_input);
+      struct agx_shader_part compiled = {};
+      struct agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+         << (reason ? reason : "no diagnostic");
+
+      if (alias_input) {
+         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+         ASSERT_EQ(profile.resource_binding_count, 2u);
+         EXPECT_EQ(profile.resource_binding[0], 1u);
+         EXPECT_EQ(profile.resource_binding[1], 0u);
+         EXPECT_EQ(profile.resource_read_mask, 0x2u);
+         EXPECT_EQ(profile.resource_write_mask, 0x3u);
+      } else {
+         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6);
+         ASSERT_EQ(profile.resource_binding_count, 3u);
+         EXPECT_EQ(profile.resource_binding[0], 2u);
+         EXPECT_EQ(profile.resource_binding[1], 1u);
+         EXPECT_EQ(profile.resource_binding[2], 0u);
+         EXPECT_EQ(profile.resource_read_mask, 0x1u);
+         EXPECT_EQ(profile.resource_write_mask, 0x6u);
+      }
+
+      unsigned stores = 0;
+      uint8_t store_arguments[2] = {};
+      uint8_t access_desc[2] = {};
+      for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
+         const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
+         if (bytes[0] == 0xe7 && bytes[2] == 0x54 && stores < 2) {
+            store_arguments[stores++] = bytes[4];
+            access_desc[stores - 1] = bytes[6];
+         }
+      }
+      EXPECT_EQ(stores, 2u);
+      EXPECT_EQ(store_arguments[0], alias_input ? 1u : 2u);
+      EXPECT_EQ(store_arguments[1], alias_input ? 0u : 1u);
+      EXPECT_EQ(access_desc[0], 0x20);
+      EXPECT_EQ(access_desc[1], 0x21);
+      free(compiled.binary);
+      ralloc_free(nir);
+   }
+}
+
+TEST(Apple9Compiler, MultipleScalarAndVectorStoresUseAllocatedSources)
+{
+   nir_shader *nir = apple9_multiple_scalar_vector_stores_shader();
+   struct agx_shader_part compiled = {};
+   struct agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+      << (reason ? reason : "no diagnostic");
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6);
+   EXPECT_EQ(profile.resource_read_mask, 0x1u);
+   EXPECT_EQ(profile.resource_write_mask, 0x6u);
+   EXPECT_EQ(profile.resource_access_scale[0], 4u);
+   EXPECT_EQ(profile.resource_access_add[0], 3u);
+   EXPECT_EQ(profile.resource_access_scale[2], 4u);
+   EXPECT_EQ(profile.resource_access_add[2], 3u);
+
+   unsigned vector_stores = 0, scalar_stores = 0;
+   for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
+      const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
+      if (bytes[0] != 0xe7 || bytes[2] != 0x54)
+         continue;
+      if (bytes[8] == 0x17) {
+         vector_stores++;
+         EXPECT_EQ(bytes[4], 2u);
+      } else if (bytes[8] == 0x11) {
+         scalar_stores++;
+         EXPECT_EQ(bytes[4], 1u);
+      }
+   }
+   EXPECT_EQ(vector_stores, 1u);
+   EXPECT_EQ(scalar_stores, 1u);
    free(compiled.binary);
    ralloc_free(nir);
 }
