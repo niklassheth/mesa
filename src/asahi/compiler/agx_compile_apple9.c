@@ -1118,7 +1118,9 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
             };
             const uint32_t base = agx_apple9_vir_emit_device_load_vector(
-               &lower->program, load->argument, index, components, &contract);
+               &lower->program,
+               AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + load->argument,
+               index, components, &contract);
             if (base == AGX_APPLE9_VREG_INVALID ||
                 !agx_apple9_vir_set_device_load_contract(
                    &lower->program, base, flags,
@@ -1166,7 +1168,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          const uint32_t source[] = {index};
          value = apple9_dag_emit(lower, AGX_APPLE9_VIR_DEVICE_LOAD,
                                  AGX_APPLE9_ENC_DEVICE_LOAD, source, 1,
-                                 load->argument);
+                                 AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE +
+                                    load->argument);
          if (value != AGX_APPLE9_VREG_INVALID)
             lower->program.instructions[lower->program.instruction_count - 1]
                .memory_bits = load->bit_size;
@@ -1389,7 +1392,8 @@ struct apple9_buffer_map {
    unsigned count;
    uint8_t read_mask;
    uint8_t write_mask;
-   struct apple9_buffer_resource resource[4];
+   struct apple9_buffer_resource
+      resource[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
 };
 
 static int
@@ -1456,7 +1460,7 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
             apple9_find_buffer_resource(map, kind, binding);
          if (resource == NULL) {
             if (map->count == ARRAY_SIZE(map->resource)) {
-               *reason = "Apple9 compiler supports up to four buffer resources";
+               *reason = "Apple9 compiler supports up to eight buffer resources";
                return false;
             }
             resource = &map->resource[map->count++];
@@ -1510,13 +1514,13 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                        unsigned *dispatch_rank_out, const char **reason)
 {
    if (map->count < 1 || map->count > ARRAY_SIZE(map->resource)) {
-      *reason = "Apple9 buffer compiler requires one to four resources";
+      *reason = "Apple9 buffer compiler requires one to eight resources";
       return false;
    }
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    unsigned block_count = 0;
-   bool written_argument[4] = {false};
+   bool written_argument[AGX_APPLE9_COMPUTE_MAX_RESOURCES] = {false};
 
    nir_foreach_block(block, impl) {
       if (!exec_list_is_empty(&block->instr_list))
@@ -2011,9 +2015,10 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          goto fail;
       }
 
-      if (!agx_apple9_vir_emit_device_store(&lower.program, store->argument,
-                                            index, output, store->components,
-                                            store->bit_size)) {
+      if (!agx_apple9_vir_emit_device_store(
+             &lower.program,
+             AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + store->argument,
+             index, output, store->components, store->bit_size)) {
          *reason = "could not emit an Apple9 VIR device store";
          goto fail;
       }
@@ -2132,14 +2137,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
 
    if (profile != NULL) {
       const unsigned resource_count = resource_map.count;
-      if (resource_count == 1)
-         *profile = AGX_APPLE9_TINY_COMPUTE_PROFILE;
-      else if (resource_count == 2)
-         *profile = AGX_APPLE9_SSBO2_COMPUTE_PROFILE;
-      else if (resource_count == 3)
-         *profile = AGX_APPLE9_SSBO3_STATE_U6_COMPUTE_PROFILE;
-      else
-         *profile = AGX_APPLE9_SSBO4_COMPUTE_PROFILE;
+      *profile = AGX_APPLE9_SSBO8_SUPERSET_COMPUTE_PROFILE;
       profile->resource_binding_count = resource_count;
       profile->resource_read_mask = resource_map.read_mask;
       profile->resource_write_mask = resource_map.write_mask;
@@ -2154,8 +2152,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       }
       profile->index_rank = index_rank;
 
-      bool bounded_argument[4] = {false};
-      bool affine_argument[4] = {false};
+      bool bounded_argument[AGX_APPLE9_COMPUTE_MAX_RESOURCES] = {false};
+      bool affine_argument[AGX_APPLE9_COMPUTE_MAX_RESOURCES] = {false};
       util_dynarray_foreach(&stores, struct apple9_buffer_store, store) {
          const uint8_t element_size = store->bit_size / 8;
          uint8_t *profile_size =

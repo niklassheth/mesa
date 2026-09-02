@@ -60,12 +60,15 @@ struct agx_apple9_render_pipeline {
 #define AGX_APPLE9_COMPUTE_MAIN_MAX_SIZE                                       \
    (AGX_APPLE9_COMPUTE_CODE_SIZE - AGX_APPLE9_COMPUTE_MAIN_OFFSET)
 #define AGX_APPLE9_COMPUTE_STATE_OFFSET          0x18000u
+#define AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET 0x70000u
+#define AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE   0x02000u
 #define AGX_APPLE9_COMPUTE_LAUNCH_OFFSET         0x90000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_OFFSET       0xe0000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET 0x14a0u
 #define AGX_APPLE9_COMPUTE_LAUNCH_ALIGN          0x40u
 #define AGX_APPLE9_COMPUTE_LAUNCH_REGION_END     0x98000u
 #define AGX_APPLE9_COMPUTE_RESOURCE_STRIDE       0x20u
+#define AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE 0x80u
 #define AGX_APPLE9_COMPUTE_STATE_STRIDE          0x40u
 #define AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE       0x2cu
 #define AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE 0x28u
@@ -177,8 +180,8 @@ unsigned agx_apple9_compute_resource_count(
    const struct agx_apple9_compute_profile *profile);
 
 /* Exact per-dispatch resource-record footprint selected by the package ABI.
- * Most established carriers use the 0x20-byte base stride; EXP-M4-28 shared
- * carriers append a marker qword and require a complete 0x40-byte record. */
+ * The superset carrier uses one 0x80-byte record containing its hidden prefix,
+ * eight visible slots, sentinel, and inline geometry tuples. */
 size_t agx_apple9_compute_resource_record_size(
    const struct agx_apple9_compute_profile *profile);
 
@@ -197,9 +200,7 @@ unsigned agx_apple9_compute_resource_binding(
    const struct agx_apple9_compute_profile *profile, unsigned argument);
 
 /* Additional bytes addressed beyond the dense u32 invocation range for one
- * package argument.  UINT64_MAX denotes an invalid argument.  For the
- * state-u4 SSBO2 ABIs, argument zero's tail must equal the greatest published
- * element offset times sizeof(uint32_t); builders reject underdeclared bounds. */
+ * package argument. UINT64_MAX denotes an invalid argument. */
 uint64_t agx_apple9_compute_resource_access_tail(
    const struct agx_apple9_compute_profile *profile, unsigned argument);
 
@@ -278,14 +279,14 @@ bool agx_apple9_build_compute_dispatch(
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint32_t state_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count);
+   unsigned resource_count, const uint32_t global[3]);
 
 bool agx_apple9_build_compute_dispatch_persistent(
    void *mapping, size_t mapping_size, uint64_t usc_exec_base,
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint64_t state_address, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count);
+   unsigned resource_count, const uint32_t global[3]);
 
 void
 agx_apple9_build_compute_package(void *mapping, uint64_t base, const void *main,

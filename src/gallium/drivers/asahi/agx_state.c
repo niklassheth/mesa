@@ -5848,10 +5848,7 @@ agx_apple9_compute_ssbo_offset_alignment(
       return 0;
 
    switch (profile->abi) {
-   case AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32:
-   case AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32:
-   case AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6:
-   case AGX_APPLE9_COMPUTE_ABI_SSBO4_INTEGER_U32:
+   case AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET:
       return profile->resource_access_element_size[argument]
                 ? profile->resource_access_element_size[argument]
                 : sizeof(uint32_t);
@@ -6157,7 +6154,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
          agx_bo_map(batch->apple9_package), batch->apple9_package->size,
          dev->shader_base, package_base, cs->apple9_main_offset, launch_offset,
          cs->apple9_state_address, resource_offset, &cs->apple9_compute_profile,
-         resource_addresses, resource_count);
+         resource_addresses, resource_count, global);
       if (!package_built) {
          fprintf(stderr,
                  "Apple9 compute package construction failed after layout "

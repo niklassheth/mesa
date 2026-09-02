@@ -18,6 +18,7 @@ enum tool_program {
    TOOL_PROGRAM_GLOBAL_ID_MUL_ADD,
    TOOL_PROGRAM_DAG,
    TOOL_PROGRAM_SELECT_DAG,
+   TOOL_PROGRAM_CARRIER,
 };
 
 static nir_shader *
@@ -29,7 +30,7 @@ store_shader(enum tool_program program, unsigned first, unsigned second)
    b.shader->info.workgroup_size[0] = 256;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
-   b.shader->info.num_ssbos = 1;
+   b.shader->info.num_ssbos = program == TOOL_PROGRAM_CARRIER ? first : 1;
 
    nir_def *global_id = nir_load_global_invocation_id(&b, 32);
    nir_def *gid = nir_channel(&b, global_id, 0);
@@ -58,6 +59,18 @@ store_shader(enum tool_program program, unsigned first, unsigned second)
          nir_ixor(&b, gid, nir_imm_int(&b, 0x55)),
          nir_iadd_imm(&b, gid, 100));
       break;
+   case TOOL_PROGRAM_CARRIER: {
+      nir_def *offset = nir_imul_imm(&b, gid, 4);
+      value = nir_imm_int(&b, 0x6d2b79f5);
+      for (unsigned binding = 0; binding + 1 < first; ++binding) {
+         nir_def *loaded = nir_load_ssbo(
+            &b, 1, 32, nir_imm_int(&b, binding), offset, .align_mul = 4);
+         value = nir_iadd(&b, nir_imul_imm(&b, value, 33), loaded);
+      }
+      nir_store_ssbo(&b, value, nir_imm_int(&b, first - 1), offset,
+                     .align_mul = 4);
+      return b.shader;
+   }
    }
 
    nir_store_ssbo(&b, value, nir_imm_int(&b, 0),
@@ -87,6 +100,7 @@ usage:
       fprintf(stderr, "       %s OUTPUT mad MULTIPLIER ADDEND\n", argv[0]);
       fprintf(stderr, "       %s OUTPUT dag\n", argv[0]);
       fprintf(stderr, "       %s OUTPUT select-dag\n", argv[0]);
+      fprintf(stderr, "       %s OUTPUT carrier RESOURCE_COUNT\n", argv[0]);
       return EXIT_FAILURE;
    }
 
@@ -99,6 +113,13 @@ usage:
       program = TOOL_PROGRAM_DAG;
    } else if (argc == 3 && strcmp(argv[2], "select-dag") == 0) {
       program = TOOL_PROGRAM_SELECT_DAG;
+   } else if (argc == 4 && strcmp(argv[2], "carrier") == 0) {
+      char *end = NULL;
+      unsigned long count = strtoul(argv[3], &end, 0);
+      if (*argv[3] == '\0' || *end != '\0' || count < 1 || count > 8)
+         goto usage;
+      program = TOOL_PROGRAM_CARRIER;
+      first = count;
    } else if (argc == 3) {
       if (!parse_u8(argv[2], &first))
          goto usage;
@@ -139,8 +160,12 @@ usage:
       return EXIT_FAILURE;
    }
 
-   fprintf(stderr, "Apple9 tiny compiler wrote %u bytes to %s (ABI %u)\n",
+   fprintf(stderr, "Apple9 tiny compiler wrote %u bytes to %s (ABI %u; ",
            compiled.info.binary_size, argv[1], profile.abi);
+   for (unsigned i = 0; i < profile.resource_binding_count; ++i)
+      fprintf(stderr, "%sarg%u=b%u", i ? "," : "", i,
+              profile.resource_binding[i]);
+   fprintf(stderr, ")\n");
    free(compiled.binary);
    ralloc_free(nir);
    return EXIT_SUCCESS;

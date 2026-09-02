@@ -10,25 +10,19 @@
 #include <stdint.h>
 
 /*
- * A main program and its client package form one Apple9 ABI. The generic
- * compiler currently selects one package shape from the number of caller
- * resources. Keep this value opaque until those package programs can be
- * generated semantically.
+ * A main program and its client package form one Apple9 ABI.  The current
+ * carrier has eight visible resource slots; the compiler may use any prefix
+ * of them without changing the external launch program.
  */
 enum agx_apple9_compute_abi {
    AGX_APPLE9_COMPUTE_ABI_INVALID = 0,
-   AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32,
-   AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32,
-   AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6,
-   AGX_APPLE9_COMPUTE_ABI_SSBO4_INTEGER_U32,
+   AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET,
 };
 
+#define AGX_APPLE9_COMPUTE_MAX_RESOURCES 8
+#define AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE 3
+
 #define AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY 8
-#define AGX_APPLE9_SSBO0_STATE_LITERAL_CAPACITY           2
-#define AGX_APPLE9_SSBO3_STATE_U6_LITERAL_CAPACITY        2
-#define AGX_APPLE9_SSBO3_STATE_U6_UNIFORM_BASE            6
-#define AGX_APPLE9_SSBO4_STATE_LITERAL_CAPACITY            1
-#define AGX_APPLE9_SSBO4_STATE_UNIFORM_BASE                8
 
 enum agx_apple9_compute_access_mode {
    /* One scalar element, or the affine/vector range below, per invocation. */
@@ -51,8 +45,9 @@ struct agx_apple9_compute_profile {
 
    /* Mapping from native package arguments to API buffer bindings. */
    uint8_t resource_binding_count;
-   uint8_t resource_binding[4];
-   enum agx_apple9_compute_resource_kind resource_kind[4];
+   uint8_t resource_binding[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
+   enum agx_apple9_compute_resource_kind
+      resource_kind[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
    /* Read/write ownership masks in native package-argument order. */
    uint8_t resource_read_mask;
    uint8_t resource_write_mask;
@@ -66,45 +61,23 @@ struct agx_apple9_compute_profile {
    uint32_t required_threadgroup_memory_bytes;
 
    /* Bounds for each package resource, expressed in scalar elements. */
-   uint32_t resource_access_tail[4];
-   uint32_t resource_access_scale[4];
-   uint32_t resource_access_add[4];
-   uint8_t resource_access_element_size[4];
-   enum agx_apple9_compute_access_mode resource_access_mode[4];
+   uint32_t resource_access_tail[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
+   uint32_t resource_access_scale[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
+   uint32_t resource_access_add[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
+   uint8_t
+      resource_access_element_size[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
+   enum agx_apple9_compute_access_mode
+      resource_access_mode[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
 
    /* Caller state published by package ABIs with a uniform window. */
    uint32_t state_literals[AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY];
    uint8_t state_literal_count;
 };
 
-#define AGX_APPLE9_TINY_COMPUTE_PROFILE                                      \
+#define AGX_APPLE9_SSBO8_SUPERSET_COMPUTE_PROFILE                            \
    ((struct agx_apple9_compute_profile){                                     \
-      .abi = AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32,                         \
-      .local_size = {256, 1, 1},                                            \
-      .index_stride = {1, 0, 0},                                            \
-      .index_rank = 1,                                                       \
-   })
-
-#define AGX_APPLE9_SSBO2_COMPUTE_PROFILE                                     \
-   ((struct agx_apple9_compute_profile){                                     \
-      .abi = AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32,                       \
-      .local_size = {32, 1, 1},                                             \
-      .index_stride = {1, 0, 0},                                            \
-      .index_rank = 1,                                                       \
-   })
-
-#define AGX_APPLE9_SSBO3_STATE_U6_COMPUTE_PROFILE                            \
-   ((struct agx_apple9_compute_profile){                                     \
-      .abi = AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6,                          \
-      .local_size = {32, 1, 1},                                             \
-      .index_stride = {1, 0, 0},                                            \
-      .index_rank = 1,                                                       \
-   })
-
-#define AGX_APPLE9_SSBO4_COMPUTE_PROFILE                                     \
-   ((struct agx_apple9_compute_profile){                                     \
-      .abi = AGX_APPLE9_COMPUTE_ABI_SSBO4_INTEGER_U32,                       \
-      .local_size = {32, 1, 1},                                             \
+      .abi = AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET,                         \
+      .local_size = {16, 1, 1},                                             \
       .index_stride = {1, 0, 0},                                            \
       .index_rank = 1,                                                       \
    })

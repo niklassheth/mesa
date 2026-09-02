@@ -31,9 +31,12 @@ fails during compilation and the triangle is not a regression gate.
   coalesced when already adjacent, and otherwise copied after allocation;
   vector stores never borrow an untracked scratch tuple after allocation.
   Spilling is not implemented and excess pressure fails compilation.
-- Gallium owns the compute archive, compiler state, resource records, launch
-  wrapper selection, CDM command, BOs, VM bindings, and ordinary
+- Gallium owns the compute archive, compiler state, resource records, carrier
+  installation, CDM command, BOs, VM bindings, and ordinary
   `drm_asahi_cmd_compute` submission.
+- One eight-buffer superset carrier serves every currently supported shader.
+  A compiled main may use any prefix of one through eight package resources;
+  changing that active count no longer selects a different launch program.
 - The shared fixed-USC archive is append-only between installations. A
   screen-wide timeline serializes physical ownership changes, while each
   logical DRM VM keeps its own persistent root in the m1n1 backend.
@@ -52,21 +55,27 @@ than falling back to capture-assigned registers or opaque native mains.
 ## External development inputs
 
 The repository deliberately does not contain captured Metal package blobs.
-During this bring-up phase, five recapturable compute wrapper inputs are loaded
-from hardcoded paths under
+During this bring-up phase, three recapturable inputs from one own-source
+eight-buffer carrier are loaded from hardcoded paths under
 `/home/nsheth/Projects/asahi/tmp/agx-apple9`:
 
 ```text
-/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo0_u32.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/constant_ssbo3_state_u6.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo2_integer_u32.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo3_state_u6.bin
-/home/nsheth/Projects/asahi/tmp/agx-apple9/launch_ssbo4_mix_u32.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/constant.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/launch.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/division.bin
 ```
 
-Their lengths are taken from the files. The driver checks only offsets it must
-patch or inspect, so a recaptured G17P wrapper is not rejected merely because
-its complete size differs from the current T8132 input.
+The carrier resource record has three hidden entries followed by eight visible
+buffer entries and a zero sentinel. The first two hidden entries point to
+per-dispatch grid and unit tuples materialized inside the record. The third
+points to the relocated 8-KiB integer-division helper table in `division.bin`.
+Unused visible entries are padded with a valid mapped pointer that the compiled
+main cannot reference. The full one-through-eight prefix has passed exact
+hardware output and input/guard-preservation checks through ordinary GLSL,
+Gallium, the DRM UAPI, and the G16 shim.
+
+File lengths are taken from the files. The driver validates only the regions
+it actually installs or patches; it does not require an exact whole-file size.
 
 Two optional, currently non-gated render research inputs use the same
 directory:
@@ -83,11 +92,9 @@ archive experiments without putting opaque Metal data in repository history.
 The current local T8132 input hashes are:
 
 ```text
-0fe7ae20c8761022b6940efde92e2b90085a87ad96d7a817d14c96370a56a80a  launch_ssbo0_u32.bin
-9baa760c5185b9e5645bd1299e5ec948674258d6cbb0dc68b1394f1e45f3fd27  constant_ssbo3_state_u6.bin
-b49a0d82230637faa29d92d55fb659efbc396fc339c93dd80a8f1114b90711e6  launch_ssbo2_integer_u32.bin
-86b23ba7a8e7b030d6e813846461d6695bf98c60233a44e49a78fb34b36a9f0c  launch_ssbo3_state_u6.bin
-631476197ad6b0fd8ac0b2d50b1ca07096a59650f0b247576ba95762ec196541  launch_ssbo4_mix_u32.bin
+a3586e009bd675feb6b67d72b6f8b9500bde15487584c1a054925ac9af2d75ce  carrier8/constant.bin
+62e85e9dd6cca4dd033cb101ad860da28934d8f92d7498d7bd11b42eff0957c3  carrier8/launch.bin
+fbb72c3f6ffb8e4a2fd17c9155d5ae32d7e704eeb5c0c906bef6d315c7299e80  carrier8/division.bin
 9c7912148f4d4b48b59ba8e720e9dc94d0988f191294394af79849b21fb99cfe  g16_render_package.bin.zst
 da8e9c9df75305fb8d11cd8d468e8cf0f35bb5172e7465777b6d258f243b145b  render_interleaved_vbo_launch.bin
 ```
@@ -156,7 +163,9 @@ Success means exact complete-buffer comparison, not merely command retirement.
 The native cases also verify immutable inputs, poison-filled gaps, leading and
 trailing guards, multiple bindings and dependent addresses. Dedicated cases
 exercise repeated range dispatch, program publication/retirement pressure, and
-ordered reuse of independently compiled programs.
+ordered reuse of independently compiled programs. `superset-1` through
+`superset-8` specifically compile distinct ordinary GLSL programs and exercise
+every active-resource occupancy of the shared carrier.
 
 ## Bring-up boundary
 

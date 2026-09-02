@@ -6,6 +6,7 @@
 #include <GLES3/gl31.h>
 
 #include <limits.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,6 +44,19 @@ check_gl(const char *operation)
               operation, error);
       exit(1);
    }
+}
+
+static void
+append_source(char *source, size_t capacity, size_t *used,
+              const char *format, ...)
+{
+   va_list args;
+   va_start(args, format);
+   int written = vsnprintf(source + *used, capacity - *used, format, args);
+   va_end(args);
+   if (written < 0 || (size_t)written >= capacity - *used)
+      fail("compute shader source overflow");
+   *used += written;
 }
 
 static size_t
@@ -983,6 +997,127 @@ verify_buffer(GLuint buffer, const char *name, const uint8_t *expected,
       fail("unmap guarded buffer");
 }
 
+static uint32_t
+superset_input(unsigned binding, uint32_t index)
+{
+   return ((index * (0x01010101u + binding * 0x00110011u)) ^
+           (0xa5a50000u | (binding * 0x1111u + 0x31u)));
+}
+
+static void
+run_superset_resource_case(unsigned resource_count)
+{
+   if (resource_count < 1 || resource_count > 8)
+      fail("invalid superset resource count");
+
+   const unsigned input_count = resource_count - 1;
+   char source[8192];
+   size_t used = 0;
+   append_source(source, sizeof(source), &used,
+                 "#version 310 es\nlayout(local_size_x=32) in;\n");
+   for (unsigned binding = 0; binding < input_count; ++binding)
+      append_source(source, sizeof(source), &used,
+                    "layout(std430,binding=%u) readonly buffer I%u "
+                    "{ uint v[]; } i%u;\n",
+                    binding, binding, binding);
+   append_source(source, sizeof(source), &used,
+                 "layout(std430,binding=%u) buffer O { uint v[]; } o;\n"
+                 "void main(){uint x=gl_GlobalInvocationID.x;"
+                 "uint value=0x6d2b79f5u;",
+                 input_count);
+   for (unsigned binding = 0; binding < input_count; ++binding)
+      append_source(source, sizeof(source), &used,
+                    "value=value*33u+i%u.v[x];", binding);
+   append_source(source, sizeof(source), &used, "o.v[x]=value;}\n");
+
+   GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+   const char *sources[] = {source};
+   glShaderSource(shader, 1, sources, NULL);
+   glCompileShader(shader);
+   GLint ok = GL_FALSE;
+   glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+   if (!ok) {
+      char log[4096];
+      GLsizei size = 0;
+      glGetShaderInfoLog(shader, sizeof(log), &size, log);
+      fprintf(stderr, "superset-%u compile failed: %.*s\n", resource_count,
+              size, log);
+      fail("superset compute shader compile");
+   }
+   GLuint program = glCreateProgram();
+   glAttachShader(program, shader);
+   glLinkProgram(program);
+   glDeleteShader(shader);
+   glGetProgramiv(program, GL_LINK_STATUS, &ok);
+   if (!ok)
+      fail("superset compute program link");
+
+   GLint alignment_value = 0;
+   glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &alignment_value);
+   if (alignment_value <= 0)
+      fail("invalid superset SSBO alignment");
+   const size_t alignment =
+      (size_t)alignment_value > sizeof(uint32_t)
+         ? (size_t)alignment_value
+         : sizeof(uint32_t);
+   struct buffer_layout layout = make_layout(1, alignment);
+   GLuint buffers[8] = {0};
+   uint8_t *initial[8] = {0};
+   uint8_t *expected_output = malloc(layout.buffer_bytes);
+   if (!expected_output)
+      fail("allocate superset output oracle");
+   glGenBuffers(resource_count, buffers);
+   const size_t base = payload_offset(&layout, 0);
+   for (unsigned binding = 0; binding < resource_count; ++binding) {
+      initial[binding] = malloc(layout.buffer_bytes);
+      if (!initial[binding])
+         fail("allocate superset buffer image");
+      seed_buffer(initial[binding], layout.buffer_bytes, binding);
+      if (binding < input_count) {
+         for (uint32_t i = 0; i < VALUE_COUNT; ++i)
+            write_word(initial[binding], base + i * sizeof(uint32_t),
+                       superset_input(binding, i));
+      }
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes,
+                   initial[binding], GL_STATIC_DRAW);
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding, buffers[binding],
+                        base, PAYLOAD_BYTES);
+   }
+   memcpy(expected_output, initial[input_count], layout.buffer_bytes);
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+      uint32_t value = 0x6d2b79f5u;
+      for (unsigned binding = 0; binding < input_count; ++binding)
+         value = value * 33u + superset_input(binding, i);
+      write_word(expected_output, base + i * sizeof(uint32_t), value);
+   }
+
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE_X, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   check_gl("superset dispatch");
+   for (unsigned binding = 0; binding < input_count; ++binding) {
+      char name[32];
+      snprintf(name, sizeof(name), "superset-%u input-%u", resource_count,
+               binding);
+      verify_buffer(buffers[binding], name, initial[binding],
+                    layout.buffer_bytes);
+   }
+   char output_name[32];
+   snprintf(output_name, sizeof(output_name), "superset-%u output",
+            resource_count);
+   verify_buffer(buffers[input_count], output_name, expected_output,
+                 layout.buffer_bytes);
+
+   glDeleteProgram(program);
+   glDeleteBuffers(resource_count, buffers);
+   for (unsigned binding = 0; binding < resource_count; ++binding)
+      free(initial[binding]);
+   free(expected_output);
+}
+
 static void
 verify_completed_payloads(GLuint output, const struct buffer_layout *layout,
                           size_t completed_slots, enum workload workload)
@@ -1011,6 +1146,14 @@ verify_completed_payloads(GLuint output, const struct buffer_layout *layout,
 }
 
 static const char *const memory_cases[] = {
+   "superset-1",
+   "superset-2",
+   "superset-3",
+   "superset-4",
+   "superset-5",
+   "superset-6",
+   "superset-7",
+   "superset-8",
    "add3",
    "sparse-bindings",
    "aos-load",
@@ -1054,6 +1197,12 @@ t8132_apple9_memory_case_names(size_t *count)
 void
 t8132_apple9_run_memory_case(const char *name)
 {
+   if (strncmp(name, "superset-", 9) == 0 && name[9] >= '1' &&
+       name[9] <= '8' && name[10] == '\0') {
+      run_superset_resource_case(name[9] - '0');
+      return;
+   }
+
    enum workload workload = parse_workload(name);
    if (workload > WORKLOAD_FOUR_RESOURCE_MIX)
       fail("workload is not an individual memory case");

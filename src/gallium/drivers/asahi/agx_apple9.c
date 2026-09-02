@@ -34,11 +34,9 @@ struct apple9_external_blob {
    size_t size;
 };
 
-static struct apple9_external_blob apple9_launch_ssbo0_u32;
-static struct apple9_external_blob apple9_constant_ssbo3_state_u6;
-static struct apple9_external_blob apple9_launch_ssbo3_state_u6;
-static struct apple9_external_blob apple9_launch_ssbo2_integer_u32;
-static struct apple9_external_blob apple9_launch_ssbo4_mix_u32;
+static struct apple9_external_blob apple9_constant_ssbo8_superset;
+static struct apple9_external_blob apple9_launch_ssbo8_superset;
+static struct apple9_external_blob apple9_division_ssbo8_superset;
 static struct apple9_external_blob apple9_g16_render_package_zst;
 static struct apple9_external_blob apple9_render_interleaved_vbo_launch;
 
@@ -71,16 +69,12 @@ static void
 apple9_load_compute_blobs_once(void)
 {
    apple9_compute_blobs_loaded =
-      apple9_load_external_blob("launch_ssbo0_u32.bin",
-                                &apple9_launch_ssbo0_u32) &&
-      apple9_load_external_blob("constant_ssbo3_state_u6.bin",
-                                &apple9_constant_ssbo3_state_u6) &&
-      apple9_load_external_blob("launch_ssbo3_state_u6.bin",
-                                &apple9_launch_ssbo3_state_u6) &&
-      apple9_load_external_blob("launch_ssbo2_integer_u32.bin",
-                                &apple9_launch_ssbo2_integer_u32) &&
-      apple9_load_external_blob("launch_ssbo4_mix_u32.bin",
-                                &apple9_launch_ssbo4_mix_u32);
+      apple9_load_external_blob("carrier8/constant.bin",
+                                &apple9_constant_ssbo8_superset) &&
+      apple9_load_external_blob("carrier8/launch.bin",
+                                &apple9_launch_ssbo8_superset) &&
+      apple9_load_external_blob("carrier8/division.bin",
+                                &apple9_division_ssbo8_superset);
 }
 
 static bool
@@ -110,32 +104,17 @@ apple9_render_blobs_available(void)
    return apple9_render_blobs_loaded;
 }
 
-static const uint8_t apple9_constant_ssbo0_u32[0x40] = {
-   [0] = 0x0e,  [4] = 0x06,  [6] = 0x06,  [8] = 0x06,  [10] = 0x06, [12] = 0x06,
-   [14] = 0x06, [16] = 0x06, [18] = 0x06, [20] = 0x06, [22] = 0x06, [24] = 0x06,
-   [26] = 0x06, [28] = 0x06, [30] = 0x06, [32] = 0x06, [34] = 0x06, [36] = 0x06,
-   [38] = 0x06, [40] = 0x06, [42] = 0x06, [44] = 0x06, [46] = 0x06, [48] = 0x06,
-   [50] = 0x06, [52] = 0x06, [54] = 0x06, [56] = 0x06, [58] = 0x06, [60] = 0x06,
-   [62] = 0x06,
-};
-
 struct apple9_compute_abi_desc {
-   const uint8_t *constant_program;
-   size_t constant_size;
    const struct apple9_external_blob *constant_blob;
    const struct apple9_external_blob *launch_blob;
    uint16_t archive_call_offset;
    uint8_t helper_slots;
    uint8_t resource_count;
-   uint8_t resource_binding[4];
    uint8_t hidden_resource_count;
    uint16_t resource_record_size;
-   uint64_t resource_qword4;
    bool has_dynamic_state;
    uint8_t state_uniform_base;
    uint8_t state_literal_capacity;
-   uint32_t ssbo_read_mask;
-   uint32_t ssbo_write_mask;
    uint32_t required_threadgroup_memory_bytes;
    uint32_t cdm_config;
    uint32_t cdm_constant;
@@ -145,13 +124,13 @@ struct apple9_compute_abi_desc {
 static const uint8_t *
 apple9_compute_constant_program(const struct apple9_compute_abi_desc *abi)
 {
-   return abi->constant_blob ? abi->constant_blob->data : abi->constant_program;
+   return abi->constant_blob->data;
 }
 
 static size_t
 apple9_compute_constant_size(const struct apple9_compute_abi_desc *abi)
 {
-   return abi->constant_blob ? abi->constant_blob->size : abi->constant_size;
+   return abi->constant_blob->size;
 }
 
 static const uint8_t *
@@ -169,65 +148,17 @@ apple9_compute_launch_program_size(const struct apple9_compute_abi_desc *abi)
 static const struct apple9_compute_abi_desc *
 apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
 {
-   static const struct apple9_compute_abi_desc ssbo0_store_u32 = {
-      .constant_program = apple9_constant_ssbo0_u32,
-      .constant_size = sizeof(apple9_constant_ssbo0_u32),
-      .launch_blob = &apple9_launch_ssbo0_u32,
-      .archive_call_offset = 0x46,
+   static const struct apple9_compute_abi_desc ssbo8_superset = {
+      .constant_blob = &apple9_constant_ssbo8_superset,
+      .launch_blob = &apple9_launch_ssbo8_superset,
+      .archive_call_offset = 0x8c,
       .helper_slots = 10,
-      .resource_count = 1,
-      .resource_binding = {0},
+      .resource_count = AGX_APPLE9_COMPUTE_MAX_RESOURCES,
+      .hidden_resource_count = AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE,
+      .resource_record_size = 0x80,
       .has_dynamic_state = true,
-      .state_uniform_base = 2,
-      .state_literal_capacity = AGX_APPLE9_SSBO0_STATE_LITERAL_CAPACITY,
-      .ssbo_write_mask = 1,
-      .cdm_config = 0x00080000,
-      .cdm_constant = 0x01000000,
-      .cdm_tail = 0x60000160,
-   };
-   static const struct apple9_compute_abi_desc ssbo2_integer_u32 = {
-      .constant_blob = &apple9_constant_ssbo3_state_u6,
-      .launch_blob = &apple9_launch_ssbo2_integer_u32,
-      .archive_call_offset = 0x28,
-      .helper_slots = 10,
-      .resource_count = 2,
-      .resource_binding = {1, 0},
-      .ssbo_read_mask = 1,
-      .ssbo_write_mask = 2,
-      .cdm_config = 0x00080000,
-      .cdm_constant = 0x01000000,
-      .cdm_tail = 0x60000160,
-   };
-   static const struct apple9_compute_abi_desc ssbo3_state_u6 = {
-      .constant_blob = &apple9_constant_ssbo3_state_u6,
-      .launch_blob = &apple9_launch_ssbo3_state_u6,
-      .archive_call_offset = 0x54,
-      .helper_slots = 10,
-      .resource_count = 3,
-      .resource_binding = {2, 1, 0},
-      .has_dynamic_state = true,
-      .state_uniform_base = AGX_APPLE9_SSBO3_STATE_U6_UNIFORM_BASE,
-      .state_literal_capacity = AGX_APPLE9_SSBO3_STATE_U6_LITERAL_CAPACITY,
-      .ssbo_read_mask = 3,
-      .ssbo_write_mask = 4,
-      .cdm_config = 0x00080000,
-      .cdm_constant = 0x01000000,
-      .cdm_tail = 0x60000160,
-   };
-   static const struct apple9_compute_abi_desc ssbo4_integer_u32 = {
-      .constant_blob = &apple9_constant_ssbo3_state_u6,
-      .launch_blob = &apple9_launch_ssbo4_mix_u32,
-      .archive_call_offset = 0x54,
-      .helper_slots = 10,
-      .resource_count = 4,
-      .resource_binding = {3, 2, 1, 0},
-      .has_dynamic_state = true,
-      .state_uniform_base = AGX_APPLE9_SSBO4_STATE_UNIFORM_BASE,
-      .state_literal_capacity = AGX_APPLE9_SSBO4_STATE_LITERAL_CAPACITY,
-      .ssbo_read_mask = 0x7,
-      .ssbo_write_mask = 0x8,
-      .cdm_config = 0x00080000,
-      .cdm_constant = 0x01000000,
+      .cdm_config = 0x00880000,
+      .cdm_constant = 0x01000040,
       .cdm_tail = 0x60000160,
    };
 
@@ -238,14 +169,8 @@ apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
       return NULL;
 
    switch (profile->abi) {
-   case AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32:
-      return &ssbo0_store_u32;
-   case AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32:
-      return &ssbo2_integer_u32;
-   case AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6:
-      return &ssbo3_state_u6;
-   case AGX_APPLE9_COMPUTE_ABI_SSBO4_INTEGER_U32:
-      return &ssbo4_integer_u32;
+   case AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET:
+      return &ssbo8_superset;
    default:
       return NULL;
    }
@@ -253,13 +178,13 @@ apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
 
 static bool
 apple9_compute_access_metadata_valid(
-   const struct agx_apple9_compute_profile *profile,
-   const struct apple9_compute_abi_desc *abi)
+   const struct agx_apple9_compute_profile *profile)
 {
+   const unsigned active = profile->resource_binding_count;
    for (unsigned i = 0;
         i < ARRAY_SIZE(profile->resource_access_element_size); ++i) {
       const uint8_t size = profile->resource_access_element_size[i];
-      if (i < abi->resource_count) {
+      if (i < active) {
          if (size != 0 && size != 1 && size != 2 && size != 4)
             return false;
 
@@ -292,19 +217,16 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
                              const struct apple9_compute_abi_desc *abi)
 {
    if (!profile || !abi ||
-       !apple9_compute_access_metadata_valid(profile, abi) ||
-       (profile->resource_binding_count != 0 &&
-        profile->resource_binding_count != abi->resource_count) ||
+       !apple9_compute_access_metadata_valid(profile) ||
+       profile->resource_binding_count == 0 ||
+       profile->resource_binding_count > abi->resource_count ||
        profile->required_threadgroup_memory_bytes != 0)
       return false;
 
-   const uint32_t resource_mask = BITFIELD_MASK(abi->resource_count);
-   const uint32_t read_mask = profile->resource_binding_count
-                                 ? profile->resource_read_mask
-                                 : abi->ssbo_read_mask;
-   const uint32_t write_mask = profile->resource_binding_count
-                                  ? profile->resource_write_mask
-                                  : abi->ssbo_write_mask;
+   const unsigned active = profile->resource_binding_count;
+   const uint32_t resource_mask = BITFIELD_MASK(active);
+   const uint32_t read_mask = profile->resource_read_mask;
+   const uint32_t write_mask = profile->resource_write_mask;
    if (!write_mask || ((read_mask | write_mask) & ~resource_mask))
       return false;
 
@@ -321,7 +243,7 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
       }
    }
 
-   for (unsigned i = 0; i < abi->resource_count; ++i) {
+   for (unsigned i = 0; i < active; ++i) {
       if (profile->resource_kind[i] > AGX_APPLE9_COMPUTE_RESOURCE_UBO ||
           ((write_mask & BITFIELD_BIT(i)) &&
            profile->resource_kind[i] != AGX_APPLE9_COMPUTE_RESOURCE_SSBO))
@@ -563,7 +485,9 @@ agx_apple9_compute_resource_count(
    const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi ? abi->resource_count : 0;
+   return abi && apple9_compute_profile_valid(profile, abi)
+             ? profile->resource_binding_count
+             : 0;
 }
 
 static size_t
@@ -600,12 +524,10 @@ agx_apple9_compute_resource_binding(
    const struct agx_apple9_compute_profile *profile, unsigned argument)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!abi || argument >= abi->resource_count)
+   if (!abi || argument >= profile->resource_binding_count)
       return UINT8_MAX;
 
-   return profile->resource_binding_count != 0
-             ? profile->resource_binding[argument]
-             : abi->resource_binding[argument];
+   return profile->resource_binding[argument];
 }
 
 enum agx_apple9_compute_resource_kind
@@ -613,7 +535,7 @@ agx_apple9_compute_resource_kind(
    const struct agx_apple9_compute_profile *profile, unsigned argument)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!abi || argument >= abi->resource_count)
+   if (!abi || argument >= profile->resource_binding_count)
       return AGX_APPLE9_COMPUTE_RESOURCE_SSBO;
 
    return profile->resource_kind[argument];
@@ -624,7 +546,7 @@ agx_apple9_compute_resource_access_tail(
    const struct agx_apple9_compute_profile *profile, unsigned argument)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi && argument < abi->resource_count
+   return abi && argument < profile->resource_binding_count
              ? profile->resource_access_tail[argument]
              : UINT64_MAX;
 }
@@ -635,7 +557,7 @@ agx_apple9_compute_resource_required_span(
    uint64_t invocations)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!abi || argument >= abi->resource_count || invocations == 0 ||
+   if (!abi || argument >= profile->resource_binding_count || invocations == 0 ||
        !apple9_compute_profile_valid(profile, abi))
       return UINT64_MAX;
 
@@ -688,20 +610,14 @@ uint32_t
 agx_apple9_compute_read_mask(const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi ? (profile->resource_binding_count
-                    ? profile->resource_read_mask
-                    : abi->ssbo_read_mask)
-              : 0;
+   return abi ? profile->resource_read_mask : 0;
 }
 
 uint32_t
 agx_apple9_compute_write_mask(const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi ? (profile->resource_binding_count
-                    ? profile->resource_write_mask
-                    : abi->ssbo_write_mask)
-              : 0;
+   return abi ? profile->resource_write_mask : 0;
 }
 
 uint32_t
@@ -768,7 +684,7 @@ agx_apple9_compute_grid_supported(
       elements *= global[d];
    }
 
-   /* EXP-M4-29's geometry carrier computes its linear index from the native
+   /* The superset carrier computes its linear index from the native
     * grid tuples.  Its stride is dispatch state rather than a compile-time
     * property of the main, so the older capture-bounded index-stride checks
     * do not apply. */
@@ -1022,8 +938,7 @@ apple9_compute_transient_dispatch_fits(
       apple9_compute_resource_record_size_for_abi(abi);
    if (!abi || !launch_size || !apple9_compute_profile_valid(profile, abi) ||
        (abi->hidden_resource_count + abi->resource_count) * sizeof(uint64_t) >
-          resource_record_size ||
-       (abi->resource_qword4 && resource_record_size < 5 * sizeof(uint64_t)))
+          resource_record_size)
       return false;
 
    const uint32_t resource_start = AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
@@ -1106,17 +1021,62 @@ agx_apple9_build_compute_state(void *mapping, size_t mapping_size,
    return true;
 }
 
+static bool
+apple9_build_superset_resource_record(
+   uint8_t *package, size_t mapping_size, uint64_t package_base,
+   uint32_t resource_table_offset, const struct apple9_compute_abi_desc *abi,
+   const uint64_t *resources, unsigned resource_count,
+   const uint32_t global[3])
+{
+   const size_t record_size = apple9_compute_resource_record_size_for_abi(abi);
+   const size_t division_size = apple9_division_ssbo8_superset.size;
+   if (!package || !abi || abi->hidden_resource_count != 3 || !resources ||
+       !global || resource_count == 0 || resource_count > abi->resource_count ||
+       record_size < AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE ||
+       division_size > AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE ||
+       !apple9_range_fits(mapping_size,
+                          AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET,
+                          AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE) ||
+       package_base > UINT64_MAX - resource_table_offset - 0x6c ||
+       package_base > UINT64_MAX - AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET)
+      return false;
+
+   uint8_t *record = package + resource_table_offset;
+   uint64_t record_address = package_base + resource_table_offset;
+   uint64_t division_address =
+      package_base + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET;
+   memset(package + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET, 0,
+          AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE);
+   memcpy(package + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET,
+          apple9_division_ssbo8_superset.data, division_size);
+
+   memset(record, 0, record_size);
+   apple9_put_u64(record + 0x00, record_address + 0x60);
+   apple9_put_u64(record + 0x08, record_address + 0x6c);
+   apple9_put_u64(record + 0x10, division_address);
+   for (unsigned i = 0; i < abi->resource_count; ++i)
+      apple9_put_u64(record + 0x18 + i * sizeof(uint64_t),
+                     i < resource_count ? resources[i] : division_address);
+   /* qword 11 is the native zero sentinel. */
+   apple9_put_u64(record + 0x58, 0);
+   for (unsigned d = 0; d < 3; ++d) {
+      apple9_put_u32(record + 0x60 + d * sizeof(uint32_t), global[d]);
+      apple9_put_u32(record + 0x6c + d * sizeof(uint32_t), 1);
+   }
+   return true;
+}
+
 bool
 agx_apple9_build_compute_dispatch(
    void *mapping, size_t mapping_size, uint64_t usc_exec_base,
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint32_t state_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count)
+   unsigned resource_count, const uint32_t global[3])
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !abi || abi->hidden_resource_count || !resources ||
-       resource_count != abi->resource_count)
+   if (!mapping || !abi || !resources || !global ||
+       resource_count != profile->resource_binding_count)
       return false;
 
    size_t launch_size = agx_apple9_compute_launch_size(profile);
@@ -1145,19 +1105,13 @@ agx_apple9_build_compute_dispatch(
 
    uint8_t *package = mapping;
    uint8_t *launch = package + launch_offset;
-   uint8_t *resource = package + resource_table_offset;
    if (abi->has_dynamic_state)
       memcpy(package + state_offset, state_image, sizeof(state_image));
-   size_t resource_record_size =
-      apple9_compute_resource_record_size_for_abi(abi);
-   memset(resource, 0, resource_record_size);
    memcpy(launch, temporary, launch_size);
    free(temporary);
-   for (unsigned i = 0; i < resource_count; ++i)
-      apple9_put_u64(resource + i * sizeof(uint64_t), resources[i]);
-   if (abi->resource_qword4)
-      apple9_put_u64(resource + 4 * sizeof(uint64_t), abi->resource_qword4);
-   return true;
+   return apple9_build_superset_resource_record(
+      package, mapping_size, package_base, resource_table_offset, abi,
+      resources, resource_count, global);
 }
 
 bool
@@ -1166,11 +1120,11 @@ agx_apple9_build_compute_dispatch_persistent(
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint64_t state_address, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count)
+   unsigned resource_count, const uint32_t global[3])
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !abi || abi->hidden_resource_count || !resources ||
-       resource_count != abi->resource_count ||
+   if (!mapping || !abi || !resources || !global ||
+       resource_count != profile->resource_binding_count ||
        (abi->has_dynamic_state && !agx_apple9_compute_state_address_supported(
                                      usc_exec_base, state_address)) ||
        (!abi->has_dynamic_state && state_address != 0) ||
@@ -1194,17 +1148,11 @@ agx_apple9_build_compute_dispatch_persistent(
 
    uint8_t *package = mapping;
    uint8_t *launch = package + launch_offset;
-   uint8_t *resource = package + resource_table_offset;
-   size_t resource_record_size =
-      apple9_compute_resource_record_size_for_abi(abi);
-   memset(resource, 0, resource_record_size);
    memcpy(launch, temporary, launch_size);
    free(temporary);
-   for (unsigned i = 0; i < resource_count; ++i)
-      apple9_put_u64(resource + i * sizeof(uint64_t), resources[i]);
-   if (abi->resource_qword4)
-      apple9_put_u64(resource + 4 * sizeof(uint64_t), abi->resource_qword4);
-   return true;
+   return apple9_build_superset_resource_record(
+      package, mapping_size, package_base, resource_table_offset, abi,
+      resources, resource_count, global);
 }
 
 bool
@@ -1223,11 +1171,11 @@ agx_apple9_build_compute_package(
    const struct agx_apple9_compute_profile *profile)
 {
    /*
-    * The archive block is header(0x40) + constant(0x40) + a main allocation
-    * rounded to 0x40 bytes.  Caller-owned M4 captures retain a 0xc0 block for
-    * 24-, 32-, 36-, 44-, and 56-byte mains alike; 0x10-byte rounding creates
-    * a syntactically plausible but invalid block that can retire while a
-    * terminal compare returns garbage.
+    * The archive block is header(0x40) + the carrier constant program + main
+    * rounded to 0x40 bytes.  EXP-M4-39 proves that the first 0x40 bytes of the
+    * captured constant region are sufficient with the largest eight-resource
+    * main.  Smaller alignment remains invalid: a 0x10-byte-rounded block can
+    * retire while a terminal compare returns garbage.
     */
    uint8_t *package = mapping;
    uint8_t *code = package + AGX_APPLE9_COMPUTE_CODE_OFFSET;
@@ -1245,7 +1193,7 @@ agx_apple9_build_compute_package(
          : 0,
       AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
          AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET,
-      profile, resources, resource_count);
+      profile, resources, resource_count, (const uint32_t[3]){1, 1, 1});
    assert(built);
 }
 

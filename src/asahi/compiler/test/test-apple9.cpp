@@ -2322,7 +2322,7 @@ apple9_expect_compile(nir_shader *nir, enum agx_apple9_compute_abi expected_abi)
 TEST(Apple9Compiler, ConstantStoreUsesGenericPipeline)
 {
    apple9_expect_compile(apple9_constant_store_shader(42),
-                         AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+                         AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
 }
 
 TEST(Apple9Compiler, LargeConstantUsesOneRawLiteralAndAllocatedStore)
@@ -2393,9 +2393,9 @@ TEST(Apple9Compiler, IntegerAndFloatDoNotDependOnInputCount)
 {
    static const enum agx_apple9_compute_abi abi[] = {
       AGX_APPLE9_COMPUTE_ABI_INVALID,
-      AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32,
-      AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6,
-      AGX_APPLE9_COMPUTE_ABI_SSBO4_INTEGER_U32,
+      AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET,
+      AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET,
+      AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET,
    };
 
    for (unsigned inputs = 1; inputs <= 3; ++inputs) {
@@ -2423,9 +2423,9 @@ TEST(Apple9Compiler, RejectsVolatileAndCoherentAccess)
 TEST(Apple9Compiler, GeneralIntegerAndFloatDagsCompile)
 {
    apple9_expect_compile(apple9_arbitrary_integer_shader(),
-                         AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+                         AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    apple9_expect_compile(apple9_arbitrary_float_shader(),
-                         AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+                         AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
 }
 
 TEST(Apple9Compiler, VectorLoadsUseOneNativeScoreboardTuple)
@@ -2436,7 +2436,7 @@ TEST(Apple9Compiler, VectorLoadsUseOneNativeScoreboardTuple)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    EXPECT_EQ(profile.resource_access_scale[0], 4u);
    EXPECT_EQ(profile.resource_access_add[0], 3u);
    EXPECT_GT(compiled.info.binary_size, 0u);
@@ -2454,7 +2454,7 @@ TEST(Apple9Compiler, NativeVectorLoadsAndStoresCoverTwoThreeAndFourLanes)
       const char *reason = nullptr;
       ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
          << (reason ? reason : "no diagnostic");
-      EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+      EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
 
       unsigned vector_loads = 0, vector_stores = 0;
       unsigned load_data = UINT_MAX, store_data = UINT_MAX;
@@ -2516,7 +2516,7 @@ TEST(Apple9Compiler, MultipleStoresShareOneWritableResource)
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
 
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    EXPECT_EQ(profile.resource_binding_count, 1u);
    EXPECT_EQ(profile.resource_binding[0], 0u);
    EXPECT_EQ(profile.resource_read_mask, 0u);
@@ -2530,7 +2530,7 @@ TEST(Apple9Compiler, MultipleStoresShareOneWritableResource)
       const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
       if (bytes[0] == 0xe7 && bytes[2] == 0x54) {
          stores++;
-         EXPECT_EQ(bytes[4], 0u);
+         EXPECT_EQ(bytes[4], AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE);
       }
    }
    EXPECT_EQ(stores, 2u);
@@ -2550,14 +2550,14 @@ TEST(Apple9Compiler, MultipleWritableBindingsUseSemanticResourceMasks)
          << (reason ? reason : "no diagnostic");
 
       if (alias_input) {
-         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
          ASSERT_EQ(profile.resource_binding_count, 2u);
          EXPECT_EQ(profile.resource_binding[0], 1u);
          EXPECT_EQ(profile.resource_binding[1], 0u);
          EXPECT_EQ(profile.resource_read_mask, 0x2u);
          EXPECT_EQ(profile.resource_write_mask, 0x3u);
       } else {
-         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6);
+         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
          ASSERT_EQ(profile.resource_binding_count, 3u);
          EXPECT_EQ(profile.resource_binding[0], 2u);
          EXPECT_EQ(profile.resource_binding[1], 1u);
@@ -2577,8 +2577,12 @@ TEST(Apple9Compiler, MultipleWritableBindingsUseSemanticResourceMasks)
          }
       }
       EXPECT_EQ(stores, 2u);
-      EXPECT_EQ(store_arguments[0], alias_input ? 1u : 2u);
-      EXPECT_EQ(store_arguments[1], alias_input ? 0u : 1u);
+      EXPECT_EQ(store_arguments[0],
+                AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE +
+                   (alias_input ? 1u : 2u));
+      EXPECT_EQ(store_arguments[1],
+                AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE +
+                   (alias_input ? 0u : 1u));
       EXPECT_EQ(access_desc[0], 0x20);
       EXPECT_EQ(access_desc[1], 0x21);
       free(compiled.binary);
@@ -2594,7 +2598,7 @@ TEST(Apple9Compiler, MultipleScalarAndVectorStoresUseAllocatedSources)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    EXPECT_EQ(profile.resource_read_mask, 0x1u);
    EXPECT_EQ(profile.resource_write_mask, 0x6u);
    EXPECT_EQ(profile.resource_access_scale[0], 4u);
@@ -2609,10 +2613,12 @@ TEST(Apple9Compiler, MultipleScalarAndVectorStoresUseAllocatedSources)
          continue;
       if (bytes[8] == 0x17) {
          vector_stores++;
-         EXPECT_EQ(bytes[4], 2u);
+         EXPECT_EQ(bytes[4],
+                   AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + 2u);
       } else if (bytes[8] == 0x11) {
          scalar_stores++;
-         EXPECT_EQ(bytes[4], 1u);
+         EXPECT_EQ(bytes[4],
+                   AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + 1u);
       }
    }
    EXPECT_EQ(vector_stores, 1u);
@@ -2655,7 +2661,7 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
          const char *reason = nullptr;
          ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
             << (reason ? reason : "no diagnostic");
-         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+         EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
          EXPECT_EQ(profile.resource_access_element_size[0], bits / 8);
          EXPECT_EQ(profile.resource_access_element_size[1], 4u);
 
@@ -2679,7 +2685,7 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
       const char *reason = nullptr;
       ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
          << (reason ? reason : "no diagnostic");
-      EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+      EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
       EXPECT_EQ(profile.resource_access_element_size[0], 4u);
       EXPECT_EQ(profile.resource_access_element_size[1], bits / 8);
 
@@ -2705,7 +2711,7 @@ TEST(Apple9Compiler, UboLoadsUseTypedNativeResourceArguments)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    ASSERT_EQ(profile.resource_binding_count, 2u);
    EXPECT_EQ(profile.resource_kind[0], AGX_APPLE9_COMPUTE_RESOURCE_UBO);
    EXPECT_EQ(profile.resource_binding[0], 0u);
@@ -2727,7 +2733,7 @@ TEST(Apple9Compiler, NestedDependentLoadsRetainEarlierResults)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO4_INTEGER_U32);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    EXPECT_EQ(profile.resource_access_add[0], 63u);
    EXPECT_EQ(profile.resource_access_add[1], 63u);
    EXPECT_EQ(profile.resource_access_add[2], 0u);
@@ -2751,7 +2757,7 @@ TEST(Apple9Compiler, BoundedLoadIndexDrivesDynamicScatter)
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
 
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO3_STATE_U6);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    ASSERT_EQ(profile.resource_binding_count, 3u);
    EXPECT_EQ(profile.resource_binding[0], 2u);
    EXPECT_EQ(profile.resource_binding[1], 1u);
@@ -2770,7 +2776,8 @@ TEST(Apple9Compiler, BoundedLoadIndexDrivesDynamicScatter)
    unsigned stores = 0;
    for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
       const uint8_t *bytes = (const uint8_t *)compiled.binary + i;
-      if (bytes[0] == 0xe7 && bytes[2] == 0x54 && bytes[4] == 2) {
+      if (bytes[0] == 0xe7 && bytes[2] == 0x54 &&
+          bytes[4] == AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + 2) {
          stores++;
          EXPECT_EQ(bytes[6], 0x21);
       }
@@ -2789,7 +2796,7 @@ TEST(Apple9Compiler, PurelyDynamicScatterUsesConservativeOneDimensionalGrid)
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
 
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    ASSERT_EQ(profile.resource_binding_count, 1u);
    EXPECT_EQ(profile.resource_access_mode[0],
              AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
@@ -2811,7 +2818,7 @@ TEST(Apple9Compiler, VariableShiftsUseGeneralValidatedLowering)
       const char *reason = nullptr;
       ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
          << (reason ? reason : "no diagnostic");
-      EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+      EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
       EXPECT_GT(compiled.info.binary_size, 100u);
       free(compiled.binary);
       ralloc_free(nir);
@@ -2862,7 +2869,7 @@ TEST(Apple9Compiler, GenericComputeSystemRegisterTable)
 
    apple9_expect_compile(
       apple9_system_value_shader(APPLE9_TEST_SUBGROUP_SIZE, 0),
-      AGX_APPLE9_COMPUTE_ABI_SSBO0_STORE_U32);
+      AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
 }
 
 TEST(Apple9Compiler, SystemRegisterAndDerivedLoadIndicesShareTheSsaPath)
@@ -2873,7 +2880,7 @@ TEST(Apple9Compiler, SystemRegisterAndDerivedLoadIndicesShareTheSsaPath)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
-   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO2_INTEGER_U32);
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
 
    bool saw_local_index = false;
    unsigned scalar_loads = 0;
