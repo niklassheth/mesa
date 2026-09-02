@@ -276,12 +276,11 @@ bool agx_apple9_vir_set_fixed_phys(struct agx_apple9_vir_program *program,
 bool agx_apple9_vir_add_live_out(struct agx_apple9_vir_program *program,
                                  uint32_t value);
 /*
- * Scalar/adjacent-tuple linear-scan allocator. r0/r1 are ABI scratch and
- * r14/r15 are large-constant scratch. General encodings prefer r16-r63 so the
- * r2-r13 compact-result bank stays available to hard-low instructions, then
- * fall back to that low bank. Destinations remain distinct from their inputs;
- * killed sources become available to following instructions. Spilling waits
- * on the Dynamic-Caching scratch ABI.
+ * Scalar/adjacent-tuple linear-scan allocator. General encodings prefer
+ * r16-r63 so the r0-r15 compact-result bank stays available to hard-low
+ * instructions, then fall back to that low bank. Destinations remain distinct
+ * from their inputs; killed sources become available to following
+ * instructions. Spilling waits on the Dynamic-Caching scratch ABI.
  */
 bool agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                              const char **reason);
@@ -317,6 +316,8 @@ agx_apple9_pack_get_sr_zext16(unsigned dst, uint8_t selector,
                               struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_mov_imm(unsigned dst, unsigned value,
                              struct agx_apple9_packed_instruction *packed);
+bool agx_apple9_pack_mov_imm32(unsigned dst, uint32_t value,
+                               struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_mov(unsigned dst, unsigned src,
                          struct agx_apple9_packed_instruction *packed);
 

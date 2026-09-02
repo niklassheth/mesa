@@ -630,6 +630,15 @@ apple9_dag_emit_constrained(struct apple9_dag_lower *lower,
 static uint32_t
 apple9_dag_imm(struct apple9_dag_lower *lower, uint32_t value)
 {
+   /* Metal normally folds a scalar literal into the consuming ALU operand
+    * descriptor.  Until those immediate forms are selected generally, use
+    * the independently executed mode-2 raw write.  EXP-M4-37 validates its
+    * complete six-bit destination field, so the allocator may place the
+    * result anywhere in r0..r63. */
+   if (value > 0x7f)
+      return apple9_dag_emit(lower, AGX_APPLE9_VIR_IMM,
+                             AGX_APPLE9_ENC_MOV_IMM32, NULL, 0, value);
+
    return apple9_dag_emit_constrained(lower, AGX_APPLE9_VIR_IMM,
                                       AGX_APPLE9_ENC_MOV_IMM_COMPACT, NULL, 0,
                                       value);
@@ -1695,94 +1704,6 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
 }
 
 static bool
-apple9_emit_dag_constant(struct apple9_emitter *emitter, unsigned dst,
-                         unsigned accumulator, uint32_t value,
-                         const char **reason)
-{
-   struct agx_apple9_packed_instruction packed;
-   if (value <= 0x7f) {
-      if (!agx_apple9_pack_mov_imm(dst, value, &packed))
-         goto pack_error;
-      return apple9_emit_packed(emitter, &packed);
-   }
-
-   unsigned highest = 7;
-   while (highest > 0 && ((value >> (highest * 4)) & 0xf) == 0)
-      --highest;
-   if (!agx_apple9_pack_mov_imm(accumulator, (value >> (highest * 4)) & 0xf,
-                                &packed) ||
-       !apple9_emit_packed(emitter, &packed) ||
-       !agx_apple9_pack_mov_imm(15, 16, &packed) ||
-       !apple9_emit_packed(emitter, &packed) ||
-       !agx_apple9_pack_mov_imm(14, 0, &packed) ||
-       !apple9_emit_packed(emitter, &packed))
-      goto pack_error;
-
-   bool addend_is_zero = true;
-   while (highest-- > 0) {
-      unsigned digit = (value >> (highest * 4)) & 0xf;
-
-      /*
-       * r15 is one long-lived radix value.  r14 remains a long-lived zero
-       * across consecutive zero digits; a nonzero digit semantically
-       * overwrites it, so only then is zero assigned again for the next
-       * multiply.  This exercises the encoded last-use model instead of
-       * reloading consumed operands before every digit.
-       */
-      if (!addend_is_zero) {
-         if (!agx_apple9_pack_mov_imm(14, 0, &packed) ||
-             !apple9_emit_packed(emitter, &packed))
-            goto pack_error;
-         addend_is_zero = true;
-      }
-
-      struct agx_apple9_vir_instr multiply = {
-         .op = AGX_APPLE9_VIR_IMAD,
-         .encoding = AGX_APPLE9_ENC_INT_MAD_EXTENDED,
-         .dest = 0,
-         .src = {0, 1, 2},
-         .nr_srcs = 3,
-         .live_after_mask = (highest > 0 ? (1u << 1) : 0) |
-                            ((digit == 0 && highest > 0) ? (1u << 2) : 0),
-      };
-      const uint8_t multiply_phys[] = {accumulator, 15, 14};
-      if (!agx_apple9_pack_vir_instruction(&multiply, multiply_phys, &packed,
-                                           reason) ||
-          !apple9_emit_packed(emitter, &packed))
-         goto pack_error;
-
-      if (digit != 0) {
-         if (!agx_apple9_pack_mov_imm(14, digit, &packed) ||
-             !apple9_emit_packed(emitter, &packed))
-            goto pack_error;
-         struct agx_apple9_vir_instr add = {
-            .op = AGX_APPLE9_VIR_IADD,
-            .encoding = AGX_APPLE9_ENC_INT_ADD_EXTENDED,
-            .dest = 0,
-            .src = {0, 1},
-            .nr_srcs = 2,
-         };
-         const uint8_t add_phys[] = {accumulator, 14};
-         if (!agx_apple9_pack_vir_instruction(&add, add_phys, &packed,
-                                              reason) ||
-             !apple9_emit_packed(emitter, &packed))
-            goto pack_error;
-         addend_is_zero = false;
-      }
-   }
-
-   if (!agx_apple9_pack_mov(dst, accumulator, &packed) ||
-       !apple9_emit_packed(emitter, &packed))
-      goto pack_error;
-   return true;
-
-pack_error:
-   if (reason != NULL && *reason == NULL)
-      *reason = "Apple9 DAG constant pack failed";
-   return false;
-}
-
-static bool
 apple9_emit_collect_vir(struct apple9_emitter *emitter,
                         const struct agx_apple9_vir_instr *instruction,
                         const uint8_t *phys, unsigned *emission_max_gpr,
@@ -2102,7 +2023,6 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    }
 
    struct apple9_emitter emitter = {.bytes = UTIL_DYNARRAY_INIT};
-   bool used_large_constant = false;
    unsigned emission_max_gpr = lower.program.max_phys_gpr;
    struct agx_apple9_packed_instruction packed;
 
@@ -2121,17 +2041,6 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       if (instruction->op == AGX_APPLE9_VIR_DEVICE_STORE) {
          if (!apple9_emit_device_store_vir(
                 &emitter, instruction, lower.program.phys, reason)) {
-            util_dynarray_fini(&emitter.bytes);
-            goto fail;
-         }
-         continue;
-      }
-      if (instruction->op == AGX_APPLE9_VIR_IMM &&
-          instruction->immediate > 0x7f) {
-         used_large_constant = true;
-         if (!apple9_emit_dag_constant(&emitter,
-                                       lower.program.phys[instruction->dest], 0,
-                                       instruction->immediate, reason)) {
             util_dynarray_fini(&emitter.bytes);
             goto fail;
          }
@@ -2175,12 +2084,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    out->info.binary_size = emitter.bytes.size;
    /* nr_gprs is the architectural GPR high-water mark for Apple9.  Keep the
     * established minimum tier, but do not collapse every program using r16+
-    * back to the old 16-register capture tier.  Large-literal materialization
-    * uses fixed r14/r15 in addition to the allocator-authored graph. */
-   unsigned max_gpr = emission_max_gpr;
-   if (used_large_constant)
-      max_gpr = MAX2(max_gpr, 15);
-   out->info.nr_gprs = MAX2(max_gpr + 1, 8);
+    * back to the old 16-register capture tier. */
+   out->info.nr_gprs = MAX2(emission_max_gpr + 1, 8);
    out->info.stats.instrs = emitter.instructions;
    for (unsigned d = 0; d < 3; ++d)
       out->info.workgroup_size[d] = nir->info.workgroup_size[d];

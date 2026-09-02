@@ -90,6 +90,7 @@ struct agx_apple9_operand_constraint {
  */
 enum agx_apple9_encoding {
    AGX_APPLE9_ENC_MOV_IMM_COMPACT,
+   AGX_APPLE9_ENC_MOV_IMM32,
    AGX_APPLE9_ENC_GET_SR,
    AGX_APPLE9_ENC_GET_SR_ZEXT16,
    AGX_APPLE9_ENC_UINT_TO_FLOAT,

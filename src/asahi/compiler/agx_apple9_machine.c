@@ -100,6 +100,24 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_MOV_IMM32] =
+      {
+         .name = "mov_imm32",
+         .length = 8,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {
+               /* EXP-M4-37 hardware-validates the complete split six-bit
+                * destination map.  Mode 2 reaches r0..r63; r64+ cannot be
+                * represented by this form. */
+               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE |
+                      AGX_APPLE9_OPERAND_SCATTERED,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
    [AGX_APPLE9_ENC_GET_SR] =
       {
          .name = "get_sr",

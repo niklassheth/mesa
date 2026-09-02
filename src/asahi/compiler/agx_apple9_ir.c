@@ -12,10 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define APPLE9_FIRST_ALLOCATABLE_GPR 2
+#define APPLE9_FIRST_ALLOCATABLE_GPR 0
 #define APPLE9_FIRST_GENERAL_GPR     16
 #define APPLE9_LAST_ALLOCATABLE_GPR  63
-#define APPLE9_GID_GPR               1
 
 static void
 set_bits(uint8_t *encoded, unsigned start, unsigned width, uint64_t value)
@@ -37,10 +36,6 @@ agx_apple9_vir_init(struct agx_apple9_vir_program *program)
 {
    memset(program, 0, sizeof(*program));
    program->output = AGX_APPLE9_VREG_INVALID;
-   program->reserved_gprs[0] = true;
-   program->reserved_gprs[APPLE9_GID_GPR] = true;
-   program->reserved_gprs[14] = true;
-   program->reserved_gprs[15] = true;
 }
 
 void
@@ -2028,6 +2023,32 @@ agx_apple9_pack_mov_imm(unsigned dst, unsigned value,
 }
 
 bool
+agx_apple9_pack_mov_imm32(unsigned dst, uint32_t value,
+                          struct agx_apple9_packed_instruction *packed)
+{
+   if (dst >= 64)
+      return false;
+
+   /* EXP-M4-37: native mode 2 is the eight-byte scalar raw-literal form.
+    * Thirty-two own-source one-bit differences recover every payload bit,
+    * and all 33 controls execute exactly on T8132.  The destination is six
+    * bits: byte 0 carries bits 0..3 and byte 2 bits 6..7 carry bits 4..5.
+    * Byte 2 bit 5 is a separate native modifier, not a destination bit. */
+   const uint8_t bytes[8] = {
+      ((dst & 0xf) << 4) | 0x0c,
+      0x80 | (value & 0x7f),
+      ((dst >> 4) << 6) | 0x02,
+      (value >> 24) & 0xfe,
+      (value >> 6) & 0x1e,
+      (value >> 9) & 0x0c,
+      (value >> 13) & 0xff,
+      (value >> 21) & 0x0f,
+   };
+   packed_init(packed, bytes, sizeof(bytes));
+   return true;
+}
+
+bool
 agx_apple9_pack_mov(unsigned dst, unsigned src,
                     struct agx_apple9_packed_instruction *packed)
 {
@@ -2685,6 +2706,9 @@ agx_apple9_pack_vir_instruction(const struct agx_apple9_vir_instr *instruction,
          return instruction->immediate <= 0x7f &&
                 agx_apple9_pack_mov_imm(phys[instruction->dest],
                                         instruction->immediate, packed);
+      if (instruction->encoding == AGX_APPLE9_ENC_MOV_IMM32)
+         return agx_apple9_pack_mov_imm32(phys[instruction->dest],
+                                          instruction->immediate, packed);
       break;
    case AGX_APPLE9_VIR_GET_GLOBAL_ID:
       return agx_apple9_pack_get_global_id(phys[instruction->dest],
