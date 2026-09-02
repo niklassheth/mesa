@@ -80,18 +80,72 @@ apple9_chase_trivial(nir_scalar scalar)
 }
 
 static bool
-apple9_global_id_component(nir_scalar scalar, unsigned *component)
+apple9_intrinsic_component(nir_scalar scalar, nir_intrinsic_op op,
+                           unsigned *component)
 {
    scalar = apple9_chase_trivial(scalar);
 
    if (scalar.def->bit_size != 32 || scalar.comp >= 3 ||
        nir_def_instr_type(scalar.def) != nir_instr_type_intrinsic ||
-       nir_def_as_intrinsic(scalar.def)->intrinsic !=
-          nir_intrinsic_load_global_invocation_id)
+       nir_def_as_intrinsic(scalar.def)->intrinsic != op)
       return false;
 
    if (component != NULL)
       *component = scalar.comp;
+   return true;
+}
+
+static bool
+apple9_group_offset_component(nir_scalar scalar, unsigned *component)
+{
+   scalar = apple9_chase_trivial(scalar);
+   if (nir_def_instr_type(scalar.def) != nir_instr_type_alu ||
+       nir_scalar_alu_op(scalar) != nir_op_imul)
+      return false;
+
+   nir_scalar a = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
+   nir_scalar b = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
+   unsigned group = 0, size = 0;
+   bool direct =
+      apple9_intrinsic_component(a, nir_intrinsic_load_workgroup_id, &group) &&
+      apple9_intrinsic_component(b, nir_intrinsic_load_workgroup_size, &size);
+   bool swapped =
+      apple9_intrinsic_component(b, nir_intrinsic_load_workgroup_id, &group) &&
+      apple9_intrinsic_component(a, nir_intrinsic_load_workgroup_size, &size);
+   if ((!direct && !swapped) || group != size)
+      return false;
+
+   if (component != NULL)
+      *component = group;
+   return true;
+}
+
+static bool
+apple9_global_id_component(nir_scalar scalar, unsigned *component)
+{
+   if (apple9_intrinsic_component(
+          scalar, nir_intrinsic_load_global_invocation_id, component))
+      return true;
+
+   scalar = apple9_chase_trivial(scalar);
+   if (nir_def_instr_type(scalar.def) != nir_instr_type_alu ||
+       nir_scalar_alu_op(scalar) != nir_op_iadd)
+      return false;
+
+   nir_scalar a = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
+   nir_scalar b = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
+   unsigned group_offset = 0, local = 0;
+   bool direct = apple9_group_offset_component(a, &group_offset) &&
+                 apple9_intrinsic_component(
+                    b, nir_intrinsic_load_local_invocation_id, &local);
+   bool swapped = apple9_group_offset_component(b, &group_offset) &&
+                  apple9_intrinsic_component(
+                     a, nir_intrinsic_load_local_invocation_id, &local);
+   if ((!direct && !swapped) || group_offset != local)
+      return false;
+
+   if (component != NULL)
+      *component = local;
    return true;
 }
 
@@ -2108,6 +2162,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
             input_count == 0 ? AGX_APPLE9_COMPUTE_RESOURCE_SSBO
                              : resource_map.resource[i].kind;
       }
+      profile->variable_local_size = nir->info.workgroup_size_variable;
       for (unsigned d = 0; d < 3; ++d) {
          profile->local_size[d] = nir->info.workgroup_size[d];
          profile->index_stride[d] = affine.stride[d];
@@ -2196,14 +2251,16 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
       goto unsupported;
    }
 
-   uint64_t local_threads = 1;
-   for (unsigned d = 0; d < 3; ++d) {
-      if (!nir->info.workgroup_size[d] ||
-          nir->info.workgroup_size[d] > 1024 / local_threads) {
-         reason = "Apple9 compute requires a legal fixed local size";
-         goto unsupported;
+   if (!nir->info.workgroup_size_variable) {
+      uint64_t local_threads = 1;
+      for (unsigned d = 0; d < 3; ++d) {
+         if (!nir->info.workgroup_size[d] ||
+             nir->info.workgroup_size[d] > 1024 / local_threads) {
+            reason = "Apple9 compute requires a legal fixed local size";
+            goto unsupported;
+         }
+         local_threads *= nir->info.workgroup_size[d];
       }
-      local_threads *= nir->info.workgroup_size[d];
    }
 
    if (apple9_compile_dag(nir, out, profile, &reason))

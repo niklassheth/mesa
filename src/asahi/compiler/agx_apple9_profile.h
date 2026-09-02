@@ -6,6 +6,7 @@
 #ifndef AGX_APPLE9_PROFILE_H
 #define AGX_APPLE9_PROFILE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -54,6 +55,7 @@ struct agx_apple9_compute_profile {
    enum agx_apple9_compute_resource_kind resource_kind[4];
 
    /* Shader-local dispatch and linear invocation-index contract. */
+   bool variable_local_size;
    uint32_t local_size[3];
    uint32_t index_stride[3];
    uint8_t index_rank;

@@ -238,9 +238,9 @@ unsigned agx_apple9_compute_state_literal_capacity(
    const struct agx_apple9_compute_profile *profile);
 
 /*
- * The source-built launch profiles are capture-bounded ABIs, including their
- * workgroup geometry.  Keep unsupported geometries out of the command stream
- * until a native capture has established the corresponding package fields.
+ * Direct CDM geometry is dispatch state.  Fixed-local-size profiles require
+ * the compiled tuple, while variable-local-size profiles validate the tuple
+ * supplied by the dispatch command.
  */
 bool agx_apple9_compute_grid_supported(
    const struct agx_apple9_compute_profile *profile, const uint32_t global[3],

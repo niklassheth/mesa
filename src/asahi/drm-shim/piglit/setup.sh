@@ -68,6 +68,7 @@ PKG_CONFIG_PATH="$piglit_local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH
 LD_LIBRARY_PATH="$piglit_local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 cmake -S "$piglit_root" -B "$piglit_build" -G Ninja \
     -DPYTHON_EXECUTABLE="$piglit_local/venv/bin/python" \
+    -DOPENGL_gl_LIBRARY=/usr/lib/libOpenGL.so \
     -DPIGLIT_USE_WAFFLE=ON \
     -DPIGLIT_USE_GBM=OFF \
     -DPIGLIT_USE_WAYLAND=OFF \

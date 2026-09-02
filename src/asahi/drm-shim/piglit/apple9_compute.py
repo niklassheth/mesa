@@ -32,6 +32,7 @@ _ENVIRONMENT = {
     "MESA_LOADER_DRIVER_OVERRIDE": "asahi",
     "MESA_SHADER_CACHE_DISABLE": "true",
     "PIGLIT_PLATFORM": "surfaceless_egl",
+    "PIGLIT_NO_WINDOW": "1",
 }
 
 profile = TestProfile()

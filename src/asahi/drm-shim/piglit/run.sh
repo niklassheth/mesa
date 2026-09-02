@@ -98,9 +98,11 @@ export T8132_PIGLIT_RESULTS=$results
 export T8132_PIGLIT_ROOT=$piglit_root
 export T8132_PIGLIT_BUILD=$piglit_build
 export T8132_PIGLIT_TEST_DIR=$script_dir/tests
+export T8132_PIGLIT_GL_TEST_DIR=$script_dir/tests-gl
 export T8132_PIGLIT_RUNNER=$runner
 export T8132_PIGLIT_PROFILE=$profile
 export T8132_PIGLIT_TIMEOUT=$timeout
+export T8132_PIGLIT_GL_SUBSET=${T8132_PIGLIT_GL_SUBSET:-supported}
 export T8132_PIGLIT_CHILD_LD_PRELOAD=$shim
 export T8132_PIGLIT_CHILD_LD_LIBRARY_PATH="$piglit_local/lib:$piglit_build/lib:$mesa_build/src/egl:$mesa_build/src/gallium/targets/dri${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export T8132_PIGLIT_CHILD_EGL_VENDOR=$mesa_build/src/egl/50_mesa.json
@@ -119,9 +121,44 @@ uv run --python 3.14 \
             if [ "$T8132_PIGLIT_API" = gles ]; then
                 set -- "$T8132_PIGLIT_TEST_DIR"/*.shader_test
             else
-                set -- \
-                    "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/execution"/*.shader_test \
-                    "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker"/*.shader_test
+                case "$T8132_PIGLIT_GL_SUBSET" in
+                    smoke)
+                        set -- "$T8132_PIGLIT_GL_TEST_DIR/01-global-invocation-id.shader_test"
+                        ;;
+                    supported)
+                        set -- \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/no_local_work_size.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/mismatched_local_work_sizes.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/mix_compute_and_non_compute.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_variable_group_size/execution/global-invocation-id.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_variable_group_size/execution/separate-global-id.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_variable_group_size/execution/separate-global-id-2.shader_test" \
+                            "$T8132_PIGLIT_GL_TEST_DIR"/*.shader_test
+                        ;;
+                    linker-basic)
+                        set -- \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/one_local_work_size.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/no_local_work_size.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/matched_local_work_sizes.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/mismatched_local_work_sizes.shader_test" \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker/mix_compute_and_non_compute.shader_test"
+                        ;;
+                    linker)
+                        set -- "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker"/*.shader_test
+                        ;;
+                    execution)
+                        set -- "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/execution"/*.shader_test
+                        ;;
+                    all)
+                        set -- \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/linker"/*.shader_test \
+                            "$T8132_PIGLIT_ROOT/tests/spec/arb_compute_shader/execution"/*.shader_test
+                        ;;
+                    *)
+                        echo "unknown T8132_PIGLIT_GL_SUBSET: $T8132_PIGLIT_GL_SUBSET" >&2
+                        exit 2
+                        ;;
+                esac
             fi
             exec env \
                 LD_PRELOAD="$T8132_PIGLIT_CHILD_LD_PRELOAD" \
@@ -134,6 +171,7 @@ uv run --python 3.14 \
                 MESA_LOADER_DRIVER_OVERRIDE=asahi \
                 MESA_SHADER_CACHE_DISABLE=true \
                 PIGLIT_PLATFORM=surfaceless_egl \
+                PIGLIT_NO_WINDOW=1 \
                 "$T8132_PIGLIT_RUNNER" \
                 "$@" \
                 -auto -report-subtests
@@ -143,6 +181,7 @@ uv run --python 3.14 \
         # In particular, the Piglit Python controller is not preloaded.
         export PIGLIT_BUILD_DIR="$T8132_PIGLIT_BUILD"
         export PIGLIT_SOURCE_DIR="$T8132_PIGLIT_ROOT"
+        export PIGLIT_NO_FAST_SKIP=1
         exec "$T8132_PIGLIT_ROOT/piglit" run \
             --process-isolation false \
             --platform surfaceless_egl \

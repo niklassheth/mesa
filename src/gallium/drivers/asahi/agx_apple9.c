@@ -298,6 +298,19 @@ apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
        profile->required_threadgroup_memory_bytes != 0)
       return false;
 
+   uint64_t local_threads = 1;
+   for (unsigned d = 0; d < 3; ++d) {
+      if (profile->variable_local_size) {
+         if (profile->local_size[d] != 0)
+            return false;
+      } else {
+         if (!profile->local_size[d] ||
+             profile->local_size[d] > 1024 / local_threads)
+            return false;
+         local_threads *= profile->local_size[d];
+      }
+   }
+
    for (unsigned i = 0; i < abi->resource_count; ++i) {
       if (profile->resource_kind[i] > AGX_APPLE9_COMPUTE_RESOURCE_UBO ||
           ((abi->ssbo_write_mask & BITFIELD_BIT(i)) &&
@@ -722,7 +735,9 @@ agx_apple9_compute_grid_supported(
     * threadgroup limit explicit and reject zero axes before encoding. */
    uint64_t threads_per_group = 1;
    for (unsigned d = 0; d < 3; ++d) {
-      if (!global[d] || !local[d] || local[d] != profile->local_size[d])
+      if (!global[d] || !local[d] ||
+          (!profile->variable_local_size &&
+           local[d] != profile->local_size[d]))
          return false;
       if (local[d] > 1024 / threads_per_group)
          return false;
@@ -1249,7 +1264,8 @@ agx_apple9_emit_indirect_dispatch(
    const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!out || !abi || abi->hidden_resource_count != 3 || !indirect ||
+   if (!out || !abi || profile->variable_local_size ||
+       abi->hidden_resource_count != 3 || !indirect ||
        (launch & 0x3f) || (indirect & 3) ||
        !apple9_compute_profile_valid(profile, abi))
       return false;
