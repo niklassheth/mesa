@@ -1,0 +1,30 @@
+[require]
+GL >= 4.3
+GLSL >= 4.30
+
+[compute shader]
+#version 430
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Output {
+    uint values[];
+} output0;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    uint j = (i * 3u) & 7u;
+    output0.values[j] = i + 100u;
+}
+
+[test]
+ssbo 0 32
+compute 8 1 1
+probe ssbo uint 0 0 == 100
+probe ssbo uint 0 4 == 103
+probe ssbo uint 0 8 == 106
+probe ssbo uint 0 12 == 101
+probe ssbo uint 0 16 == 104
+probe ssbo uint 0 20 == 107
+probe ssbo uint 0 24 == 102
+probe ssbo uint 0 28 == 105

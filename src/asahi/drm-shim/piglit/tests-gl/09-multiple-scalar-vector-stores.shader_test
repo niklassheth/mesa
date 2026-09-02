@@ -1,0 +1,49 @@
+[require]
+GL >= 4.3
+GLSL >= 4.30
+
+[compute shader]
+#version 430
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer VectorOutput {
+    uvec4 values[];
+} vector_output;
+layout(std430, binding = 1) buffer ScalarOutput {
+    uint values[];
+} scalar_output;
+layout(std430, binding = 2) readonly buffer Input {
+    uvec4 values[];
+} input0;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    uvec4 value = input0.values[i];
+    vector_output.values[i] = value + uvec4(1u, 2u, 3u, 4u);
+    scalar_output.values[i] = value.x ^ value.w;
+}
+
+[test]
+ssbo 0 32
+ssbo 1 8
+ssbo 2 32
+ssbo 2 subdata int 0 1
+ssbo 2 subdata int 4 3
+ssbo 2 subdata int 8 5
+ssbo 2 subdata int 12 7
+ssbo 2 subdata int 16 11
+ssbo 2 subdata int 20 13
+ssbo 2 subdata int 24 17
+ssbo 2 subdata int 28 19
+compute 2 1 1
+probe ssbo uint 0 0 == 2
+probe ssbo uint 0 4 == 5
+probe ssbo uint 0 8 == 8
+probe ssbo uint 0 12 == 11
+probe ssbo uint 0 16 == 12
+probe ssbo uint 0 20 == 15
+probe ssbo uint 0 24 == 20
+probe ssbo uint 0 28 == 23
+probe ssbo uint 1 0 == 6
+probe ssbo uint 1 4 == 24

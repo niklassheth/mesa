@@ -42,11 +42,11 @@ esac
 
 shim=$mesa_build/src/asahi/drm-shim/libasahi_noop_drm_shim.so
 if [ "$api" = gles ]; then
-    runner=$piglit_build/bin/shader_runner_gles3
-    piglit_target=shader_runner_gles3
+    runner=$mesa_build/src/asahi/drm-shim/t8132_apple9_compute_runner
+    piglit_target=
     profile=apple9_compute
     results_name=apple9-compute
-    default_timeout=60
+    default_timeout=300
 else
     runner=$piglit_build/bin/shader_runner
     piglit_target=shader_runner
@@ -66,9 +66,12 @@ fi
 if [ "${MESA_SKIP_BUILD:-0}" != 1 ]; then
     ninja -C "$mesa_build" \
         src/asahi/drm-shim/libasahi_noop_drm_shim.so \
+        src/asahi/drm-shim/t8132_apple9_compute_runner \
         src/gallium/targets/dri/libgallium-26.3.0-devel.so \
         src/egl/libEGL_mesa.so.0.0.0
-    cmake --build "$piglit_build" --target "$piglit_target" --parallel
+    if [ -n "$piglit_target" ]; then
+        cmake --build "$piglit_build" --target "$piglit_target" --parallel
+    fi
 fi
 
 for required in \
@@ -100,6 +103,7 @@ export T8132_PIGLIT_BUILD=$piglit_build
 export T8132_PIGLIT_TEST_DIR=$script_dir/tests
 export T8132_PIGLIT_GL_TEST_DIR=$script_dir/tests-gl
 export T8132_PIGLIT_RUNNER=$runner
+export T8132_PIGLIT_NATIVE_RUNNER=$mesa_build/src/asahi/drm-shim/t8132_apple9_compute_runner
 export T8132_PIGLIT_PROFILE=$profile
 export T8132_PIGLIT_TIMEOUT=$timeout
 export T8132_PIGLIT_GL_SUBSET=${T8132_PIGLIT_GL_SUBSET:-supported}
@@ -119,7 +123,7 @@ uv run --python 3.14 \
 
         if [ "$T8132_PIGLIT_ACTION" = direct ]; then
             if [ "$T8132_PIGLIT_API" = gles ]; then
-                set -- "$T8132_PIGLIT_TEST_DIR"/*.shader_test
+                set -- $("$T8132_PIGLIT_RUNNER" --list)
             else
                 case "$T8132_PIGLIT_GL_SUBSET" in
                     smoke)
@@ -160,6 +164,14 @@ uv run --python 3.14 \
                         ;;
                 esac
             fi
+            if [ "$T8132_PIGLIT_API" = gles ]; then
+                runner_suffix=
+            else
+                runner_suffix="-auto -report-subtests"
+            fi
+            # runner_suffix intentionally expands to two desktop-runner
+            # arguments and to no arguments for the native GLES runner.
+            # shellcheck disable=SC2086
             exec env \
                 LD_PRELOAD="$T8132_PIGLIT_CHILD_LD_PRELOAD" \
                 LD_LIBRARY_PATH="$T8132_PIGLIT_CHILD_LD_LIBRARY_PATH" \
@@ -173,8 +185,7 @@ uv run --python 3.14 \
                 PIGLIT_PLATFORM=surfaceless_egl \
                 PIGLIT_NO_WINDOW=1 \
                 "$T8132_PIGLIT_RUNNER" \
-                "$@" \
-                -auto -report-subtests
+                "$@" $runner_suffix
         fi
 
         # Only the test object receives the shim environment from the profile.

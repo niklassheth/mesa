@@ -126,53 +126,37 @@ Useful host-only gates are:
 ```sh
 meson test -C /home/nsheth/Projects/asahi/mesa-m1n1-build \
   agx_tests \
-  t8132_gallium_compute_xyz_oracle \
-  t8132_gallium_compute_xy_oracle \
-  t8132_gallium_compute_device_index_oracle \
-  t8132_gallium_compute_device_graph_oracle \
   --print-errorlogs
+
+/home/nsheth/Projects/asahi/mesa-m1n1-build/src/asahi/drm-shim/\
+t8132_apple9_compute_runner --list
 ```
 
 ## Run on T8132
 
 Build and chainload the matching `m1n1-m4-agx` tree first, leaving the target
-at its proxy prompt with a cold GPU ASC. The Gallium tests enter through the
-normal Mesa driver and DRM UAPI; they do not construct m1n1 work records.
+at its proxy prompt with a cold GPU ASC. The native compute tests enter through
+ordinary GLES 3.1, the normal Mesa driver, and the DRM UAPI; they do not
+construct NIR or m1n1 work records directly.
 
-Representative exact-output gates are:
+Run all supported compute cases directly in one process and EGL context:
 
 ```sh
-src/asahi/drm-shim/run_t8132_gallium_compute_dag3.sh --case fconst3
-src/asahi/drm-shim/run_t8132_gallium_compute_dag3.sh --state-append-after-use
-src/asahi/drm-shim/run_t8132_gallium_compute_dag3.sh --state-slab-boundary
-
-T8132_DUAL_VM_ROUNDS=32 \
-  src/asahi/drm-shim/run_t8132_gallium_compute_dag3.sh --dual-vm-state-alias
-
-src/asahi/drm-shim/run_t8132_gallium_compute_xy.sh --two-dispatch
-src/asahi/drm-shim/run_t8132_gallium_compute_xyz.sh
-src/asahi/drm-shim/run_t8132_gallium_compute_device_index.sh
-src/asahi/drm-shim/run_t8132_gallium_compute_device_graph.sh
-src/asahi/drm-shim/run_t8132_gallium_compute_mix4.sh --suite --two-dispatch
+src/asahi/drm-shim/piglit/run.sh direct
 ```
 
-The GLES compiler/package harness offers broader shader selection:
+Or record each named case as a Piglit subtest while retaining the same
+single-process execution model:
 
 ```sh
-src/asahi/drm-shim/run_t8132_gles_compute.sh constant
-src/asahi/drm-shim/run_t8132_gles_compute.sh gid
-src/asahi/drm-shim/run_t8132_gles_compute.sh mad batch-two
-src/asahi/drm-shim/run_t8132_gles_compute.sh dag-suite batch-two
-src/asahi/drm-shim/run_t8132_gles_compute.sh cache-suite batch-two
-src/asahi/drm-shim/run_t8132_gles_compute.sh single-boot-suite
-src/asahi/drm-shim/run_t8132_gles_compute.sh bulk-suite
-src/asahi/drm-shim/run_t8132_gles_compute_add3.sh 2 4 bringup-suite
+src/asahi/drm-shim/piglit/run.sh piglit
 ```
 
 Success means exact complete-buffer comparison, not merely command retirement.
-The larger fixtures also verify immutable inputs, poison-filled gaps, leading
-and trailing guards, multiple dispatches, append-only queue counters, and
-ordered completion timestamps.
+The native cases also verify immutable inputs, poison-filled gaps, leading and
+trailing guards, multiple bindings and dependent addresses. Dedicated cases
+exercise repeated range dispatch, program publication/retirement pressure, and
+ordered reuse of independently compiled programs.
 
 ## Bring-up boundary
 

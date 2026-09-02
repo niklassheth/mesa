@@ -78,11 +78,10 @@ cmake -S "$piglit_root" -B "$piglit_build" -G Ninja \
     -DPIGLIT_BUILD_EGL_TESTS=ON \
     -DPIGLIT_BUILD_GLES1_TESTS=OFF \
     -DPIGLIT_BUILD_GLES2_TESTS=OFF \
-    -DPIGLIT_BUILD_GLES3_TESTS=ON \
+    -DPIGLIT_BUILD_GLES3_TESTS=OFF \
     -DPIGLIT_BUILD_VK_TESTS=OFF \
     -DPIGLIT_BUILD_DMA_BUF_TESTS=OFF
-cmake --build "$piglit_build" \
-    --target shader_runner shader_runner_gles3 --parallel
+cmake --build "$piglit_build" --target shader_runner --parallel
 
 # Piglit only imports Python profiles from its tests package. Keep the profiles
 # owned by Mesa and expose them through ignored development-only symlinks.
@@ -105,4 +104,4 @@ echo "T8132_PIGLIT_SETUP_OK"
 echo "piglit=$piglit_revision"
 echo "waffle=$waffle_tag"
 echo "desktop_runner=$piglit_build/bin/shader_runner"
-echo "gles3_runner=$piglit_build/bin/shader_runner_gles3"
+echo "native_compute_runner=build/src/asahi/drm-shim/t8132_apple9_compute_runner"

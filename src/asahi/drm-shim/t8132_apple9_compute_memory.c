@@ -1,12 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 
-/* Exact-output GLES 3.1 corpus for Apple9 SSBO load graphs. */
+/* Memory cases for the native Apple9 compute Piglit runner. */
 
 #include <EGL/egl.h>
-#include <EGL/eglext.h>
 #include <GLES3/gl31.h>
 
-#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,16 +12,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "t8132_apple9_compute_cases.h"
+
 #define VALUE_COUNT        64u
 #define INPUT_EXTRA_VALUES (VALUE_COUNT * 3u)
 #define LOCAL_SIZE_X       32u
 #define PAYLOAD_BYTES   ((VALUE_COUNT + INPUT_EXTRA_VALUES) * sizeof(uint32_t))
 #define MIN_GUARD_BYTES 256u
-#define DEFAULT_SUBMISSIONS               2u
-#define DEFAULT_DISPATCHES_PER_SUBMISSION 2u
-#define MAX_SUBMISSIONS                   64u
-#define MAX_DISPATCHES_PER_SUBMISSION     256u
-#define MAX_TOTAL_DISPATCHES              4096u
 
 struct buffer_layout {
    size_t first_payload_offset;
@@ -59,55 +54,6 @@ align_up(size_t value, size_t alignment)
    return ((value + alignment - 1) / alignment) * alignment;
 }
 
-static unsigned
-parse_count(const char *text, unsigned maximum, const char *name)
-{
-   char *end = NULL;
-   unsigned long parsed = strtoul(text, &end, 0);
-   if (!text[0] || !end || *end || parsed == 0 || parsed > maximum) {
-      fprintf(stderr, "invalid %s: %s\n", name, text);
-      exit(2);
-   }
-
-   return (unsigned)parsed;
-}
-
-static EGLDisplay
-open_asahi_display(void)
-{
-   PFNEGLQUERYDEVICESEXTPROC query_devices =
-      (PFNEGLQUERYDEVICESEXTPROC)eglGetProcAddress("eglQueryDevicesEXT");
-   PFNEGLQUERYDEVICESTRINGEXTPROC query_string =
-      (PFNEGLQUERYDEVICESTRINGEXTPROC)eglGetProcAddress(
-         "eglQueryDeviceStringEXT");
-   PFNEGLGETPLATFORMDISPLAYEXTPROC get_display =
-      (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(
-         "eglGetPlatformDisplayEXT");
-
-   if (!query_devices || !query_string || !get_display)
-      fail("EGL device enumeration unavailable");
-
-   EGLDeviceEXT devices[16];
-   EGLint count = 0;
-   if (!query_devices(16, devices, &count))
-      fail("eglQueryDevicesEXT");
-
-   for (EGLint i = 0; i < count; ++i) {
-      const char *render =
-         query_string(devices[i], EGL_DRM_RENDER_NODE_FILE_EXT);
-      if (!render || !strstr(render, "renderD"))
-         continue;
-
-      EGLDisplay display =
-         get_display(EGL_PLATFORM_DEVICE_EXT, devices[i], NULL);
-      if (display != EGL_NO_DISPLAY)
-         return display;
-   }
-
-   fail("Asahi DRM-shim EGL device not found");
-   return EGL_NO_DISPLAY;
-}
-
 enum workload {
    WORKLOAD_ADD3,
    WORKLOAD_SPARSE_BINDINGS,
@@ -130,9 +76,16 @@ enum workload {
    WORKLOAD_DEPENDENT_INDEX,
    WORKLOAD_NESTED_DEPENDENT,
    WORKLOAD_SYSTEM_LOAD_INDEX,
-   WORKLOAD_SYSTEM_GRID3D,
-   WORKLOAD_VECTOR_SUITE,
-   WORKLOAD_BRINGUP_SUITE,
+   WORKLOAD_SINGLE_LOAD_IADD,
+   WORKLOAD_TWO_LOAD_IADD,
+   WORKLOAD_AFFINE_INDEX,
+   WORKLOAD_VARIABLE_SHL,
+   WORKLOAD_VARIABLE_ASHR,
+   WORKLOAD_VARIABLE_USHR,
+   WORKLOAD_LOADED_COMPARE,
+   WORKLOAD_LOADED_FLOAT_DAG,
+   WORKLOAD_PRESSURE40,
+   WORKLOAD_FOUR_RESOURCE_MIX,
 };
 
 static const char *
@@ -181,12 +134,26 @@ workload_name(enum workload workload)
       return "nested-dependent";
    case WORKLOAD_SYSTEM_LOAD_INDEX:
       return "system-load-index";
-   case WORKLOAD_SYSTEM_GRID3D:
-      return "system-grid3d";
-   case WORKLOAD_VECTOR_SUITE:
-      return "vector-suite";
-   case WORKLOAD_BRINGUP_SUITE:
-      return "bringup-suite";
+   case WORKLOAD_SINGLE_LOAD_IADD:
+      return "single-load-iadd";
+   case WORKLOAD_TWO_LOAD_IADD:
+      return "two-load-iadd";
+   case WORKLOAD_AFFINE_INDEX:
+      return "affine-index";
+   case WORKLOAD_VARIABLE_SHL:
+      return "variable-shl";
+   case WORKLOAD_VARIABLE_ASHR:
+      return "variable-ashr";
+   case WORKLOAD_VARIABLE_USHR:
+      return "variable-ushr";
+   case WORKLOAD_LOADED_COMPARE:
+      return "loaded-compare";
+   case WORKLOAD_LOADED_FLOAT_DAG:
+      return "loaded-float-dag";
+   case WORKLOAD_PRESSURE40:
+      return "pressure40";
+   case WORKLOAD_FOUR_RESOURCE_MIX:
+      return "four-resource-mix";
    }
    fail("unknown workload");
    return NULL;
@@ -195,8 +162,8 @@ workload_name(enum workload workload)
 static enum workload
 parse_workload(const char *name)
 {
-   for (unsigned workload = WORKLOAD_ADD3; workload <= WORKLOAD_BRINGUP_SUITE;
-        ++workload) {
+   for (unsigned workload = WORKLOAD_ADD3;
+        workload <= WORKLOAD_FOUR_RESOURCE_MIX; ++workload) {
       if (strcmp(name, workload_name((enum workload)workload)) == 0)
          return (enum workload)workload;
    }
@@ -449,23 +416,6 @@ build_program(enum workload workload)
       "  outbuf.v[i] = (leaf ^ root) ^ middle;\n"
       "}\n";
 
-   static const char system_grid3d[] =
-      "#version 310 es\n"
-      "layout(local_size_x=2, local_size_y=2, local_size_z=2) in;\n"
-      "layout(std430, binding=0) buffer Output { uint v[]; } outbuf;\n"
-      "void main() {\n"
-      "  uvec3 g = gl_GlobalInvocationID;\n"
-      "  uvec3 l = gl_LocalInvocationID;\n"
-      "  uvec3 w = gl_WorkGroupID;\n"
-      "  uint i = g.x + g.y * 4u + g.z * 16u;\n"
-      "  uint packed_value = l.x | (l.y << 2u) | (l.z << 4u);\n"
-      "  packed_value |= gl_LocalInvocationIndex << 6u;\n"
-      "  packed_value |= w.x << 10u;\n"
-      "  packed_value |= w.y << 12u;\n"
-      "  packed_value |= w.z << 14u;\n"
-      "  outbuf.v[i] = packed_value;\n"
-      "}\n";
-
    static const char system_load_index[] =
       "#version 310 es\n"
       "layout(local_size_x=32) in;\n"
@@ -478,6 +428,107 @@ build_program(enum workload workload)
       "  uint derived_value = a.v[(local + 17u) & 63u];\n"
       "  outbuf.v[i] = direct_value ^ derived_value;\n"
       "}\n";
+
+   static const char single_load_iadd[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;o.v[i]=a.v[i]+7u;}\n";
+
+   static const char two_load_iadd[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;o.v[i]=a.v[i]+b.v[i];}\n";
+
+   static const char affine_index[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "uint j=(a.v[i]*3u+1u)&63u;o.v[i]=b.v[j]^i;}\n";
+
+   static const char variable_shl[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "o.v[i]=a.v[i]<<(b.v[i]&31u);}\n";
+
+   static const char variable_ashr[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "o.v[i]=uint(int(a.v[i])>>int(b.v[i]&31u));}\n";
+
+   static const char variable_ushr[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "o.v[i]=a.v[i]>>(b.v[i]&31u);}\n";
+
+   static const char loaded_compare[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;uint x=a.v[i],y=b.v[i];"
+      "o.v[i]=uint(x<y)|(uint(x>=y)<<1u)|(uint(int(x)<int(y))<<2u)|"
+      "(uint(x==y)<<3u);}\n";
+
+   static const char loaded_float_dag[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { float v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { float v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { float v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;float x=a.v[i],y=b.v[i];"
+      "float s=x+y,d=x-y;o.v[i]=s*d+min(x,y);}\n";
+
+   static const char pressure40[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "o.v[i]=a.v[(i+0u)&255u]+a.v[(i+1u)&255u]+a.v[(i+2u)&255u]+"
+      "a.v[(i+3u)&255u]+a.v[(i+4u)&255u]+a.v[(i+5u)&255u]+"
+      "a.v[(i+6u)&255u]+a.v[(i+7u)&255u]+a.v[(i+8u)&255u]+"
+      "a.v[(i+9u)&255u]+a.v[(i+10u)&255u]+a.v[(i+11u)&255u]+"
+      "a.v[(i+12u)&255u]+a.v[(i+13u)&255u]+a.v[(i+14u)&255u]+"
+      "a.v[(i+15u)&255u]+a.v[(i+16u)&255u]+a.v[(i+17u)&255u]+"
+      "a.v[(i+18u)&255u]+a.v[(i+19u)&255u]+a.v[(i+20u)&255u]+"
+      "a.v[(i+21u)&255u]+a.v[(i+22u)&255u]+a.v[(i+23u)&255u]+"
+      "a.v[(i+24u)&255u]+a.v[(i+25u)&255u]+a.v[(i+26u)&255u]+"
+      "a.v[(i+27u)&255u]+a.v[(i+28u)&255u]+a.v[(i+29u)&255u]+"
+      "a.v[(i+30u)&255u]+a.v[(i+31u)&255u]+a.v[(i+32u)&255u]+"
+      "a.v[(i+33u)&255u]+a.v[(i+34u)&255u]+a.v[(i+35u)&255u]+"
+      "a.v[(i+36u)&255u]+a.v[(i+37u)&255u]+a.v[(i+38u)&255u]+"
+      "a.v[(i+39u)&255u];}\n";
+
+   static const char four_resource_mix[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=2) readonly buffer C { uint v[]; } c;\n"
+      "layout(std430,binding=3) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "o.v[i]=((a.v[i]*3u)+b.v[i])^(c.v[i]+0x13579bdfu);}\n";
 
    const char *source = add3;
    switch (workload) {
@@ -544,12 +595,35 @@ build_program(enum workload workload)
    case WORKLOAD_SYSTEM_LOAD_INDEX:
       source = system_load_index;
       break;
-   case WORKLOAD_SYSTEM_GRID3D:
-      source = system_grid3d;
+   case WORKLOAD_SINGLE_LOAD_IADD:
+      source = single_load_iadd;
       break;
-   case WORKLOAD_VECTOR_SUITE:
-   case WORKLOAD_BRINGUP_SUITE:
-      fail("suite has no single shader");
+   case WORKLOAD_TWO_LOAD_IADD:
+      source = two_load_iadd;
+      break;
+   case WORKLOAD_AFFINE_INDEX:
+      source = affine_index;
+      break;
+   case WORKLOAD_VARIABLE_SHL:
+      source = variable_shl;
+      break;
+   case WORKLOAD_VARIABLE_ASHR:
+      source = variable_ashr;
+      break;
+   case WORKLOAD_VARIABLE_USHR:
+      source = variable_ushr;
+      break;
+   case WORKLOAD_LOADED_COMPARE:
+      source = loaded_compare;
+      break;
+   case WORKLOAD_LOADED_FLOAT_DAG:
+      source = loaded_float_dag;
+      break;
+   case WORKLOAD_PRESSURE40:
+      source = pressure40;
+      break;
+   case WORKLOAD_FOUR_RESOURCE_MIX:
+      source = four_resource_mix;
       break;
    }
 
@@ -689,7 +763,7 @@ seed_inputs(uint8_t *input_a, uint8_t *input_b, uint8_t *input_c,
       for (uint32_t i = 0; i < VALUE_COUNT + INPUT_EXTRA_VALUES; ++i) {
          /*
           * All three values are exact binary fractions whose numerators stay
-          * below 2^24 at MAX_TOTAL_DISPATCHES.  Their sums therefore have an
+          * below 2^24 for this corpus. Their sums therefore have an
           * unambiguous IEEE-754 single-precision bit pattern.
           */
          write_word(input_a, base + i * sizeof(uint32_t),
@@ -826,22 +900,46 @@ write_expected_output(enum workload workload, uint8_t *output,
             input_a_bits(slot, local) ^ input_a_bits(slot, (local + 17u) & 63u);
          break;
       }
-      case WORKLOAD_SYSTEM_GRID3D: {
-         uint32_t global_x = i & 3u;
-         uint32_t global_y = (i >> 2u) & 3u;
-         uint32_t global_z = (i >> 4u) & 3u;
-         uint32_t local_x = global_x & 1u;
-         uint32_t local_y = global_y & 1u;
-         uint32_t local_z = global_z & 1u;
-         uint32_t local_index = local_x | (local_y << 1u) | (local_z << 2u);
-         result = local_x | (local_y << 2u) | (local_z << 4u) |
-                  (local_index << 6u) | ((global_x >> 1u) << 10u) |
-                  ((global_y >> 1u) << 12u) | ((global_z >> 1u) << 14u);
+      case WORKLOAD_SINGLE_LOAD_IADD:
+         result = input_a_bits(slot, i) + 7u;
+         break;
+      case WORKLOAD_TWO_LOAD_IADD:
+         result = input_a_bits(slot, i) + input_b_bits(slot, i);
+         break;
+      case WORKLOAD_AFFINE_INDEX: {
+         uint32_t j = (input_a_bits(slot, i) * 3u + 1u) & 63u;
+         result = input_b_bits(slot, j) ^ i;
          break;
       }
-      case WORKLOAD_VECTOR_SUITE:
-      case WORKLOAD_BRINGUP_SUITE:
-         fail("suite oracle requires a concrete workload");
+      case WORKLOAD_VARIABLE_SHL:
+         result = input_a_bits(slot, i) << (input_b_bits(slot, i) & 31u);
+         break;
+      case WORKLOAD_VARIABLE_ASHR:
+         result = (uint32_t)((int32_t)input_a_bits(slot, i) >>
+                             (input_b_bits(slot, i) & 31u));
+         break;
+      case WORKLOAD_VARIABLE_USHR:
+         result = input_a_bits(slot, i) >> (input_b_bits(slot, i) & 31u);
+         break;
+      case WORKLOAD_LOADED_COMPARE: {
+         uint32_t x = input_a_bits(slot, i), y = input_b_bits(slot, i);
+         result = (x < y) | ((x >= y) << 1u) |
+                  (((int32_t)x < (int32_t)y) << 2u) | ((x == y) << 3u);
+         break;
+      }
+      case WORKLOAD_LOADED_FLOAT_DAG: {
+         float sum = a[0] + b;
+         float difference = a[0] - b;
+         result = float_bits(sum * difference + (a[0] < b ? a[0] : b));
+         break;
+      }
+      case WORKLOAD_PRESSURE40:
+         for (unsigned j = 0; j < 40; ++j)
+            result += input_a_bits(slot, (i + j) & 255u);
+         break;
+      case WORKLOAD_FOUR_RESOURCE_MIX:
+         result = (input_a_bits(slot, i) * 3u + input_b_bits(slot, i)) ^
+                  (input_c_bits(slot, i) + 0x13579bdfu);
          break;
       }
       write_word(output, base + i * sizeof(uint32_t), result);
@@ -912,90 +1010,65 @@ verify_completed_payloads(GLuint output, const struct buffer_layout *layout,
       fail("all completed results are zero");
 }
 
-int
-main(int argc, char **argv)
+static const char *const memory_cases[] = {
+   "add3",
+   "sparse-bindings",
+   "aos-load",
+   "aos-store",
+   "two-load-falu",
+   "six-pending",
+   "seven-pending",
+   "fanout",
+   "two-load-and",
+   "two-load-or",
+   "two-load-xor",
+   "vector-swizzle",
+   "vector-fanout",
+   "vector2-copy",
+   "vector3-copy",
+   "vector4-copy",
+   "vector4-alu-store",
+   "mixed",
+   "dependent-index",
+   "nested-dependent",
+   "system-load-index",
+   "single-load-iadd",
+   "two-load-iadd",
+   "affine-index",
+   "variable-shl",
+   "variable-ashr",
+   "variable-ushr",
+   "loaded-compare",
+   "loaded-float-dag",
+   "pressure40",
+   "four-resource-mix",
+};
+
+const char *const *
+t8132_apple9_memory_case_names(size_t *count)
 {
-   if (argc > 4) {
-      fprintf(
-         stderr,
-         "usage: %s [SUBMISSIONS [DISPATCHES_PER_SUBMISSION [WORKLOAD]]]\n",
-         argv[0]);
-      return 2;
-   }
+   *count = sizeof(memory_cases) / sizeof(memory_cases[0]);
+   return memory_cases;
+}
 
-   unsigned submissions =
-      argc >= 2 ? parse_count(argv[1], MAX_SUBMISSIONS, "submission count")
-                : DEFAULT_SUBMISSIONS;
-   unsigned dispatches_per_submission =
-      argc >= 3
-         ? parse_count(argv[2], MAX_DISPATCHES_PER_SUBMISSION, "dispatch count")
-         : DEFAULT_DISPATCHES_PER_SUBMISSION;
-   enum workload workload = argc >= 4 ? parse_workload(argv[3]) : WORKLOAD_ADD3;
-   static const enum workload vector_suite[] = {
-      WORKLOAD_VECTOR2_COPY,      WORKLOAD_VECTOR3_COPY,
-      WORKLOAD_VECTOR4_COPY,      WORKLOAD_VECTOR4_ALU_STORE,
-      WORKLOAD_VECTOR_SWIZZLE,    WORKLOAD_VECTOR_FANOUT,
-   };
-   static const enum workload bringup_suite[] = {
-      WORKLOAD_VECTOR2_COPY,    WORKLOAD_VECTOR3_COPY,
-      WORKLOAD_VECTOR4_COPY,    WORKLOAD_VECTOR4_ALU_STORE,
-      WORKLOAD_VECTOR_SWIZZLE,  WORKLOAD_VECTOR_FANOUT,
-      WORKLOAD_SYSTEM_LOAD_INDEX, WORKLOAD_SYSTEM_GRID3D,
-      WORKLOAD_SPARSE_BINDINGS, WORKLOAD_AOS_LOAD,
-      WORKLOAD_AOS_STORE,
-   };
-   const enum workload *suite = NULL;
-   unsigned suite_cases = 1;
-   if (workload == WORKLOAD_VECTOR_SUITE) {
-      suite = vector_suite;
-      suite_cases = sizeof(vector_suite) / sizeof(vector_suite[0]);
-   } else if (workload == WORKLOAD_BRINGUP_SUITE) {
-      suite = bringup_suite;
-      suite_cases = sizeof(bringup_suite) / sizeof(bringup_suite[0]);
-   }
+void
+t8132_apple9_run_memory_case(const char *name)
+{
+   enum workload workload = parse_workload(name);
+   if (workload > WORKLOAD_FOUR_RESOURCE_MIX)
+      fail("workload is not an individual memory case");
 
-   if (submissions > MAX_TOTAL_DISPATCHES / dispatches_per_submission)
-      fail("too many total dispatches");
-   size_t slot_count = submissions * dispatches_per_submission;
-   if (slot_count > MAX_TOTAL_DISPATCHES / suite_cases)
-      fail("too many suite dispatches");
-   slot_count *= suite_cases;
-
-   EGLDisplay display = open_asahi_display();
-   EGLint major = 0, minor = 0;
-   if (!eglInitialize(display, &major, &minor) ||
-       !eglBindAPI(EGL_OPENGL_ES_API))
-      fail("initialize EGL");
-
-   const EGLint config_attrs[] = {
-      EGL_SURFACE_TYPE,       EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE,
-      EGL_OPENGL_ES3_BIT_KHR, EGL_NONE,
-   };
-   EGLConfig config;
-   EGLint config_count = 0;
-   if (!eglChooseConfig(display, config_attrs, &config, 1, &config_count) ||
-       config_count != 1)
-      fail("eglChooseConfig");
-
-   const EGLint surface_attrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
-   EGLSurface surface = eglCreatePbufferSurface(display, config, surface_attrs);
-   const EGLint context_attrs[] = {
-      EGL_CONTEXT_MAJOR_VERSION_KHR,
-      3,
-      EGL_CONTEXT_MINOR_VERSION_KHR,
-      1,
-      EGL_NONE,
-   };
-   EGLContext context =
-      eglCreateContext(display, config, EGL_NO_CONTEXT, context_attrs);
-   if (surface == EGL_NO_SURFACE || context == EGL_NO_CONTEXT ||
-       !eglMakeCurrent(display, surface, surface, context))
-      fail("create GLES 3.1 context");
-
-   const char *renderer = (const char *)glGetString(GL_RENDERER);
-   const char *version = (const char *)glGetString(GL_VERSION);
-   if (!renderer || !strstr(renderer, "Apple M4"))
-      fail("unexpected renderer");
+   const bool has_input_c = workload == WORKLOAD_NESTED_DEPENDENT ||
+                            workload == WORKLOAD_FOUR_RESOURCE_MIX;
+   const bool has_one_input =
+      workload == WORKLOAD_VECTOR2_COPY || workload == WORKLOAD_VECTOR3_COPY ||
+      workload == WORKLOAD_VECTOR4_COPY ||
+      workload == WORKLOAD_VECTOR4_ALU_STORE ||
+      workload == WORKLOAD_SYSTEM_LOAD_INDEX || workload == WORKLOAD_AOS_LOAD ||
+      workload == WORKLOAD_AOS_STORE || workload == WORKLOAD_SINGLE_LOAD_IADD ||
+      workload == WORKLOAD_PRESSURE40;
+   const unsigned input_count = has_input_c ? 3 : has_one_input ? 1 : 2;
+   const unsigned output_binding = input_count;
 
    GLint alignment_value = 0;
    glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &alignment_value);
@@ -1004,7 +1077,8 @@ main(int argc, char **argv)
    size_t alignment = (size_t)alignment_value;
    if (alignment < sizeof(uint32_t))
       alignment = sizeof(uint32_t);
-   struct buffer_layout layout = make_layout(slot_count, alignment);
+
+   struct buffer_layout layout = make_layout(1, alignment);
    if (layout.buffer_bytes > (size_t)INTPTR_MAX)
       fail("guarded buffer is too large");
 
@@ -1019,7 +1093,7 @@ main(int argc, char **argv)
    seed_buffer(input_b_seed, layout.buffer_bytes, 1);
    seed_buffer(input_c_seed, layout.buffer_bytes, 2);
    seed_buffer(output_expected, layout.buffer_bytes, 3);
-   seed_inputs(input_a_seed, input_b_seed, input_c_seed, &layout, slot_count);
+   seed_inputs(input_a_seed, input_b_seed, input_c_seed, &layout, 1);
 
    GLuint buffers[4] = {0};
    glGenBuffers(4, buffers);
@@ -1036,105 +1110,42 @@ main(int argc, char **argv)
    }
    check_gl("create guarded SSBOs");
 
-   size_t completed_slots = 0;
-   for (unsigned suite_case = 0; suite_case < suite_cases; ++suite_case) {
-      const enum workload active_workload =
-         suite ? suite[suite_case] : workload;
-      const bool has_input_c = active_workload == WORKLOAD_NESTED_DEPENDENT;
-      const bool has_one_input = active_workload == WORKLOAD_VECTOR2_COPY ||
-                                 active_workload == WORKLOAD_VECTOR3_COPY ||
-                                 active_workload == WORKLOAD_VECTOR4_COPY ||
-                                 active_workload ==
-                                    WORKLOAD_VECTOR4_ALU_STORE ||
-                                 active_workload == WORKLOAD_SYSTEM_LOAD_INDEX ||
-                                 active_workload == WORKLOAD_AOS_LOAD ||
-                                 active_workload == WORKLOAD_AOS_STORE;
-      const bool has_no_input = active_workload == WORKLOAD_SYSTEM_GRID3D;
-      const unsigned input_count = has_input_c     ? 3
-                                   : has_one_input ? 1
-                                   : has_no_input  ? 0
-                                                   : 2;
-      const unsigned output_binding = input_count;
-      GLuint program = build_program(active_workload);
-      glUseProgram(program);
-      check_gl("build and use compute program");
-
-      for (unsigned submit = 0; submit < submissions; ++submit) {
-         for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-              ++dispatch) {
-            size_t slot = completed_slots + dispatch;
-            size_t offset = payload_offset(&layout, slot);
-            if (active_workload == WORKLOAD_SPARSE_BINDINGS) {
-               glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 3, buffers[0],
-                                 offset, PAYLOAD_BYTES);
-               glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 7, buffers[1],
-                                 offset, PAYLOAD_BYTES);
-               glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 5, buffers[3],
-                                 offset, PAYLOAD_BYTES);
-            } else {
-               for (unsigned binding = 0; binding < input_count; ++binding) {
-                  glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding,
-                                    buffers[binding], offset, PAYLOAD_BYTES);
-               }
-               glBindBufferRange(GL_SHADER_STORAGE_BUFFER, output_binding,
-                                 buffers[3], offset, PAYLOAD_BYTES);
-            }
-            if (active_workload == WORKLOAD_SYSTEM_GRID3D)
-               glDispatchCompute(2, 2, 2);
-            else
-               glDispatchCompute(VALUE_COUNT / LOCAL_SIZE_X, 1, 1);
-         }
-         check_gl("dispatch compute workload");
-
-         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
-                         GL_SHADER_STORAGE_BARRIER_BIT);
-         glFinish();
-         check_gl("finish compute submission");
-
-         size_t first_completed = completed_slots;
-         completed_slots += dispatches_per_submission;
-         for (size_t slot = first_completed; slot < completed_slots; ++slot)
-            write_expected_output(active_workload, output_expected, &layout,
-                                  slot);
-
-         /* Inputs are caller-owned and must remain byte-for-byte immutable. */
-         verify_buffer(buffers[0], "input-a", input_a_seed,
-                       layout.buffer_bytes);
-         verify_buffer(buffers[1], "input-b", input_b_seed,
-                       layout.buffer_bytes);
-         verify_buffer(buffers[2], "input-c", input_c_seed,
-                       layout.buffer_bytes);
-
-         /*
-          * Comparing the complete allocation covers every leading,
-          * inter-range, trailing and not-yet-dispatched byte in addition to
-          * all result words.
-          */
-         verify_buffer(buffers[3], "output", output_expected,
-                       layout.buffer_bytes);
-         verify_completed_payloads(buffers[3], &layout, completed_slots,
-                                   active_workload);
+   GLuint program = build_program(workload);
+   glUseProgram(program);
+   size_t offset = payload_offset(&layout, 0);
+   if (workload == WORKLOAD_SPARSE_BINDINGS) {
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 3, buffers[0], offset,
+                        PAYLOAD_BYTES);
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 7, buffers[1], offset,
+                        PAYLOAD_BYTES);
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 5, buffers[3], offset,
+                        PAYLOAD_BYTES);
+   } else {
+      for (unsigned binding = 0; binding < input_count; ++binding) {
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding, buffers[binding],
+                           offset, PAYLOAD_BYTES);
       }
-
-      glDeleteProgram(program);
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, output_binding, buffers[3],
+                        offset, PAYLOAD_BYTES);
    }
 
-   printf("T8132_GLES_COMPUTE_ADD3_OK workload=%s submissions=%u "
-          "dispatches_per_submission=%u total_dispatches=%zu values=%u "
-          "ssbo_alignment=%zu first_offset=%#zx stride=%#zx "
-          "renderer=\"%s\" version=\"%s\"\n",
-          workload_name(workload), submissions, dispatches_per_submission,
-          slot_count, VALUE_COUNT, alignment, layout.first_payload_offset,
-          layout.payload_stride, renderer, version);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE_X, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   check_gl("execute memory case");
 
+   write_expected_output(workload, output_expected, &layout, 0);
+   verify_buffer(buffers[0], "input-a", input_a_seed, layout.buffer_bytes);
+   verify_buffer(buffers[1], "input-b", input_b_seed, layout.buffer_bytes);
+   verify_buffer(buffers[2], "input-c", input_c_seed, layout.buffer_bytes);
+   verify_buffer(buffers[3], "output", output_expected, layout.buffer_bytes);
+   verify_completed_payloads(buffers[3], &layout, 1, workload);
+
+   glDeleteProgram(program);
    glDeleteBuffers(4, buffers);
    free(output_expected);
    free(input_c_seed);
    free(input_b_seed);
    free(input_a_seed);
-   eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-   eglDestroyContext(display, context);
-   eglDestroySurface(display, surface);
-   eglTerminate(display);
-   return 0;
 }

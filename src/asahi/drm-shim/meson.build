@@ -14,16 +14,13 @@ libasahi_noop_drm_shim = shared_library(
 
 if with_tools.contains('drm-shim')
   executable(
-    't8132_gles_compute_add3',
-    files('t8132_gles_compute_add3.c'),
-    dependencies : [dependency('egl'), dependency('glesv2')],
-    install : false,
-  )
-
-  executable(
-    't8132_gles_compute_xyz',
-    files('t8132_gles_compute_xyz.c'),
-    dependencies : [dependency('egl'), dependency('glesv2')],
+    't8132_apple9_compute_runner',
+    files(
+      't8132_apple9_compute_runner.c',
+      't8132_apple9_compute_memory.c',
+      't8132_apple9_compute_geometry.c',
+    ),
+    dependencies : [dependency('egl'), dependency('glesv2'), dep_m],
     install : false,
   )
 endif

@@ -1,23 +1,18 @@
 # SPDX-License-Identifier: MIT
 
-"""Small batched Piglit profile for T8132 Apple9 compute bring-up."""
+"""Full-oracle native Apple9 compute tests, batched in one GPU process."""
 
 import os
+import subprocess
 
+from framework import status
 from framework.profile import TestProfile
-from framework.test.opengl import FastSkipDisabled
-from framework.test.shader_test import MultiShaderTest
+from framework.test.base import ReducedProcessMixin
+from framework.test.piglit_test import PiglitBaseTest
 
 
-_PROFILE_DIR = os.path.dirname(os.path.realpath(__file__))
-_TEST_DIR = os.path.join(_PROFILE_DIR, "tests")
-_TESTS = [
-    os.path.join(_TEST_DIR, "01-global-invocation-id.shader_test"),
-    os.path.join(_TEST_DIR, "02-integer-add.shader_test"),
-    os.path.join(_TEST_DIR, "03-two-load-add.shader_test"),
-    os.path.join(_TEST_DIR, "04-uvec4-load-store.shader_test"),
-    os.path.join(_TEST_DIR, "05-dependent-buffer-index.shader_test"),
-]
+_RUNNER = os.environ["T8132_PIGLIT_NATIVE_RUNNER"]
+_CASES = subprocess.check_output([_RUNNER, "--list"], text=True).splitlines()
 
 _ENVIRONMENT = {
     "LD_PRELOAD": os.environ["T8132_PIGLIT_CHILD_LD_PRELOAD"],
@@ -35,11 +30,37 @@ _ENVIRONMENT = {
     "PIGLIT_NO_WINDOW": "1",
 }
 
+class Apple9ComputeBatch(ReducedProcessMixin, PiglitBaseTest):
+    """Run named native cases in one context, resuming after a failed case."""
+
+    def __init__(self, cases):
+        self._runner = _RUNNER
+        self._cases = cases
+        super().__init__(
+            [self._runner] + cases,
+            subtests=cases,
+            run_concurrent=False,
+            env=_ENVIRONMENT,
+        )
+
+    def _is_subtest(self, line):
+        return line.startswith("PIGLIT TEST:")
+
+    def _resume(self, current):
+        return [self._runner] + self._cases[current:]
+
+    def _stop_status(self):
+        if self.result.returncode > 0:
+            return status.FAIL
+        return status.CRASH
+
+    def _is_cherry(self):
+        completed = sum(
+            line.startswith('PIGLIT: {"subtest":')
+            for line in self.result.out.splitlines()
+        )
+        return completed == len(self._expected)
+
+
 profile = TestProfile()
-test = MultiShaderTest.new(_TESTS)
-# Piglit's fast-skip probe runs a separate wflinfo process without the
-# per-test DRM-shim environment. The shader runner performs the real context
-# and version checks, so keep this controlled profile to one GPU process.
-test.skips = [FastSkipDisabled() for _ in test.skips]
-test.env.update(_ENVIRONMENT)
-profile.test_list["apple9-compute"] = test
+profile.test_list["apple9-native-compute"] = Apple9ComputeBatch(_CASES)

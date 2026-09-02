@@ -1,24 +1,23 @@
 /* SPDX-License-Identifier: MIT */
 
-/* End-to-end GLES 3.1 -> NIR -> Apple9 -> drm-shim compute test. */
+/* Native Piglit runner for GLES 3.1 -> NIR -> Apple9 compute tests. */
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl31.h>
 
 #include <math.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define VALUE_COUNT 16384u
-#define LOCAL_SIZE 256u
-#define DEFAULT_SUBMISSIONS 2u
-#define MAX_SUBMISSIONS 32u
+#include "t8132_apple9_compute_cases.h"
+
+#define VALUE_COUNT     16384u
+#define LOCAL_SIZE      256u
 #define MIN_GUARD_BYTES 256u
-#define MAX_OUTPUT_ARENA_BYTES (UINT64_C(512) * 1024 * 1024)
 
 enum workload {
    WORKLOAD_CONSTANT,
@@ -200,11 +199,9 @@ static const char *workload_expressions[WORKLOAD_COUNT] = {
    [WORKLOAD_FMAX] = "floatBitsToUint(max(uintBitsToFloat(gid), 0.0))",
    [WORKLOAD_FABS] = "floatBitsToUint(abs(uintBitsToFloat(gid)))",
    [WORKLOAD_FNEG] = "floatBitsToUint(-uintBitsToFloat(gid))",
-   [WORKLOAD_FMA] =
-      "floatBitsToUint(uintBitsToFloat(gid) * 2.0 + 1.0)",
-   [WORKLOAD_FMA_NAN_MUL] =
-      "floatBitsToUint(uintBitsToFloat(gid) * "
-      "uintBitsToFloat(0x7fc00000u) + 1.0)",
+   [WORKLOAD_FMA] = "floatBitsToUint(uintBitsToFloat(gid) * 2.0 + 1.0)",
+   [WORKLOAD_FMA_NAN_MUL] = "floatBitsToUint(uintBitsToFloat(gid) * "
+                            "uintBitsToFloat(0x7fc00000u) + 1.0)",
    [WORKLOAD_ARCHIVE_CROSS_0] = "gid + 0x0f1e2d3cu",
    [WORKLOAD_ARCHIVE_CROSS_1] = "gid + 0x10293847u",
    [WORKLOAD_ARCHIVE_CROSS_2] = "gid + 0x56473829u",
@@ -221,26 +218,24 @@ static const char *workload_expressions[WORKLOAD_COUNT] = {
  * through the same Mesa NIR and Apple9 compiler path as the expression cases.
  */
 static const char *workload_bodies[WORKLOAD_COUNT] = {
-   [WORKLOAD_COMPARE_COMPLETE] =
-      "uint ua=gid*65793u+0x80001000u;"
-      "uint ub=(gid^0xdeadbeefu)+0x1234u;"
-      "int ia=int(ua);int ib=int(ub);"
-      "float fa=float(int(gid&255u)-128);"
-      "float fb=float(int((gid*37u)&255u)-128);"
-      "uint r=uint(ua<ub)|(uint(ua>=ub)<<1u)|"
-      "(uint(ua==ub)<<2u)|(uint(ua!=ub)<<3u)|"
-      "(uint(ia<ib)<<4u)|(uint(ia>=ib)<<5u)|"
-      "(uint(ia==ib)<<6u)|(uint(ia!=ib)<<7u)|"
-      "(uint(fa<fb)<<8u)|(uint(fa>=fb)<<9u)|"
-      "(uint(fa==fb)<<10u)|(uint(fa!=fb)<<11u);"
-      "output0.v[gid]=r;",
-   [WORKLOAD_DEEP_INT_DAG] =
-      "uint a=gid*3u+0x00010203u;"
-      "uint b=(a^0xa5a5a5a5u)+gid*5u;"
-      "uint c=(b|(gid+17u))^(a&0x00ff00ffu);"
-      "uint d=c*9u+(b^0xdeadbeefu);"
-      "uint e=(d-(a|0x1234u))^(c+0x76543210u);"
-      "output0.v[gid]=e*7u+(d^b);",
+   [WORKLOAD_COMPARE_COMPLETE] = "uint ua=gid*65793u+0x80001000u;"
+                                 "uint ub=(gid^0xdeadbeefu)+0x1234u;"
+                                 "int ia=int(ua);int ib=int(ub);"
+                                 "float fa=float(int(gid&255u)-128);"
+                                 "float fb=float(int((gid*37u)&255u)-128);"
+                                 "uint r=uint(ua<ub)|(uint(ua>=ub)<<1u)|"
+                                 "(uint(ua==ub)<<2u)|(uint(ua!=ub)<<3u)|"
+                                 "(uint(ia<ib)<<4u)|(uint(ia>=ib)<<5u)|"
+                                 "(uint(ia==ib)<<6u)|(uint(ia!=ib)<<7u)|"
+                                 "(uint(fa<fb)<<8u)|(uint(fa>=fb)<<9u)|"
+                                 "(uint(fa==fb)<<10u)|(uint(fa!=fb)<<11u);"
+                                 "output0.v[gid]=r;",
+   [WORKLOAD_DEEP_INT_DAG] = "uint a=gid*3u+0x00010203u;"
+                             "uint b=(a^0xa5a5a5a5u)+gid*5u;"
+                             "uint c=(b|(gid+17u))^(a&0x00ff00ffu);"
+                             "uint d=c*9u+(b^0xdeadbeefu);"
+                             "uint e=(d-(a|0x1234u))^(c+0x76543210u);"
+                             "output0.v[gid]=e*7u+(d^b);",
    [WORKLOAD_DIAMOND_INT_DAG] =
       "uint root=gid*13u+0x10203040u;"
       "uint left0=(root+0x11111111u)^0x55aa55aau;"
@@ -250,71 +245,64 @@ static const char *workload_bodies[WORKLOAD_COUNT] = {
       "uint join0=(left1^right1)+(left0|right0);"
       "uint join1=(left1+root)^(right1+left0);"
       "output0.v[gid]=(join0*7u)^(join1*11u)^(left1+right0);",
-   [WORKLOAD_FANOUT_INT_DAG] =
-      "uint base=gid*257u+17u;"
-      "uint a=base+0x11111111u;"
-      "uint b=base^0xa5a5a5a5u;"
-      "uint c=base*7u;"
-      "uint d=base|0x01010101u;"
-      "uint p=(a^b)+(c^d);"
-      "uint q=(a+c)^(b+d);"
-      "uint r=(a|d)^(b&c);"
-      "output0.v[gid]=(p*3u+q*5u)^r;",
-   [WORKLOAD_LOGIC_LIFETIME_DAG] =
-      "uint a=gid+3u;"
-      "uint b=gid*5u;"
-      "uint x=a^b;"
-      "uint y=a|0x55aa55aau;"
-      "uint z=b&0xf0f00f0fu;"
-      "uint w=(x^y)+(z^a);"
-      "output0.v[gid]=(w|b)^(x&(y+z));",
-   [WORKLOAD_PRESSURE_INT_DAG] =
-      "uint a0=gid+1u;"
-      "uint a1=gid*3u;"
-      "uint a2=gid^0x13579bdfu;"
-      "uint a3=gid|0x01010101u;"
-      "uint a4=gid&0xfefefefeu;"
-      "uint a5=gid+0x2468ace0u;"
-      "uint a6=gid*11u;"
-      "uint a7=~gid;"
-      "uint p=(a0^a1)+(a2^a3)+(a4^a5)+(a6^a7);"
-      "uint q=(a0+a2)^(a1+a3)^(a4+a6)^(a5+a7);"
-      "output0.v[gid]=p+q;",
-   [WORKLOAD_MINMAX_INT_DAG] =
-      "uint a=gid*65793u+0x80001000u;"
-      "uint b=(gid^0xdeadbeefu)+0x1234u;"
-      "uint u0=min(a,b);"
-      "uint u1=max(a,b);"
-      "uint i0=uint(min(int(a),int(b)));"
-      "uint i1=uint(max(int(a),int(b)));"
-      "output0.v[gid]=(u0^i1)+(u1^i0)+(a^b);",
-   [WORKLOAD_NESTED_SELECT_DAG] =
-      "uint a=gid*3u+5u;"
-      "uint b=(gid^0x55aa55aau)+7u;"
-      "uint c=gid+100u;"
-      "uint d=gid*2u+1u;"
-      "uint s0=(a<b)?(a^c):(b+d);"
-      "uint s1=(c<d)?(s0+a):(s0^b);"
-      "uint s2=(s0<s1)?(s1+d):(s0+c);"
-      "output0.v[gid]=s2^(a+b);",
-   [WORKLOAD_DEEP_FLOAT_DAG] =
-      "float x=uintBitsToFloat(gid|0x3f800000u);"
-      "float a=x*2.0+0.5;"
-      "float b=x*0.5+0.25;"
-      "float c=max(a,b);"
-      "float d=min(a+b,c*2.0);"
-      "float e=abs((d-4.0)+(a-b));"
-      "output0.v[gid]=floatBitsToUint(e*0.5+0.125);",
-   [WORKLOAD_FANOUT_FLOAT_DAG] =
-      "float x=uintBitsToFloat(gid|0x3f800000u);"
-      "float a=x*2.0+0.25;"
-      "float b=x*0.5+0.125;"
-      "float c=a+b;"
-      "float d=a-b;"
-      "float e=a*b;"
-      "float f=max(c,e);"
-      "float g=min(d+2.0,e*0.5);"
-      "output0.v[gid]=floatBitsToUint((f+g)*d);",
+   [WORKLOAD_FANOUT_INT_DAG] = "uint base=gid*257u+17u;"
+                               "uint a=base+0x11111111u;"
+                               "uint b=base^0xa5a5a5a5u;"
+                               "uint c=base*7u;"
+                               "uint d=base|0x01010101u;"
+                               "uint p=(a^b)+(c^d);"
+                               "uint q=(a+c)^(b+d);"
+                               "uint r=(a|d)^(b&c);"
+                               "output0.v[gid]=(p*3u+q*5u)^r;",
+   [WORKLOAD_LOGIC_LIFETIME_DAG] = "uint a=gid+3u;"
+                                   "uint b=gid*5u;"
+                                   "uint x=a^b;"
+                                   "uint y=a|0x55aa55aau;"
+                                   "uint z=b&0xf0f00f0fu;"
+                                   "uint w=(x^y)+(z^a);"
+                                   "output0.v[gid]=(w|b)^(x&(y+z));",
+   [WORKLOAD_PRESSURE_INT_DAG] = "uint a0=gid+1u;"
+                                 "uint a1=gid*3u;"
+                                 "uint a2=gid^0x13579bdfu;"
+                                 "uint a3=gid|0x01010101u;"
+                                 "uint a4=gid&0xfefefefeu;"
+                                 "uint a5=gid+0x2468ace0u;"
+                                 "uint a6=gid*11u;"
+                                 "uint a7=~gid;"
+                                 "uint p=(a0^a1)+(a2^a3)+(a4^a5)+(a6^a7);"
+                                 "uint q=(a0+a2)^(a1+a3)^(a4+a6)^(a5+a7);"
+                                 "output0.v[gid]=p+q;",
+   [WORKLOAD_MINMAX_INT_DAG] = "uint a=gid*65793u+0x80001000u;"
+                               "uint b=(gid^0xdeadbeefu)+0x1234u;"
+                               "uint u0=min(a,b);"
+                               "uint u1=max(a,b);"
+                               "uint i0=uint(min(int(a),int(b)));"
+                               "uint i1=uint(max(int(a),int(b)));"
+                               "output0.v[gid]=(u0^i1)+(u1^i0)+(a^b);",
+   [WORKLOAD_NESTED_SELECT_DAG] = "uint a=gid*3u+5u;"
+                                  "uint b=(gid^0x55aa55aau)+7u;"
+                                  "uint c=gid+100u;"
+                                  "uint d=gid*2u+1u;"
+                                  "uint s0=(a<b)?(a^c):(b+d);"
+                                  "uint s1=(c<d)?(s0+a):(s0^b);"
+                                  "uint s2=(s0<s1)?(s1+d):(s0+c);"
+                                  "output0.v[gid]=s2^(a+b);",
+   [WORKLOAD_DEEP_FLOAT_DAG] = "float x=uintBitsToFloat(gid|0x3f800000u);"
+                               "float a=x*2.0+0.5;"
+                               "float b=x*0.5+0.25;"
+                               "float c=max(a,b);"
+                               "float d=min(a+b,c*2.0);"
+                               "float e=abs((d-4.0)+(a-b));"
+                               "output0.v[gid]=floatBitsToUint(e*0.5+0.125);",
+   [WORKLOAD_FANOUT_FLOAT_DAG] = "float x=uintBitsToFloat(gid|0x3f800000u);"
+                                 "float a=x*2.0+0.25;"
+                                 "float b=x*0.5+0.125;"
+                                 "float c=a+b;"
+                                 "float d=a-b;"
+                                 "float e=a*b;"
+                                 "float f=max(c,e);"
+                                 "float g=min(d+2.0,e*0.5);"
+                                 "output0.v[gid]=floatBitsToUint((f+g)*d);",
    [WORKLOAD_MIXED_DOMAIN_DAG] =
       "uint u=(gid*0x00010203u)^0x5a5aa5a5u;"
       "float x=uintBitsToFloat((u&0x007fffffu)|0x3f800000u);"
@@ -322,18 +310,16 @@ static const char *workload_bodies[WORKLOAD_COUNT] = {
       "float b=max(a,x+0.25);"
       "uint bits=floatBitsToUint(b*0.5);"
       "output0.v[gid]=(bits^u)+gid*7u;",
-   [WORKLOAD_RADIX_ALTERNATING_DAG] =
-      "uint a=gid*0x10101010u+0xf000000fu;"
-      "uint b=(gid^0x10010001u)+0x0f0000f0u;"
-      "uint c=a*0x01000101u+(b^0x90000009u);"
-      "output0.v[gid]=(c+a)^(b*0x00100001u);",
-   [WORKLOAD_SELECT_ALL_LIVE_DAG] =
-      "uint a=gid*3u+5u;"
-      "uint b=(gid^0x55aa55aau)+7u;"
-      "uint t=a^(gid+0x101u);"
-      "uint f=b+(gid*2u+9u);"
-      "uint s=(a<b)?t:f;"
-      "output0.v[gid]=s^(a*5u+b*7u+t*11u+f*13u);",
+   [WORKLOAD_RADIX_ALTERNATING_DAG] = "uint a=gid*0x10101010u+0xf000000fu;"
+                                      "uint b=(gid^0x10010001u)+0x0f0000f0u;"
+                                      "uint c=a*0x01000101u+(b^0x90000009u);"
+                                      "output0.v[gid]=(c+a)^(b*0x00100001u);",
+   [WORKLOAD_SELECT_ALL_LIVE_DAG] = "uint a=gid*3u+5u;"
+                                    "uint b=(gid^0x55aa55aau)+7u;"
+                                    "uint t=a^(gid+0x101u);"
+                                    "uint f=b+(gid*2u+9u);"
+                                    "uint s=(a<b)?t:f;"
+                                    "output0.v[gid]=s^(a*5u+b*7u+t*11u+f*13u);",
    [WORKLOAD_MINMAX_NESTED_LIVE_DAG] =
       "uint a=gid*65793u+0x80001000u;"
       "uint b=(gid^0xdeadbeefu)+0x1234u;"
@@ -403,8 +389,8 @@ static const char *workload_bodies[WORKLOAD_COUNT] = {
 static void
 fail(const char *message)
 {
-   fprintf(stderr, "T8132_GLES_COMPUTE_FAIL: %s (EGL=%#x GL=%#x)\n",
-           message, eglGetError(), glGetError());
+   fprintf(stderr, "T8132_GLES_COMPUTE_FAIL: %s (EGL=%#x GL=%#x)\n", message,
+           eglGetError(), glGetError());
    exit(1);
 }
 
@@ -456,11 +442,10 @@ build_program(enum workload workload)
       snprintf(statement, sizeof(statement), "output0.v[gid]=%s;", expression);
    }
 
-   unsigned glsl_version =
-      (workload == WORKLOAD_FMA_ALL_LIVE_DAG ||
-       workload == WORKLOAD_FLOAT_CACHE_RING_DAG)
-         ? 320
-         : 310;
+   unsigned glsl_version = (workload == WORKLOAD_FMA_ALL_LIVE_DAG ||
+                            workload == WORKLOAD_FLOAT_CACHE_RING_DAG)
+                              ? 320
+                              : 310;
    char source[4096];
    snprintf(source, sizeof(source),
             "#version %u es\n"
@@ -519,16 +504,24 @@ expected(enum workload workload, uint32_t gid)
 {
    float value = bits_float(gid);
    switch (workload) {
-   case WORKLOAD_CONSTANT: return 42;
-   case WORKLOAD_CONSTANT32: return 0xdeadbeef;
-   case WORKLOAD_CONSTANT32_SPARSE: return 0x10000001;
-   case WORKLOAD_GID: return gid;
-   case WORKLOAD_MAD: return gid * 0x01020305u + 0xdeadbeefu;
-   case WORKLOAD_DAG: return ((gid * 3u) ^ (gid + 7u)) + 11u;
-   case WORKLOAD_REUSE_DAG: return (gid + 3u) ^ (gid * 2u);
+   case WORKLOAD_CONSTANT:
+      return 42;
+   case WORKLOAD_CONSTANT32:
+      return 0xdeadbeef;
+   case WORKLOAD_CONSTANT32_SPARSE:
+      return 0x10000001;
+   case WORKLOAD_GID:
+      return gid;
+   case WORKLOAD_MAD:
+      return gid * 0x01020305u + 0xdeadbeefu;
+   case WORKLOAD_DAG:
+      return ((gid * 3u) ^ (gid + 7u)) + 11u;
+   case WORKLOAD_REUSE_DAG:
+      return (gid + 3u) ^ (gid * 2u);
    case WORKLOAD_SELECT_DAG:
       return (gid + 3u) < (gid * 2u) ? (gid ^ 0x55u) : (gid + 100u);
-   case WORKLOAD_COMPARE_DAG: return (gid + 3u) < (gid * 2u);
+   case WORKLOAD_COMPARE_DAG:
+      return (gid + 3u) < (gid * 2u);
    case WORKLOAD_COMPARE_COMPLETE: {
       uint32_t ua = gid * 65793u + 0x80001000u;
       uint32_t ub = (gid ^ 0xdeadbeefu) + 0x1234u;
@@ -536,18 +529,12 @@ expected(enum workload workload, uint32_t gid)
       int32_t ib = (int32_t)ub;
       float fa = (float)((int32_t)(gid & 255u) - 128);
       float fb = (float)((int32_t)((gid * 37u) & 255u) - 128);
-      return ((uint32_t)(ua < ub) << 0) |
-             ((uint32_t)(ua >= ub) << 1) |
-             ((uint32_t)(ua == ub) << 2) |
-             ((uint32_t)(ua != ub) << 3) |
-             ((uint32_t)(ia < ib) << 4) |
-             ((uint32_t)(ia >= ib) << 5) |
-             ((uint32_t)(ia == ib) << 6) |
-             ((uint32_t)(ia != ib) << 7) |
-             ((uint32_t)(fa < fb) << 8) |
-             ((uint32_t)(fa >= fb) << 9) |
-             ((uint32_t)(fa == fb) << 10) |
-             ((uint32_t)(fa != fb) << 11);
+      return ((uint32_t)(ua < ub) << 0) | ((uint32_t)(ua >= ub) << 1) |
+             ((uint32_t)(ua == ub) << 2) | ((uint32_t)(ua != ub) << 3) |
+             ((uint32_t)(ia < ib) << 4) | ((uint32_t)(ia >= ib) << 5) |
+             ((uint32_t)(ia == ib) << 6) | ((uint32_t)(ia != ib) << 7) |
+             ((uint32_t)(fa < fb) << 8) | ((uint32_t)(fa >= fb) << 9) |
+             ((uint32_t)(fa == fb) << 10) | ((uint32_t)(fa != fb) << 11);
    }
    case WORKLOAD_DEEP_INT_DAG: {
       uint32_t a = gid * 3u + 0x00010203u;
@@ -679,8 +666,7 @@ expected(enum workload workload, uint32_t gid)
       uint32_t hi1 = hi0 > d ? hi0 : d;
       uint32_t slo = (int32_t)a < (int32_t)c ? a : c;
       uint32_t shi = (int32_t)b > (int32_t)d ? b : d;
-      return (lo1 ^ hi1) + (slo ^ shi) +
-             (a + b + c + d + lo0 + hi0);
+      return (lo1 ^ hi1) + (slo ^ shi) + (a + b + c + d + lo0 + hi0);
    }
    case WORKLOAD_FMA_ALL_LIVE_DAG: {
       float x = bits_float((gid & 0x3fffu) | 0x3f800000u);
@@ -739,17 +725,28 @@ expected(enum workload workload, uint32_t gid)
       uint32_t s = lo0 < hi0 ? lo1 : a5;
       return s + a0 + (a1 ^ lo0) + (a2 ^ hi0) + a3 + a4 + a5 + lo1;
    }
-   case WORKLOAD_ADD: return gid + 0x12345678u;
-   case WORKLOAD_SUB: return gid - 0x12345678u;
-   case WORKLOAD_RSUB: return 0x12345678u - gid;
-   case WORKLOAD_MUL: return gid * 0x01020305u;
-   case WORKLOAD_AND: return gid & 0x5a5aa5a5u;
-   case WORKLOAD_OR: return gid | 0x5a5aa5a5u;
-   case WORKLOAD_XOR: return gid ^ 0x5a5aa5a5u;
-   case WORKLOAD_NOT: return ~gid;
-   case WORKLOAD_INEG: return 0u - gid;
-   case WORKLOAD_U2F: return float_bits((float)gid);
-   case WORKLOAD_I2F: return float_bits((float)((int32_t)gid - 8192));
+   case WORKLOAD_ADD:
+      return gid + 0x12345678u;
+   case WORKLOAD_SUB:
+      return gid - 0x12345678u;
+   case WORKLOAD_RSUB:
+      return 0x12345678u - gid;
+   case WORKLOAD_MUL:
+      return gid * 0x01020305u;
+   case WORKLOAD_AND:
+      return gid & 0x5a5aa5a5u;
+   case WORKLOAD_OR:
+      return gid | 0x5a5aa5a5u;
+   case WORKLOAD_XOR:
+      return gid ^ 0x5a5aa5a5u;
+   case WORKLOAD_NOT:
+      return ~gid;
+   case WORKLOAD_INEG:
+      return 0u - gid;
+   case WORKLOAD_U2F:
+      return float_bits((float)gid);
+   case WORKLOAD_I2F:
+      return float_bits((float)((int32_t)gid - 8192));
    case WORKLOAD_F2I: {
       float x = bits_float(0x3f000000u | ((gid & 0x3ffu) << 12u));
       return (uint32_t)(int32_t)(x * 37.0f - 20.0f);
@@ -758,35 +755,59 @@ expected(enum workload workload, uint32_t gid)
       float x = bits_float(0x3f000000u | ((gid & 0x3ffu) << 12u));
       return (uint32_t)(x * 37.0f);
    }
-   case WORKLOAD_SHL: return gid << 9;
-   case WORKLOAD_ASHR: return (uint32_t)((int32_t)(gid ^ 0x80000000u) >> 7);
-   case WORKLOAD_USHR: return (gid ^ 0x80000000u) >> 7;
+   case WORKLOAD_SHL:
+      return gid << 9;
+   case WORKLOAD_ASHR:
+      return (uint32_t)((int32_t)(gid ^ 0x80000000u) >> 7);
+   case WORKLOAD_USHR:
+      return (gid ^ 0x80000000u) >> 7;
    case WORKLOAD_IMIN:
       return (uint32_t)(((int32_t)gid < -7) ? (int32_t)gid : -7);
    case WORKLOAD_IMAX:
       return (uint32_t)(((int32_t)gid > 123) ? (int32_t)gid : 123);
-   case WORKLOAD_UMIN: return gid < 1234 ? gid : 1234;
-   case WORKLOAD_UMAX: return gid > 1234 ? gid : 1234;
-   case WORKLOAD_FADD: return float_bits(value + 1.25f);
-   case WORKLOAD_FSUB: return float_bits(value - 1.0f);
-   case WORKLOAD_RFSUB: return float_bits(1.0f - value);
+   case WORKLOAD_UMIN:
+      return gid < 1234 ? gid : 1234;
+   case WORKLOAD_UMAX:
+      return gid > 1234 ? gid : 1234;
+   case WORKLOAD_FADD:
+      return float_bits(value + 1.25f);
+   case WORKLOAD_FSUB:
+      return float_bits(value - 1.0f);
+   case WORKLOAD_RFSUB:
+      return float_bits(1.0f - value);
    /* Apple9 flushes the gid-derived subnormal input to zero for fmul. */
-   case WORKLOAD_FMUL: return 0;
-   case WORKLOAD_FMIN: return float_bits(value < 0.0f ? value : 0.0f);
-   case WORKLOAD_FMAX: return 0; /* gid bit patterns are positive subnormals. */
-   case WORKLOAD_FABS: return gid & 0x7fffffffu;
-   case WORKLOAD_FNEG: return gid ^ 0x80000000u;
-   case WORKLOAD_FMA: return float_bits(value * 2.0f + 1.0f);
-   case WORKLOAD_FMA_NAN_MUL: return 0x7fc00000u;
-   case WORKLOAD_ARCHIVE_CROSS_0: return gid + 0x0f1e2d3cu;
-   case WORKLOAD_ARCHIVE_CROSS_1: return gid + 0x10293847u;
-   case WORKLOAD_ARCHIVE_CROSS_2: return gid + 0x56473829u;
-   case WORKLOAD_ARCHIVE_CROSS_3: return gid + 0x89abcdefu;
-   case WORKLOAD_ARCHIVE_CROSS_4: return gid + 0xc001d00du;
-   case WORKLOAD_ARCHIVE_CROSS_5: return gid + 0x31415926u;
-   case WORKLOAD_ARCHIVE_CROSS_6: return gid + 0x27182818u;
-   case WORKLOAD_ARCHIVE_CROSS_7: return gid + 0xfeedfaceu;
-   case WORKLOAD_COUNT: break;
+   case WORKLOAD_FMUL:
+      return 0;
+   case WORKLOAD_FMIN:
+      return float_bits(value < 0.0f ? value : 0.0f);
+   case WORKLOAD_FMAX:
+      return 0; /* gid bit patterns are positive subnormals. */
+   case WORKLOAD_FABS:
+      return gid & 0x7fffffffu;
+   case WORKLOAD_FNEG:
+      return gid ^ 0x80000000u;
+   case WORKLOAD_FMA:
+      return float_bits(value * 2.0f + 1.0f);
+   case WORKLOAD_FMA_NAN_MUL:
+      return 0x7fc00000u;
+   case WORKLOAD_ARCHIVE_CROSS_0:
+      return gid + 0x0f1e2d3cu;
+   case WORKLOAD_ARCHIVE_CROSS_1:
+      return gid + 0x10293847u;
+   case WORKLOAD_ARCHIVE_CROSS_2:
+      return gid + 0x56473829u;
+   case WORKLOAD_ARCHIVE_CROSS_3:
+      return gid + 0x89abcdefu;
+   case WORKLOAD_ARCHIVE_CROSS_4:
+      return gid + 0xc001d00du;
+   case WORKLOAD_ARCHIVE_CROSS_5:
+      return gid + 0x31415926u;
+   case WORKLOAD_ARCHIVE_CROSS_6:
+      return gid + 0x27182818u;
+   case WORKLOAD_ARCHIVE_CROSS_7:
+      return gid + 0xfeedfaceu;
+   case WORKLOAD_COUNT:
+      break;
    }
    abort();
 }
@@ -818,8 +839,7 @@ static struct output_layout
 make_output_layout(size_t slot_count, size_t segment_bytes)
 {
    GLint queried_alignment = 0;
-   glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT,
-                 &queried_alignment);
+   glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &queried_alignment);
    if (glGetError() != GL_NO_ERROR || queried_alignment <= 0)
       fail("query SSBO alignment");
 
@@ -866,16 +886,16 @@ poison_word(enum workload workload, uint32_t gid, size_t slot,
 {
    /* The nonzero xor mask guarantees that the seed differs from the exact
     * oracle, including workloads whose correct result is entirely zero. */
-   uint32_t mask = (UINT32_C(0xa5a5a5a4) ^
-                    UINT32_C(0x9e3779b9) * (uint32_t)(slot + 1) ^
-                    UINT32_C(0x7f4a7c15) * (generation + 1) ^ gid) |
-                   1u;
+   uint32_t mask =
+      (UINT32_C(0xa5a5a5a4) ^ UINT32_C(0x9e3779b9) * (uint32_t)(slot + 1) ^
+       UINT32_C(0x7f4a7c15) * (generation + 1) ^ gid) |
+      1u;
    return expected(workload, gid) ^ mask;
 }
 
 static void
-seed_output_slot(uint8_t *seed, const struct output_layout *layout,
-                 size_t slot, enum workload workload, unsigned generation)
+seed_output_slot(uint8_t *seed, const struct output_layout *layout, size_t slot,
+                 enum workload workload, unsigned generation)
 {
    const size_t output_offset = slot_output_offset(layout, slot);
    const size_t guard_words = layout->guard_bytes / sizeof(uint32_t);
@@ -892,7 +912,7 @@ seed_output_slot(uint8_t *seed, const struct output_layout *layout,
       output[i] = poison_word(workload, i, slot, generation);
 }
 
-static void
+static bool
 verify_output_slot(const uint8_t *mapped, const struct output_layout *layout,
                    size_t slot, enum workload workload, unsigned generation,
                    const char *mode, unsigned ordinal)
@@ -902,9 +922,8 @@ verify_output_slot(const uint8_t *mapped, const struct output_layout *layout,
    const uint32_t *before =
       (const uint32_t *)(mapped + output_offset - layout->guard_bytes);
    const uint32_t *output = (const uint32_t *)(mapped + output_offset);
-   const uint32_t *after =
-      (const uint32_t *)(mapped + output_offset +
-                         VALUE_COUNT * sizeof(uint32_t));
+   const uint32_t *after = (const uint32_t *)(mapped + output_offset +
+                                              VALUE_COUNT * sizeof(uint32_t));
 
    for (size_t i = 0; i < guard_words; ++i) {
       uint32_t before_want = guard_word(slot, 0, i, generation);
@@ -913,9 +932,9 @@ verify_output_slot(const uint8_t *mapped, const struct output_layout *layout,
          fprintf(stderr,
                  "%s %u workload %s slot %zu guard %zu changed: "
                  "before=%#x/%#x after=%#x/%#x\n",
-                 mode, ordinal, workload_name(workload), slot, i,
-                 before[i], before_want, after[i], after_want);
-         fail("compute output guard changed");
+                 mode, ordinal, workload_name(workload), slot, i, before[i],
+                 before_want, after[i], after_want);
+         return false;
       }
    }
 
@@ -927,72 +946,320 @@ verify_output_slot(const uint8_t *mapped, const struct output_layout *layout,
                  "seed=%#x\n",
                  mode, ordinal, workload_name(workload), slot, i, output[i],
                  want, poison_word(workload, i, slot, generation));
-         fail("wrong compute result");
+         return false;
       }
    }
+   return true;
+}
+
+static bool
+run_formula_case(enum workload workload)
+{
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(1, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   if (!seed)
+      fail("allocate formula seed");
+   seed_output_slot(seed, &layout, 0, workload, 0);
+
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                GL_DYNAMIC_COPY);
+   GLuint program = build_program(workload);
+   glUseProgram(program);
+   glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer,
+                     slot_output_offset(&layout, 0), segment_bytes);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint8_t *mapped = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+   if (!mapped)
+      fail("map formula result");
+   bool passed =
+      verify_output_slot(mapped, &layout, 0, workload, 0, "formula", 1);
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+   return passed;
+}
+
+static void
+run_archive_cross_sequence(void)
+{
+   static const enum workload sequence[] = {
+      WORKLOAD_ARCHIVE_CROSS_0, WORKLOAD_ARCHIVE_CROSS_1,
+      WORKLOAD_ARCHIVE_CROSS_2, WORKLOAD_ARCHIVE_CROSS_3,
+      WORKLOAD_ARCHIVE_CROSS_4, WORKLOAD_ARCHIVE_CROSS_5,
+      WORKLOAD_ARCHIVE_CROSS_6, WORKLOAD_ARCHIVE_CROSS_7,
+   };
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(1, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   if (!seed)
+      fail("allocate archive sequence seed");
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, NULL,
+                GL_DYNAMIC_COPY);
+
+   GLuint programs[sizeof(sequence) / sizeof(sequence[0])];
+   for (unsigned i = 0; i < sizeof(programs) / sizeof(programs[0]); ++i)
+      programs[i] = build_program(sequence[i]);
+
+   for (unsigned round = 0; round < 2; ++round) {
+      for (unsigned i = 0; i < sizeof(programs) / sizeof(programs[0]); ++i) {
+         enum workload workload = sequence[i];
+         unsigned generation = round * 8 + i;
+         seed_output_slot(seed, &layout, 0, workload, generation);
+         glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes,
+                         seed);
+         glUseProgram(programs[i]);
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer,
+                           slot_output_offset(&layout, 0), segment_bytes);
+         glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                         GL_SHADER_STORAGE_BARRIER_BIT);
+         glFinish();
+         const uint8_t *mapped = glMapBufferRange(
+            GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+         if (!mapped)
+            fail("map archive sequence result");
+         if (!verify_output_slot(mapped, &layout, 0, workload, generation,
+                                 "archive sequence", generation + 1))
+            fail("archive sequence output mismatch");
+         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+      }
+   }
+
+   for (unsigned i = 0; i < sizeof(programs) / sizeof(programs[0]); ++i)
+      glDeleteProgram(programs[i]);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+static void
+run_repeated_range_dispatch(void)
+{
+   enum { SLOT_COUNT = 8 };
+   const enum workload workload = WORKLOAD_CACHE_PRESSURE_DAG;
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(SLOT_COUNT, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   if (!seed)
+      fail("allocate repeated-range seed");
+   for (unsigned slot = 0; slot < SLOT_COUNT; ++slot)
+      seed_output_slot(seed, &layout, slot, workload, slot);
+
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                GL_DYNAMIC_COPY);
+   GLuint program = build_program(workload);
+   glUseProgram(program);
+   for (unsigned slot = 0; slot < SLOT_COUNT; ++slot) {
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer,
+                        slot_output_offset(&layout, slot), segment_bytes);
+      glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   }
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   const uint8_t *mapped = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+   if (!mapped)
+      fail("map repeated-range result");
+   for (unsigned slot = 0; slot < SLOT_COUNT; ++slot)
+      if (!verify_output_slot(mapped, &layout, slot, workload, slot,
+                              "repeated range", slot + 1))
+         fail("repeated range output mismatch");
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+static GLuint
+build_publication_program(unsigned slot, uint32_t value)
+{
+   char source[512];
+   int length = snprintf(source, sizeof(source),
+                         "#version 310 es\n"
+                         "layout(local_size_x=32) in;\n"
+                         "layout(std430,binding=0) buffer O { uint v[]; } o;\n"
+                         "void main(){uint i=gl_GlobalInvocationID.x;"
+                         "o.v[%uu+i]=0x%08xu^(i*0x9e3779b9u);}\n",
+                         slot * 32u, value);
+   if (length < 0 || (size_t)length >= sizeof(source))
+      fail("publication shader source overflow");
+   GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+   const char *sources[] = {source};
+   glShaderSource(shader, 1, sources, NULL);
+   glCompileShader(shader);
+   GLint ok = GL_FALSE;
+   glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+   if (!ok)
+      fail("compile publication shader");
+   GLuint program = glCreateProgram();
+   glAttachShader(program, shader);
+   glLinkProgram(program);
+   glDeleteShader(shader);
+   glGetProgramiv(program, GL_LINK_STATUS, &ok);
+   if (!ok)
+      fail("link publication shader");
+   return program;
+}
+
+static void
+run_program_lifecycle_stress(void)
+{
+   enum { PROGRAMS = 64 };
+   const size_t words_per_program = 32;
+   const size_t payload_bytes = PROGRAMS * words_per_program * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(1, payload_bytes);
+   const size_t output_offset = slot_output_offset(&layout, 0);
+   const size_t total_bytes = layout.buffer_bytes;
+   uint8_t *expected = malloc(total_bytes);
+   if (!expected)
+      fail("allocate publication oracle");
+   for (size_t i = 0; i < total_bytes; ++i)
+      expected[i] = (uint8_t)((i * 0x5du + 0xa7u) | 1u);
+
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, total_bytes, expected,
+                GL_DYNAMIC_COPY);
+   glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer, output_offset,
+                     payload_bytes);
+
+   GLuint first = 0;
+   for (unsigned i = 0; i < PROGRAMS; ++i) {
+      uint32_t value = 0x10203040u ^ (i * 0x9e3779b9u);
+      GLuint program = build_publication_program(i, value);
+      if (i == 0)
+         first = program;
+      glUseProgram(program);
+      glDispatchCompute(1, 1, 1);
+      for (unsigned lane = 0; lane < words_per_program; ++lane) {
+         uint32_t result = value ^ (lane * 0x9e3779b9u);
+         memcpy(expected + output_offset +
+                   (i * words_per_program + lane) * sizeof(result),
+                &result, sizeof(result));
+      }
+      if (i != 0)
+         glDeleteProgram(program);
+      if (i == 0) {
+         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                         GL_SHADER_STORAGE_BARRIER_BIT);
+         glFinish();
+      }
+   }
+
+   uint32_t poison[32];
+   for (unsigned lane = 0; lane < words_per_program; ++lane)
+      poison[lane] = 0xfeedfaceu ^ lane;
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferSubData(GL_SHADER_STORAGE_BUFFER, output_offset, sizeof(poison),
+                   poison);
+   glUseProgram(first);
+   glDispatchCompute(1, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint8_t *actual = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
+                                            total_bytes, GL_MAP_READ_BIT);
+   if (!actual)
+      fail("map publication stress output");
+   if (memcmp(actual, expected, total_bytes))
+      fail("publication lifecycle output mismatch");
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(first);
+   glDeleteBuffers(1, &buffer);
+   free(expected);
+}
+
+static const char *const lifecycle_case_names[] = {
+   "archive-cross-program-sequence",
+   "repeated-range-dispatch",
+   "program-lifecycle-stress",
+};
+
+static int
+run_named_case(const char *name)
+{
+   for (unsigned i = 0; i < WORKLOAD_ARCHIVE_CROSS_0; ++i) {
+      if (!strcmp(name, workload_names[i])) {
+         return run_formula_case((enum workload)i) ? 1 : -1;
+      }
+   }
+   if (!strcmp(name, lifecycle_case_names[0])) {
+      run_archive_cross_sequence();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[1])) {
+      run_repeated_range_dispatch();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[2])) {
+      run_program_lifecycle_stress();
+      return 1;
+   }
+
+   size_t count = 0;
+   const char *const *names = t8132_apple9_memory_case_names(&count);
+   for (size_t i = 0; i < count; ++i) {
+      if (!strcmp(name, names[i])) {
+         t8132_apple9_run_memory_case(name);
+         return 1;
+      }
+   }
+   names = t8132_apple9_geometry_case_names(&count);
+   for (size_t i = 0; i < count; ++i) {
+      if (!strcmp(name, names[i])) {
+         t8132_apple9_run_geometry_case(name);
+         return 1;
+      }
+   }
+   return 0;
+}
+
+static void
+list_cases(void)
+{
+   for (unsigned i = 0; i < WORKLOAD_ARCHIVE_CROSS_0; ++i)
+      puts(workload_names[i]);
+   size_t count = 0;
+   const char *const *names = t8132_apple9_memory_case_names(&count);
+   for (size_t i = 0; i < count; ++i)
+      puts(names[i]);
+   names = t8132_apple9_geometry_case_names(&count);
+   for (size_t i = 0; i < count; ++i)
+      puts(names[i]);
+   for (unsigned i = 0;
+        i < sizeof(lifecycle_case_names) / sizeof(lifecycle_case_names[0]); ++i)
+      puts(lifecycle_case_names[i]);
 }
 
 int
 main(int argc, char **argv)
 {
-   if (argc < 2 || argc > 3) {
-      fprintf(stderr,
-              "usage: %s WORKLOAD|suite|sequence|single-boot-suite "
-              "[batch-two]\n", argv[0]);
+   if (argc == 2 && !strcmp(argv[1], "--list")) {
+      list_cases();
+      return 0;
+   }
+   if (argc < 2) {
+      fprintf(stderr, "usage: %s --list | CASE...\n", argv[0]);
       return 2;
-   }
-   unsigned dispatches_per_submission = 1;
-   unsigned submissions = DEFAULT_SUBMISSIONS;
-   const char *dispatches_env =
-      getenv("T8132_COMPUTE_DISPATCHES_PER_SUBMISSION");
-   if (dispatches_env) {
-      char *end = NULL;
-      unsigned long parsed = strtoul(dispatches_env, &end, 0);
-      if (!dispatches_env[0] || !end || *end || parsed == 0 ||
-          parsed > 2048)
-         fail("invalid T8132_COMPUTE_DISPATCHES_PER_SUBMISSION");
-      dispatches_per_submission = parsed;
-   }
-   const char *submissions_env = getenv("T8132_COMPUTE_SUBMISSIONS");
-   if (submissions_env) {
-      char *end = NULL;
-      unsigned long parsed = strtoul(submissions_env, &end, 0);
-      if (!submissions_env[0] || !end || *end || parsed == 0 ||
-          parsed > MAX_SUBMISSIONS)
-         fail("invalid T8132_COMPUTE_SUBMISSIONS");
-      submissions = parsed;
-   }
-   if (argc == 3) {
-      if (strcmp(argv[2], "batch-two"))
-         fail("unknown batching mode");
-      if (dispatches_env)
-         fail("batch-two conflicts with T8132_COMPUTE_DISPATCHES_PER_SUBMISSION");
-      dispatches_per_submission = 2;
-   }
-   bool suite = !strcmp(argv[1], "suite");
-   bool full_sequence = !strcmp(argv[1], "single-boot-suite");
-   bool sequence = !strcmp(argv[1], "sequence") || full_sequence;
-   enum workload selected = WORKLOAD_COUNT;
-   if (!suite && !sequence) {
-      for (unsigned i = 0; i < WORKLOAD_COUNT; ++i) {
-         if (!strcmp(argv[1], workload_names[i])) {
-            selected = i;
-            break;
-         }
-      }
-   }
-   if (!suite && !sequence && selected == WORKLOAD_COUNT)
-      fail("unknown workload");
-
-   unsigned suite_workload_count = WORKLOAD_COUNT;
-   const char *suite_workloads_env = getenv("T8132_COMPUTE_SUITE_WORKLOADS");
-   if (suite_workloads_env) {
-      char *end = NULL;
-      unsigned long parsed = strtoul(suite_workloads_env, &end, 0);
-      if (!suite_workloads_env[0] || !end || *end || parsed == 0 ||
-          parsed > WORKLOAD_COUNT)
-         fail("invalid T8132_COMPUTE_SUITE_WORKLOADS");
-      suite_workload_count = parsed;
    }
 
    EGLDisplay display = open_asahi_display();
@@ -1002,9 +1269,8 @@ main(int argc, char **argv)
       fail("initialize EGL");
 
    const EGLint config_attrs[] = {
-      EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-      EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
-      EGL_NONE,
+      EGL_SURFACE_TYPE,       EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE,
+      EGL_OPENGL_ES3_BIT_KHR, EGL_NONE,
    };
    EGLConfig config;
    EGLint config_count = 0;
@@ -1015,8 +1281,10 @@ main(int argc, char **argv)
    const EGLint surface_attrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
    EGLSurface surface = eglCreatePbufferSurface(display, config, surface_attrs);
    const EGLint context_attrs[] = {
-      EGL_CONTEXT_MAJOR_VERSION_KHR, 3,
-      EGL_CONTEXT_MINOR_VERSION_KHR, 1,
+      EGL_CONTEXT_MAJOR_VERSION_KHR,
+      3,
+      EGL_CONTEXT_MINOR_VERSION_KHR,
+      1,
       EGL_NONE,
    };
    EGLContext context =
@@ -1030,218 +1298,30 @@ main(int argc, char **argv)
    if (!renderer || !strstr(renderer, "Apple M4"))
       fail("unexpected renderer");
 
-   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
-   size_t slot_count = dispatches_per_submission;
-   if (suite) {
-      if (suite_workload_count > SIZE_MAX / dispatches_per_submission)
-         fail("suite output slot overflow");
-      slot_count = suite_workload_count * dispatches_per_submission;
-   }
-   struct output_layout output_layout =
-      make_output_layout(slot_count, segment_bytes);
-   if (output_layout.buffer_bytes > (size_t)INTPTR_MAX ||
-       output_layout.buffer_bytes > MAX_OUTPUT_ARENA_BYTES)
-      fail("output buffer is too large");
-
-   GLuint buffer = 0;
-   glGenBuffers(1, &buffer);
-   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
-   glBufferData(GL_SHADER_STORAGE_BUFFER, output_layout.buffer_bytes, NULL,
-                GL_DYNAMIC_COPY);
-   uint8_t *seed = malloc(output_layout.buffer_bytes);
-   if (!seed)
-      fail("allocate seed");
-
-   if (sequence) {
-      const enum workload sequence_workloads[] = {
-         WORKLOAD_CONSTANT32,
-         WORKLOAD_GID,
-         WORKLOAD_MAD,
-         WORKLOAD_DAG,
-         WORKLOAD_SELECT_DAG,
-         WORKLOAD_DEEP_INT_DAG,
-         WORKLOAD_NESTED_SELECT_DAG,
-         WORKLOAD_FMA_ALL_LIVE_DAG,
-         WORKLOAD_ADD,
-         WORKLOAD_MUL,
-         WORKLOAD_XOR,
-         WORKLOAD_SHL,
-         WORKLOAD_UMIN,
-         WORKLOAD_FADD,
-         WORKLOAD_FMA,
-         WORKLOAD_CONSTANT32,
-         WORKLOAD_GID,
-         WORKLOAD_DAG,
-         WORKLOAD_FMA,
-      };
-      const size_t sequence_length =
-         sizeof(sequence_workloads) / sizeof(sequence_workloads[0]);
-      size_t program_count = full_sequence ? WORKLOAD_COUNT : sequence_length;
-      size_t sequence_steps = program_count;
-      const char *sequence_steps_env = getenv("T8132_COMPUTE_SEQUENCE_STEPS");
-      if (sequence_steps_env) {
-         char *end = NULL;
-         unsigned long parsed = strtoul(sequence_steps_env, &end, 0);
-         if (!sequence_steps_env[0] || !end || *end || parsed == 0 ||
-            parsed > WORKLOAD_COUNT * 2)
-            fail("invalid T8132_COMPUTE_SEQUENCE_STEPS");
-         sequence_steps = parsed;
+   bool failed = false;
+   for (int i = 1; i < argc; ++i) {
+      printf("PIGLIT TEST: %d - %s\n", i, argv[i]);
+      fflush(stdout);
+      int result = run_named_case(argv[i]);
+      if (result == 0) {
+         fprintf(stderr, "unknown Apple9 compute case: %s\n", argv[i]);
+         return 2;
       }
-      GLuint programs[WORKLOAD_COUNT];
-      for (size_t step = 0; step < program_count; ++step) {
-         enum workload workload =
-            full_sequence ? (enum workload)step : sequence_workloads[step];
-         programs[step] = build_program(workload);
-      }
-      for (size_t step = 0; step < sequence_steps; ++step) {
-         size_t program_index = step % program_count;
-         enum workload workload = full_sequence
-                                    ? (enum workload)program_index
-                                    : sequence_workloads[program_index];
-         for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-              ++dispatch)
-            seed_output_slot(seed, &output_layout, dispatch, workload, step);
-         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                         output_layout.buffer_bytes, seed);
-         glUseProgram(programs[program_index]);
-         for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-              ++dispatch) {
-            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer,
-                              slot_output_offset(&output_layout, dispatch),
-                              segment_bytes);
-            glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
-         }
-         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
-                         GL_SHADER_STORAGE_BARRIER_BIT);
-         glFinish();
-
-         const uint8_t *mapped = glMapBufferRange(
-            GL_SHADER_STORAGE_BUFFER, 0, output_layout.buffer_bytes,
-            GL_MAP_READ_BIT);
-         if (!mapped)
-            fail("map sequence result");
-         for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-              ++dispatch)
-            verify_output_slot(mapped, &output_layout, dispatch, workload,
-                               step, "sequence step", step + 1);
-         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
-      }
-
-      for (size_t step = 0; step < program_count; ++step)
-         glDeleteProgram(programs[step]);
-      if (full_sequence) {
-         printf("T8132_GLES_COMPUTE_SINGLE_BOOT_SUITE_OK workloads=%u "
-                "steps=%zu renderer=\"%s\" version=\"%s\"\n",
-                WORKLOAD_COUNT, sequence_steps, renderer, version);
-      } else {
-         printf("T8132_GLES_COMPUTE_SEQUENCE_OK steps=%zu "
-                "renderer=\"%s\" version=\"%s\"\n",
-                sequence_steps, renderer, version);
-      }
-   } else if (suite) {
-      GLuint programs[WORKLOAD_COUNT];
-      for (unsigned workload = 0; workload < suite_workload_count; ++workload)
-         programs[workload] = build_program(workload);
-
-      for (unsigned submit = 0; submit < submissions; ++submit) {
-         for (unsigned workload = 0; workload < suite_workload_count;
-              ++workload) {
-            for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-                 ++dispatch) {
-               size_t slot =
-                  workload * dispatches_per_submission + dispatch;
-               seed_output_slot(seed, &output_layout, slot, workload, submit);
-            }
-         }
-         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                         output_layout.buffer_bytes, seed);
-         for (unsigned workload = 0; workload < suite_workload_count;
-              ++workload) {
-            glUseProgram(programs[workload]);
-            for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-                 ++dispatch) {
-               size_t slot =
-                  workload * dispatches_per_submission + dispatch;
-               glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer,
-                                 slot_output_offset(&output_layout, slot),
-                                 segment_bytes);
-               glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
-            }
-         }
-         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
-                         GL_SHADER_STORAGE_BARRIER_BIT);
-         glFinish();
-
-         const uint8_t *mapped = glMapBufferRange(
-            GL_SHADER_STORAGE_BUFFER, 0, output_layout.buffer_bytes,
-            GL_MAP_READ_BIT);
-         if (!mapped)
-            fail("map result");
-         for (unsigned workload = 0; workload < suite_workload_count;
-              ++workload) {
-            for (unsigned dispatch = 0;
-                 dispatch < dispatches_per_submission; ++dispatch) {
-               size_t slot =
-                  workload * dispatches_per_submission + dispatch;
-               verify_output_slot(mapped, &output_layout, slot, workload,
-                                  submit, "submission", submit + 1);
-            }
-         }
-         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
-      }
-
-      for (unsigned workload = 0; workload < suite_workload_count; ++workload)
-         glDeleteProgram(programs[workload]);
-      printf("T8132_GLES_COMPUTE_SUITE_OK workloads=%u submissions=%u "
-             "dispatches_per_workload=%u renderer=\"%s\" version=\"%s\"\n",
-             suite_workload_count, submissions, dispatches_per_submission,
-             renderer, version);
-   } else {
-      GLuint program = build_program(selected);
-      glUseProgram(program);
-
-      for (unsigned submit = 0; submit < submissions; ++submit) {
-         for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-              ++dispatch)
-            seed_output_slot(seed, &output_layout, dispatch, selected, submit);
-         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                         output_layout.buffer_bytes, seed);
-         for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-              ++dispatch) {
-            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer,
-                              slot_output_offset(&output_layout, dispatch),
-                              segment_bytes);
-            glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
-         }
-         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
-                         GL_SHADER_STORAGE_BARRIER_BIT);
-         glFinish();
-
-         const uint8_t *mapped = glMapBufferRange(
-            GL_SHADER_STORAGE_BUFFER, 0, output_layout.buffer_bytes,
-            GL_MAP_READ_BIT);
-         if (!mapped)
-            fail("map result");
-         for (unsigned dispatch = 0; dispatch < dispatches_per_submission;
-              ++dispatch)
-            verify_output_slot(mapped, &output_layout, dispatch, selected,
-                               submit, "submission", submit + 1);
-         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
-      }
-
-      printf("T8132_GLES_COMPUTE_OK workload=%s submissions=%u "
-             "dispatches_per_submission=%u values=%u "
-             "renderer=\"%s\" version=\"%s\"\n",
-             workload_name(selected), submissions,
-             dispatches_per_submission, VALUE_COUNT, renderer, version);
-      glDeleteProgram(program);
+      const char *status = result > 0 ? "pass" : "fail";
+      failed |= result < 0;
+      if (argc == 2)
+         printf("PIGLIT: {\"result\": \"%s\"}\n", status);
+      else
+         printf("PIGLIT: {\"subtest\": {\"%s\": \"%s\"}}\n", argv[i], status);
+      fflush(stdout);
    }
 
-   free(seed);
-   glDeleteBuffers(1, &buffer);
+   printf("T8132_APPLE9_COMPUTE_RUNNER_%s cases=%d renderer=\"%s\" "
+          "version=\"%s\"\n",
+          failed ? "FAILED" : "OK", argc - 1, renderer, version);
    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
    eglDestroyContext(display, context);
    eglDestroySurface(display, surface);
    eglTerminate(display);
-   return 0;
+   return failed ? 1 : 0;
 }
