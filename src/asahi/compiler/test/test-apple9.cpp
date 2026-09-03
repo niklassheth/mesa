@@ -2481,6 +2481,20 @@ apple9_procedural_scatter_shader()
 }
 
 static nir_shader *
+apple9_unbounded_scatter_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_unbounded_scatter");
+   b.shader->info.num_ssbos = 2;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *loaded_index =
+      nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1), nir_imul_imm(&b, gid, 4),
+                    .access = ACCESS_NON_WRITEABLE);
+   nir_store_ssbo(&b, nir_iadd_imm(&b, gid, 100), nir_imm_int(&b, 0),
+                  nir_imul_imm(&b, loaded_index, 4));
+   return b.shader;
+}
+
+static nir_shader *
 apple9_variable_shift_shader(nir_op op)
 {
    nir_builder b = apple9_compute_builder("apple9_variable_shift");
@@ -2762,8 +2776,6 @@ TEST(Apple9Compiler, VectorLoadsUseOneNativeScoreboardTuple)
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
    EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
-   EXPECT_EQ(profile.resource_access_scale[0], 4u);
-   EXPECT_EQ(profile.resource_access_add[0], 3u);
    EXPECT_GT(compiled.info.binary_size, 0u);
    free(compiled.binary);
    ralloc_free(nir);
@@ -2846,9 +2858,6 @@ TEST(Apple9Compiler, MultipleStoresShareOneWritableResource)
    EXPECT_EQ(profile.resource_binding[0], 0u);
    EXPECT_EQ(profile.resource_read_mask, 0u);
    EXPECT_EQ(profile.resource_write_mask, 1u);
-   EXPECT_EQ(profile.resource_access_element_size[0], 4u);
-   EXPECT_EQ(profile.resource_access_scale[0], 2u);
-   EXPECT_EQ(profile.resource_access_add[0], 1u);
 
    unsigned stores = 0;
    for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
@@ -2926,10 +2935,6 @@ TEST(Apple9Compiler, MultipleScalarAndVectorStoresUseAllocatedSources)
    EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    EXPECT_EQ(profile.resource_read_mask, 0x1u);
    EXPECT_EQ(profile.resource_write_mask, 0x6u);
-   EXPECT_EQ(profile.resource_access_scale[0], 4u);
-   EXPECT_EQ(profile.resource_access_add[0], 3u);
-   EXPECT_EQ(profile.resource_access_scale[2], 4u);
-   EXPECT_EQ(profile.resource_access_add[2], 3u);
 
    unsigned vector_stores = 0, scalar_stores = 0;
    for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
@@ -2987,8 +2992,6 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
          ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
             << (reason ? reason : "no diagnostic");
          EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
-         EXPECT_EQ(profile.resource_access_element_size[0], bits / 8);
-         EXPECT_EQ(profile.resource_access_element_size[1], 4u);
 
          unsigned narrow_loads = 0;
          const uint8_t format = bits == 8 ? 0x21 : 0x01;
@@ -3011,8 +3014,6 @@ TEST(Apple9Compiler, NativeNarrowLoadsExtendAndStoresTruncate)
       ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
          << (reason ? reason : "no diagnostic");
       EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
-      EXPECT_EQ(profile.resource_access_element_size[0], 4u);
-      EXPECT_EQ(profile.resource_access_element_size[1], bits / 8);
 
       unsigned narrow_stores = 0;
       const uint8_t format = bits == 8 ? 0x21 : 0x01;
@@ -3042,9 +3043,6 @@ TEST(Apple9Compiler, UboLoadsUseTypedNativeResourceArguments)
    EXPECT_EQ(profile.resource_binding[0], 0u);
    EXPECT_EQ(profile.resource_kind[1], AGX_APPLE9_COMPUTE_RESOURCE_SSBO);
    EXPECT_EQ(profile.resource_binding[1], 0u);
-   EXPECT_EQ(profile.resource_access_mode[0],
-             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
-   EXPECT_EQ(profile.resource_access_add[0], 63u);
    EXPECT_GT(compiled.info.binary_size, 0u);
    free(compiled.binary);
    ralloc_free(nir);
@@ -3059,21 +3057,12 @@ TEST(Apple9Compiler, NestedDependentLoadsRetainEarlierResults)
    ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
       << (reason ? reason : "no diagnostic");
    EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
-   EXPECT_EQ(profile.resource_access_add[0], 63u);
-   EXPECT_EQ(profile.resource_access_add[1], 63u);
-   EXPECT_EQ(profile.resource_access_add[2], 0u);
-   EXPECT_EQ(profile.resource_access_mode[0],
-             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
-   EXPECT_EQ(profile.resource_access_mode[1],
-             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
-   EXPECT_EQ(profile.resource_access_mode[2],
-             AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32);
    EXPECT_GT(compiled.info.binary_size, 0u);
    free(compiled.binary);
    ralloc_free(nir);
 }
 
-TEST(Apple9Compiler, BoundedLoadIndexDrivesDynamicScatter)
+TEST(Apple9Compiler, DynamicLoadIndexDrivesScatter)
 {
    nir_shader *nir = apple9_dynamic_scatter_shader();
    struct agx_shader_part compiled = {};
@@ -3087,16 +3076,6 @@ TEST(Apple9Compiler, BoundedLoadIndexDrivesDynamicScatter)
    EXPECT_EQ(profile.resource_binding[0], 2u);
    EXPECT_EQ(profile.resource_binding[1], 1u);
    EXPECT_EQ(profile.resource_binding[2], 0u);
-   EXPECT_EQ(profile.resource_access_mode[0],
-             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
-   EXPECT_EQ(profile.resource_access_add[0], 7u);
-   EXPECT_EQ(profile.resource_access_mode[1],
-             AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32);
-   EXPECT_EQ(profile.resource_access_mode[2],
-             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
-   EXPECT_EQ(profile.resource_access_add[2], 7u);
-   EXPECT_EQ(profile.index_rank, 1u);
-   EXPECT_EQ(profile.index_stride[0], 1u);
 
    unsigned stores = 0;
    for (unsigned i = 0; i + 14 <= compiled.info.binary_size; ++i) {
@@ -3112,7 +3091,7 @@ TEST(Apple9Compiler, BoundedLoadIndexDrivesDynamicScatter)
    ralloc_free(nir);
 }
 
-TEST(Apple9Compiler, PurelyDynamicScatterUsesConservativeOneDimensionalGrid)
+TEST(Apple9Compiler, ProceduralDynamicScatterCompiles)
 {
    nir_shader *nir = apple9_procedural_scatter_shader();
    struct agx_shader_part compiled = {};
@@ -3123,13 +3102,22 @@ TEST(Apple9Compiler, PurelyDynamicScatterUsesConservativeOneDimensionalGrid)
 
    EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    ASSERT_EQ(profile.resource_binding_count, 1u);
-   EXPECT_EQ(profile.resource_access_mode[0],
-             AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX);
-   EXPECT_EQ(profile.resource_access_add[0], 7u);
-   EXPECT_EQ(profile.index_rank, 1u);
-   EXPECT_EQ(profile.index_stride[0], 1u);
-   EXPECT_EQ(profile.index_stride[1], 0u);
-   EXPECT_EQ(profile.index_stride[2], 0u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, ArbitraryLoadedIndexNeedsNoRangeProof)
+{
+   nir_shader *nir = apple9_unbounded_scatter_shader();
+   struct agx_shader_part compiled = {};
+   struct agx_apple9_compute_profile profile = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+      << (reason ? reason : "no diagnostic");
+   EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
+   EXPECT_EQ(profile.resource_binding_count, 2u);
+   EXPECT_EQ(profile.resource_read_mask, 0x1u);
+   EXPECT_EQ(profile.resource_write_mask, 0x2u);
    free(compiled.binary);
    ralloc_free(nir);
 }

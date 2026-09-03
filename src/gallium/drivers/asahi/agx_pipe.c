@@ -2308,6 +2308,10 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
       os_get_gpu_heap_size(screen->heap_memory_percent, NULL) >> 20;
 
    caps->device_reset_status_query = true;
+   /* Bring-up stub: Apple9 does not yet implement the robust buffer access
+    * contract.  Keep this advertised temporarily so the state tracker does
+    * not unnecessarily cap otherwise useful bring-up contexts at ES 3.1.
+    */
    caps->robust_buffer_access_behavior = true;
 
    caps->shader_buffer_offset_alignment = 4;

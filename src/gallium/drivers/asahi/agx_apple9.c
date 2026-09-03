@@ -177,47 +177,10 @@ apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
 }
 
 static bool
-apple9_compute_access_metadata_valid(
-   const struct agx_apple9_compute_profile *profile)
-{
-   const unsigned active = profile->resource_binding_count;
-   for (unsigned i = 0;
-        i < ARRAY_SIZE(profile->resource_access_element_size); ++i) {
-      const uint8_t size = profile->resource_access_element_size[i];
-      if (i < active) {
-         if (size != 0 && size != 1 && size != 2 && size != 4)
-            return false;
-
-         switch (profile->resource_access_mode[i]) {
-         case AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32:
-            break;
-         case AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX:
-            if (profile->resource_access_scale[i] != 0 ||
-                profile->resource_access_tail[i] != 0)
-               return false;
-            break;
-         case AGX_APPLE9_COMPUTE_ACCESS_CONSTANT_U32:
-         default:
-            return false;
-         }
-      } else if (size != 0 || profile->resource_access_scale[i] != 0 ||
-                 profile->resource_access_add[i] != 0 ||
-                 profile->resource_access_tail[i] != 0 ||
-                 profile->resource_access_mode[i] !=
-                    AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32) {
-         return false;
-      }
-   }
-
-   return true;
-}
-
-static bool
 apple9_compute_profile_valid(const struct agx_apple9_compute_profile *profile,
                              const struct apple9_compute_abi_desc *abi)
 {
    if (!profile || !abi ||
-       !apple9_compute_access_metadata_valid(profile) ||
        profile->resource_binding_count == 0 ||
        profile->resource_binding_count > abi->resource_count ||
        profile->required_threadgroup_memory_bytes != 0)
@@ -541,71 +504,6 @@ agx_apple9_compute_resource_kind(
    return profile->resource_kind[argument];
 }
 
-uint64_t
-agx_apple9_compute_resource_access_tail(
-   const struct agx_apple9_compute_profile *profile, unsigned argument)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   return abi && argument < profile->resource_binding_count
-             ? profile->resource_access_tail[argument]
-             : UINT64_MAX;
-}
-
-uint64_t
-agx_apple9_compute_resource_required_span(
-   const struct agx_apple9_compute_profile *profile, unsigned argument,
-   uint64_t invocations)
-{
-   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!abi || argument >= profile->resource_binding_count || invocations == 0 ||
-       !apple9_compute_profile_valid(profile, abi))
-      return UINT64_MAX;
-
-   switch (profile->resource_access_mode[argument]) {
-   case AGX_APPLE9_COMPUTE_ACCESS_CONSTANT_U32:
-      return sizeof(uint32_t);
-   case AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX: {
-      const uint64_t element_size =
-         profile->resource_access_element_size[argument]
-            ? profile->resource_access_element_size[argument]
-            : sizeof(uint32_t);
-      const uint64_t elements =
-         (uint64_t)profile->resource_access_add[argument] + 1;
-      return elements <= UINT64_MAX / element_size ? elements * element_size
-                                                   : UINT64_MAX;
-   }
-   case AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32:
-      break;
-   default:
-      return UINT64_MAX;
-   }
-
-   const uint64_t element_size =
-      profile->resource_access_element_size[argument]
-         ? profile->resource_access_element_size[argument]
-         : sizeof(uint32_t);
-   const uint64_t scale = profile->resource_access_scale[argument];
-   const uint64_t add = profile->resource_access_add[argument];
-   if (scale != 0) {
-      const uint64_t last = invocations - 1;
-      if (last > UINT64_MAX / scale)
-         return UINT64_MAX;
-      uint64_t maximum = last * scale;
-      if (add > UINT64_MAX - maximum)
-         return UINT64_MAX;
-      maximum += add;
-      if (maximum == UINT64_MAX || maximum + 1 > UINT64_MAX / element_size)
-         return UINT64_MAX;
-      return (maximum + 1) * element_size;
-   }
-
-   if (invocations > UINT64_MAX / element_size)
-      return UINT64_MAX;
-   const uint64_t dense = invocations * element_size;
-   const uint64_t tail = profile->resource_access_tail[argument];
-   return tail <= UINT64_MAX - dense ? dense + tail : UINT64_MAX;
-}
-
 uint32_t
 agx_apple9_compute_read_mask(const struct agx_apple9_compute_profile *profile)
 {
@@ -684,34 +582,7 @@ agx_apple9_compute_grid_supported(
       elements *= global[d];
    }
 
-   /* The superset carrier computes its linear index from the native
-    * grid tuples.  Its stride is dispatch state rather than a compile-time
-    * property of the main, so the older capture-bounded index-stride checks
-    * do not apply. */
-   if (abi->hidden_resource_count == 3)
-      return true;
-
-   if (profile->index_stride[0] != 1 || profile->index_rank < 1 ||
-       profile->index_rank > 3)
-      return false;
-
-   uint64_t expected_y = global[0];
-   uint64_t expected_z = expected_y * global[1];
-   switch (profile->index_rank) {
-   case 1:
-      return global[1] == 1 && global[2] == 1 &&
-             profile->index_stride[1] == 0 && profile->index_stride[2] == 0;
-   case 2:
-      return global[2] == 1 && expected_y <= UINT32_MAX &&
-             profile->index_stride[1] == expected_y &&
-             profile->index_stride[2] == 0;
-   case 3:
-      return expected_y <= UINT32_MAX && expected_z <= UINT32_MAX &&
-             profile->index_stride[1] == expected_y &&
-             profile->index_stride[2] == expected_z;
-   default:
-      return false;
-   }
+   return true;
 }
 
 static void

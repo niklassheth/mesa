@@ -5839,26 +5839,6 @@ agx_apple9_add_compute_attachment(struct agx_batch *batch,
    util_dynarray_append(&batch->apple9_attachments, attachment);
 }
 
-/* Return the alignment of the compiler-generated scalar memory operation. */
-static unsigned
-agx_apple9_compute_ssbo_offset_alignment(
-   const struct agx_apple9_compute_profile *profile, unsigned argument)
-{
-   if (!profile || argument >= ARRAY_SIZE(profile->resource_access_scale))
-      return 0;
-
-   switch (profile->abi) {
-   case AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET:
-      return profile->resource_access_element_size[argument]
-                ? profile->resource_access_element_size[argument]
-                : sizeof(uint32_t);
-
-   case AGX_APPLE9_COMPUTE_ABI_INVALID:
-   default:
-      return 0;
-   }
-}
-
 static void
 agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
 {
@@ -5999,10 +5979,6 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
             }
             apple9_invocation_count *= global[d];
          }
-         if (apple9_invocation_count > UINT64_MAX / sizeof(uint32_t)) {
-            fprintf(stderr, "Apple9 direct grid byte range overflows\n");
-            return;
-         }
       }
 
       uint64_t threadgroup_memory_bytes = cs->b.info.local_size;
@@ -6097,34 +6073,6 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
             resource_sizes[i] = stage->cb[binding].buffer_size;
          } else {
             fprintf(stderr, "Apple9 compute ABI has an invalid resource kind\n");
-            return;
-         }
-
-         uint64_t accessed_bytes =
-            indirect
-               ? sizeof(uint32_t)
-               : agx_apple9_compute_resource_required_span(
-                    &cs->apple9_compute_profile, i,
-                    apple9_invocation_count);
-         if (accessed_bytes == UINT64_MAX) {
-            fprintf(stderr, "Apple9 buffer argument %u range overflows\n", i);
-            return;
-         }
-         unsigned offset_alignment = agx_apple9_compute_ssbo_offset_alignment(
-            &cs->apple9_compute_profile, i);
-         if (!offset_alignment) {
-            fprintf(stderr,
-                    "Apple9 buffer argument %u profile has no offset "
-                    "alignment contract\n",
-                    i);
-            return;
-         }
-         if ((resource_offsets[i] & (offset_alignment - 1)) ||
-             accessed_bytes > resource_sizes[i]) {
-            fprintf(stderr,
-                    "Apple9 buffer argument %u range is not %u-byte aligned "
-                    "or is too small for the dispatch\n",
-                    i, offset_alignment);
             return;
          }
          resource_addresses[i] =

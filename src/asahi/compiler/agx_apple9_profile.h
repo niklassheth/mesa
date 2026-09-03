@@ -24,17 +24,6 @@ enum agx_apple9_compute_abi {
 
 #define AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY 8
 
-enum agx_apple9_compute_access_mode {
-   /* One scalar element, or the affine/vector range below, per invocation. */
-   AGX_APPLE9_COMPUTE_ACCESS_PER_INVOCATION_U32 = 0,
-
-   /* Every invocation addresses the same scalar element. */
-   AGX_APPLE9_COMPUTE_ACCESS_CONSTANT_U32,
-
-   /* A runtime-computed index is bounded by resource_access_add. */
-   AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX,
-};
-
 enum agx_apple9_compute_resource_kind {
    AGX_APPLE9_COMPUTE_RESOURCE_SSBO = 0,
    AGX_APPLE9_COMPUTE_RESOURCE_UBO,
@@ -55,19 +44,8 @@ struct agx_apple9_compute_profile {
    /* Shader-local dispatch and linear invocation-index contract. */
    bool variable_local_size;
    uint32_t local_size[3];
-   uint32_t index_stride[3];
-   uint8_t index_rank;
 
    uint32_t required_threadgroup_memory_bytes;
-
-   /* Bounds for each package resource, expressed in scalar elements. */
-   uint32_t resource_access_tail[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
-   uint32_t resource_access_scale[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
-   uint32_t resource_access_add[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
-   uint8_t
-      resource_access_element_size[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
-   enum agx_apple9_compute_access_mode
-      resource_access_mode[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
 
    /* Caller state published by package ABIs with a uniform window. */
    uint32_t state_literals[AGX_APPLE9_COMPUTE_STATE_LITERAL_STORAGE_CAPACITY];
@@ -78,8 +56,6 @@ struct agx_apple9_compute_profile {
    ((struct agx_apple9_compute_profile){                                     \
       .abi = AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET,                         \
       .local_size = {16, 1, 1},                                             \
-      .index_stride = {1, 0, 0},                                            \
-      .index_rank = 1,                                                       \
    })
 
 #endif

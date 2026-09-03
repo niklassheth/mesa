@@ -41,13 +41,19 @@ fails during compilation and the triangle is not a regression gate.
   screen-wide timeline serializes physical ownership changes, while each
   logical DRM VM keeps its own persistent root in the m1n1 backend.
 
-The supported NIR surface is intentionally bounded. It includes arbitrary
+The supported NIR surface is intentionally limited. It includes arbitrary
 u32 constants; integer add/subtract, negate, multiply, AND/OR/XOR/NOT, shifts,
 signed and unsigned min/max; core float arithmetic, accurate FP32 reciprocal,
 and FMA; comparisons and
 straight-line select; scalar/vector device loads and stores; general constant,
 affine, and runtime buffer indexing; 8/16/32-bit memory formats; and the
 measured system values and dense dispatch geometries used by the fixtures.
+
+This early bring-up path deliberately does not implement robust buffer access.
+The compiler does not infer resource access bounds, and dispatch does not
+preflight a shader-derived byte span. Buffer indices are passed through to the
+generated address calculation; callers are responsible for binding enough
+storage for every access the shader can make.
 
 Structured conditional side effects, phis, loops, `break`, `continue`,
 division/modulo, spilling, and unmeasured package/resource forms reject rather

@@ -199,22 +199,6 @@ enum agx_apple9_compute_resource_kind agx_apple9_compute_resource_kind(
 unsigned agx_apple9_compute_resource_binding(
    const struct agx_apple9_compute_profile *profile, unsigned argument);
 
-/* Additional bytes addressed beyond the dense u32 invocation range for one
- * package argument. UINT64_MAX denotes an invalid argument. */
-uint64_t agx_apple9_compute_resource_access_tail(
-   const struct agx_apple9_compute_profile *profile, unsigned argument);
-
-/* Complete byte span required by one native package argument for a direct
- * dispatch.  CONSTANT_U32 is exactly four bytes for every nonzero dispatch
- * size.  PER_INVOCATION_U32 with explicit affine metadata uses
- *   (scale * (invocations - 1) + add + 1) * sizeof(uint32_t).
- * PER_INVOCATION_U32 profiles with zero scale retain the dense invocation
- * range plus the legacy byte tail.  UINT64_MAX denotes an invalid
- * argument/profile or overflow. */
-uint64_t agx_apple9_compute_resource_required_span(
-   const struct agx_apple9_compute_profile *profile, unsigned argument,
-   uint64_t invocations);
-
 uint32_t
 agx_apple9_compute_read_mask(const struct agx_apple9_compute_profile *profile);
 

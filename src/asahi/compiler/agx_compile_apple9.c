@@ -79,76 +79,6 @@ apple9_chase_trivial(nir_scalar scalar)
    return scalar;
 }
 
-static bool
-apple9_intrinsic_component(nir_scalar scalar, nir_intrinsic_op op,
-                           unsigned *component)
-{
-   scalar = apple9_chase_trivial(scalar);
-
-   if (scalar.def->bit_size != 32 || scalar.comp >= 3 ||
-       nir_def_instr_type(scalar.def) != nir_instr_type_intrinsic ||
-       nir_def_as_intrinsic(scalar.def)->intrinsic != op)
-      return false;
-
-   if (component != NULL)
-      *component = scalar.comp;
-   return true;
-}
-
-static bool
-apple9_group_offset_component(nir_scalar scalar, unsigned *component)
-{
-   scalar = apple9_chase_trivial(scalar);
-   if (nir_def_instr_type(scalar.def) != nir_instr_type_alu ||
-       nir_scalar_alu_op(scalar) != nir_op_imul)
-      return false;
-
-   nir_scalar a = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
-   nir_scalar b = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
-   unsigned group = 0, size = 0;
-   bool direct =
-      apple9_intrinsic_component(a, nir_intrinsic_load_workgroup_id, &group) &&
-      apple9_intrinsic_component(b, nir_intrinsic_load_workgroup_size, &size);
-   bool swapped =
-      apple9_intrinsic_component(b, nir_intrinsic_load_workgroup_id, &group) &&
-      apple9_intrinsic_component(a, nir_intrinsic_load_workgroup_size, &size);
-   if ((!direct && !swapped) || group != size)
-      return false;
-
-   if (component != NULL)
-      *component = group;
-   return true;
-}
-
-static bool
-apple9_global_id_component(nir_scalar scalar, unsigned *component)
-{
-   if (apple9_intrinsic_component(
-          scalar, nir_intrinsic_load_global_invocation_id, component))
-      return true;
-
-   scalar = apple9_chase_trivial(scalar);
-   if (nir_def_instr_type(scalar.def) != nir_instr_type_alu ||
-       nir_scalar_alu_op(scalar) != nir_op_iadd)
-      return false;
-
-   nir_scalar a = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
-   nir_scalar b = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
-   unsigned group_offset = 0, local = 0;
-   bool direct = apple9_group_offset_component(a, &group_offset) &&
-                 apple9_intrinsic_component(
-                    b, nir_intrinsic_load_local_invocation_id, &local);
-   bool swapped = apple9_group_offset_component(b, &group_offset) &&
-                  apple9_intrinsic_component(
-                     a, nir_intrinsic_load_local_invocation_id, &local);
-   if ((!direct && !swapped) || group_offset != local)
-      return false;
-
-   if (component != NULL)
-      *component = local;
-   return true;
-}
-
 struct apple9_system_source {
    uint8_t selector;
    bool zext16;
@@ -249,8 +179,8 @@ apple9_element_index(nir_def *offset, nir_scalar *index, unsigned *index_scale,
 
    /* Canonicalize the complete constant affine shell, independent of whether
     * NIR spells it as (i * stride + add), ((i * inner) + add) * outer, or
-    * shifts.  This matters for multiple stores: algebraically identical
-    * buffer layouts must select the same dispatch and bounds contract. */
+    * shifts.  The resulting scale and add are emitted as ordinary integer
+    * address calculations before the memory instruction. */
    for (unsigned depth = 0; depth < 32; ++depth) {
       candidate = apple9_chase_trivial(candidate);
       if (nir_def_instr_type(candidate.def) != nir_instr_type_alu)
@@ -325,26 +255,9 @@ apple9_element_index(nir_def *offset, nir_scalar *index, unsigned *index_scale,
    return true;
 }
 
-static bool
-apple9_dword_index(nir_def *offset, nir_scalar *index)
-{
-   unsigned index_scale, index_add;
-   return apple9_element_index(offset, index, &index_scale, &index_add,
-                               sizeof(uint32_t)) &&
-          index_scale == 1 && index_add == 0;
-}
-
-struct apple9_affine_index {
-   uint64_t base;
-   uint64_t stride[3];
-};
-
 struct apple9_scalar_load {
    nir_intrinsic_instr *intr;
    nir_scalar index;
-   struct apple9_affine_index affine;
-   bool bounded_index;
-   uint32_t bounded_max;
    unsigned argument;
    unsigned component;
    unsigned index_scale;
@@ -355,225 +268,12 @@ struct apple9_scalar_load {
 struct apple9_buffer_store {
    nir_intrinsic_instr *intr;
    nir_scalar index;
-   struct apple9_affine_index affine;
-   bool bounded_index;
-   uint32_t bounded_max;
    unsigned argument;
    unsigned components;
    unsigned index_scale;
    unsigned index_add;
    unsigned bit_size;
 };
-
-static bool
-apple9_affine_scale(struct apple9_affine_index *value, uint64_t factor)
-{
-   if (value->base && factor > UINT32_MAX / value->base)
-      return false;
-   value->base *= factor;
-   for (unsigned d = 0; d < 3; ++d) {
-      if (value->stride[d] && factor > UINT32_MAX / value->stride[d])
-         return false;
-      value->stride[d] *= factor;
-   }
-   return true;
-}
-
-static bool
-apple9_affine_index_inner(nir_scalar scalar, struct apple9_affine_index *value,
-                          unsigned depth)
-{
-   if (depth >= 32)
-      return false;
-   scalar = apple9_chase_trivial(scalar);
-   memset(value, 0, sizeof(*value));
-
-   uint32_t constant;
-   if (apple9_const_u32(scalar, &constant)) {
-      value->base = constant;
-      return true;
-   }
-
-   unsigned component;
-   if (apple9_global_id_component(scalar, &component)) {
-      value->stride[component] = 1;
-      return true;
-   }
-
-   if (nir_def_instr_type(scalar.def) != nir_instr_type_alu)
-      return false;
-   nir_op op = nir_scalar_alu_op(scalar);
-   nir_scalar left = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
-   nir_scalar right = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
-
-   if (op == nir_op_iadd) {
-      struct apple9_affine_index a, b;
-      if (!apple9_affine_index_inner(left, &a, depth + 1) ||
-          !apple9_affine_index_inner(right, &b, depth + 1) ||
-          a.base > UINT32_MAX - b.base)
-         return false;
-      value->base = a.base + b.base;
-      for (unsigned d = 0; d < 3; ++d) {
-         if (a.stride[d] > UINT32_MAX - b.stride[d])
-            return false;
-         value->stride[d] = a.stride[d] + b.stride[d];
-      }
-      return true;
-   }
-
-   uint32_t factor;
-   nir_scalar affine;
-   if (op == nir_op_ishl) {
-      if (!apple9_const_u32(right, &factor) || factor >= 32)
-         return false;
-      factor = 1u << factor;
-      affine = left;
-   } else if (op == nir_op_imul || op == nir_op_amul) {
-      if (apple9_const_u32(right, &factor))
-         affine = left;
-      else if (apple9_const_u32(left, &factor))
-         affine = right;
-      else
-         return false;
-   } else {
-      return false;
-   }
-
-   return apple9_affine_index_inner(affine, value, depth + 1) &&
-          apple9_affine_scale(value, factor);
-}
-
-static bool
-apple9_affine_index(nir_scalar scalar, struct apple9_affine_index *value,
-                    unsigned *rank)
-{
-   if (!apple9_affine_index_inner(scalar, value, 0) || value->base != 0 ||
-       value->stride[0] != 1 || (value->stride[2] && !value->stride[1]))
-      return false;
-
-   *rank = value->stride[2] ? 3 : value->stride[1] ? 2 : 1;
-   return true;
-}
-
-static bool
-apple9_index_upper_bound_inner(nir_shader *nir, nir_scalar scalar,
-                               uint32_t *maximum, unsigned depth)
-{
-   if (depth >= 32)
-      return false;
-   scalar = apple9_chase_trivial(scalar);
-   if (apple9_const_u32(scalar, maximum))
-      return true;
-
-   if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic) {
-      nir_intrinsic_op op = nir_def_as_intrinsic(scalar.def)->intrinsic;
-      uint64_t local_size = 1;
-      for (unsigned d = 0; d < 3; ++d) {
-         if (nir->info.workgroup_size[d] == 0)
-            return false;
-         local_size *= nir->info.workgroup_size[d];
-      }
-
-      switch (op) {
-      case nir_intrinsic_load_local_invocation_id:
-         if (scalar.comp >= 3)
-            return false;
-         *maximum = nir->info.workgroup_size[scalar.comp] - 1;
-         return true;
-      case nir_intrinsic_load_local_invocation_index:
-         if (local_size > UINT32_MAX)
-            return false;
-         *maximum = local_size - 1;
-         return true;
-      case nir_intrinsic_load_subgroup_invocation:
-         *maximum = 31;
-         return true;
-      case nir_intrinsic_load_subgroup_id:
-         if (local_size > UINT32_MAX)
-            return false;
-         *maximum = DIV_ROUND_UP(local_size, 32) - 1;
-         return true;
-      case nir_intrinsic_load_subgroup_size:
-         *maximum = 32;
-         return true;
-      case nir_intrinsic_load_workgroup_size:
-         if (scalar.comp >= 3)
-            return false;
-         *maximum = nir->info.workgroup_size[scalar.comp];
-         return true;
-      default:
-         return false;
-      }
-   }
-
-   if (nir_def_instr_type(scalar.def) != nir_instr_type_alu)
-      return false;
-
-   nir_op op = nir_scalar_alu_op(scalar);
-   nir_scalar left = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 0));
-   nir_scalar right = apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 1));
-   uint32_t a, b;
-
-   switch (op) {
-   case nir_op_iand:
-      /* For an unsigned scalar, AND cannot set a bit absent from a constant
-       * mask, regardless of the other source. */
-      return apple9_const_u32(left, maximum) ||
-             apple9_const_u32(right, maximum);
-   case nir_op_umin: {
-      bool have_a = apple9_index_upper_bound_inner(nir, left, &a, depth + 1);
-      bool have_b = apple9_index_upper_bound_inner(nir, right, &b, depth + 1);
-      if (!have_a && !have_b)
-         return false;
-      *maximum = have_a && have_b ? MIN2(a, b) : have_a ? a : b;
-      return true;
-   }
-   case nir_op_iadd:
-      if (!apple9_index_upper_bound_inner(nir, left, &a, depth + 1) ||
-          !apple9_index_upper_bound_inner(nir, right, &b, depth + 1) ||
-          a > UINT32_MAX - b)
-         return false;
-      *maximum = a + b;
-      return true;
-   case nir_op_imul:
-   case nir_op_amul:
-      if (!apple9_index_upper_bound_inner(nir, left, &a, depth + 1) ||
-          !apple9_index_upper_bound_inner(nir, right, &b, depth + 1) ||
-          (a != 0 && b > UINT32_MAX / a))
-         return false;
-      *maximum = a * b;
-      return true;
-   case nir_op_ishl:
-      if (!apple9_index_upper_bound_inner(nir, left, &a, depth + 1) ||
-          !apple9_const_u32(right, &b) || b >= 32 || a > (UINT32_MAX >> b))
-         return false;
-      *maximum = a << b;
-      return true;
-   case nir_op_ushr:
-      if (!apple9_index_upper_bound_inner(nir, left, &a, depth + 1) ||
-          !apple9_const_u32(right, &b) || b >= 32)
-         return false;
-      *maximum = a >> b;
-      return true;
-   case nir_op_bcsel: {
-      nir_scalar if_false =
-         apple9_chase_trivial(nir_scalar_chase_alu_src(scalar, 2));
-      if (!apple9_index_upper_bound_inner(nir, right, &a, depth + 1) ||
-          !apple9_index_upper_bound_inner(nir, if_false, &b, depth + 1))
-         return false;
-      *maximum = MAX2(a, b);
-      return true;
-   }
-   default:
-      return false;
-   }
-}
-
-static bool
-apple9_index_upper_bound(nir_shader *nir, nir_scalar scalar, uint32_t *maximum)
-{
-   return apple9_index_upper_bound_inner(nir, scalar, maximum, 0);
-}
 
 static bool
 apple9_instruction_is_in_subset(nir_instr *instr)
@@ -1516,9 +1216,7 @@ apple9_buffer_argument(const struct apple9_buffer_map *map,
 static bool
 apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                        struct util_dynarray *loads,
-                       struct util_dynarray *stores,
-                       struct apple9_affine_index *dispatch_affine_out,
-                       unsigned *dispatch_rank_out, const char **reason)
+                       struct util_dynarray *stores, const char **reason)
 {
    if (map->count < 1 || map->count > ARRAY_SIZE(map->resource)) {
       *reason = "Apple9 buffer compiler requires one to eight resources";
@@ -1556,20 +1254,10 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
          unsigned index_scale, index_add;
          const unsigned bit_size =
             load ? intr->def.bit_size : intr->src[0].ssa->bit_size;
-         struct apple9_affine_index affine = {0};
-         uint32_t bounded_max = 0;
          if (!apple9_element_index(offset, &index, &index_scale, &index_add,
                                    bit_size / 8)) {
             *reason =
                "Apple9 buffer compiler requires naturally indexed scalar elements";
-            return false;
-         }
-         bool affine_index = apple9_affine_index_inner(index, &affine, 0);
-         bool bounded_index =
-            !affine_index && apple9_index_upper_bound(nir, index, &bounded_max);
-         if (!affine_index && !bounded_index) {
-            *reason =
-               "Apple9 buffer compiler cannot prove the access index bound";
             return false;
          }
 
@@ -1610,33 +1298,14 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                if (!(read_mask & BITFIELD_BIT(component)))
                   continue;
 
-               struct apple9_affine_index component_affine = affine;
                if (index_add > UINT32_MAX - component) {
                   *reason = "Apple9 vector-load field offset exceeds 32 bits";
-                  return false;
-               }
-               const uint32_t component_add = index_add + component;
-               if (!apple9_affine_scale(&component_affine, index_scale) ||
-                   component_affine.base > UINT32_MAX - component_add) {
-                  *reason = "Apple9 vector-load index exceeds 32 bits";
-                  return false;
-               }
-               component_affine.base += component_add;
-
-               if (bounded_index &&
-                   (bounded_max > (UINT32_MAX - component_add) / index_scale)) {
-                  *reason = "Apple9 bounded vector-load index exceeds 32 bits";
                   return false;
                }
 
                struct apple9_scalar_load load = {
                   .intr = intr,
                   .index = index,
-                  .affine = component_affine,
-                  .bounded_index = bounded_index,
-                  .bounded_max = bounded_index ? bounded_max * index_scale +
-                                                    index_add + component
-                                               : 0,
                   .argument = argument,
                   .component = component,
                   .index_scale = index_scale,
@@ -1671,20 +1340,9 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                return false;
             }
 
-            const uint32_t tail = components - 1;
-            if (bounded_index &&
-                (bounded_max > (UINT32_MAX - index_add - tail) / index_scale)) {
-               *reason = "Apple9 bounded store index exceeds 32 bits";
-               return false;
-            }
             struct apple9_buffer_store store = {
                .intr = intr,
                .index = index,
-               .affine = affine,
-               .bounded_index = bounded_index,
-               .bounded_max = bounded_index
-                                 ? bounded_max * index_scale + index_add + tail
-                                 : 0,
                .argument = argument,
                .components = components,
                .index_scale = index_scale,
@@ -1700,70 +1358,6 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
    if (block_count != 1 || stores->size == 0) {
       *reason = "Apple9 requires one block and at least one output store";
       return false;
-   }
-
-   /* Dispatch geometry and destination addressing are independent.  The old
-    * implementation inferred the former from the first store, which made a
-    * perfectly ordinary bounded scatter look like an unsupported dispatch.
-    * Recover the dense invocation shape from any affine memory operation;
-    * dynamic accesses still carry their own independently proven bounds. */
-   bool have_dispatch_shape = false;
-   util_dynarray_foreach(stores, struct apple9_buffer_store, store) {
-      if (!store->bounded_index &&
-          apple9_affine_index(store->index, dispatch_affine_out,
-                              dispatch_rank_out)) {
-         have_dispatch_shape = true;
-         break;
-      }
-   }
-   if (!have_dispatch_shape) {
-      util_dynarray_foreach(loads, struct apple9_scalar_load, load) {
-         if (!load->bounded_index &&
-             apple9_affine_index(load->index, dispatch_affine_out,
-                                 dispatch_rank_out)) {
-            have_dispatch_shape = true;
-            break;
-         }
-      }
-   }
-   if (!have_dispatch_shape) {
-      /* Nothing in a purely dynamic memory graph carries a dense affine
-       * stride.  Such a shader is still a valid 1D compute program: record
-       * the compiler's conservative launch contract directly instead of
-       * inventing an affine relationship for its scattered stores. */
-      memset(dispatch_affine_out, 0, sizeof(*dispatch_affine_out));
-      dispatch_affine_out->stride[0] = 1;
-      *dispatch_rank_out = 1;
-   }
-
-   util_dynarray_foreach(stores, struct apple9_buffer_store, store) {
-      if (store->bounded_index)
-         continue;
-      struct apple9_affine_index candidate;
-      unsigned rank;
-      if (!apple9_affine_index(store->index, &candidate, &rank) ||
-          rank != *dispatch_rank_out ||
-          memcmp(candidate.stride, dispatch_affine_out->stride,
-                 sizeof(candidate.stride)) != 0) {
-         *reason = "Apple9 affine stores require one dense dispatch shape";
-         return false;
-      }
-   }
-
-   util_dynarray_foreach(loads, struct apple9_scalar_load, load) {
-      if (load->bounded_index)
-         continue;
-      bool same_dense_shape =
-         memcmp(load->affine.stride, dispatch_affine_out->stride,
-                sizeof(load->affine.stride)) == 0;
-      bool one_dimensional = load->affine.stride[1] == 0 &&
-                             load->affine.stride[2] == 0 &&
-                             load->affine.stride[0] != 0;
-      if (!same_dense_shape && !one_dimensional) {
-         *reason =
-            "Apple9 load bounds require a 1D or dense-dispatch affine index";
-         return false;
-      }
    }
 
    return true;
@@ -1938,15 +1532,12 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
 {
    struct util_dynarray loads = UTIL_DYNARRAY_INIT;
    struct util_dynarray stores = UTIL_DYNARRAY_INIT;
-   struct apple9_affine_index affine = {0};
-   unsigned index_rank = 0;
    struct apple9_buffer_map resource_map = {0};
 
    if (!apple9_collect_buffer_map(nir, &resource_map, reason))
       return false;
 
-   if (!apple9_find_buffer_dag(nir, &resource_map, &loads, &stores, &affine,
-                               &index_rank, reason)) {
+   if (!apple9_find_buffer_dag(nir, &resource_map, &loads, &stores, reason)) {
       util_dynarray_fini(&loads);
       util_dynarray_fini(&stores);
       return false;
@@ -2187,88 +1778,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          profile->resource_kind[i] = resource_map.resource[i].kind;
       }
       profile->variable_local_size = nir->info.workgroup_size_variable;
-      for (unsigned d = 0; d < 3; ++d) {
+      for (unsigned d = 0; d < 3; ++d)
          profile->local_size[d] = nir->info.workgroup_size[d];
-         profile->index_stride[d] = affine.stride[d];
-      }
-      profile->index_rank = index_rank;
-
-      bool bounded_argument[AGX_APPLE9_COMPUTE_MAX_RESOURCES] = {false};
-      bool affine_argument[AGX_APPLE9_COMPUTE_MAX_RESOURCES] = {false};
-      util_dynarray_foreach(&stores, struct apple9_buffer_store, store) {
-         const uint8_t element_size = store->bit_size / 8;
-         uint8_t *profile_size =
-            &profile->resource_access_element_size[store->argument];
-         if (*profile_size != 0 && *profile_size != element_size) {
-            *reason =
-               "Apple9 one resource uses incompatible scalar element sizes";
-            util_dynarray_fini(&emitter.bytes);
-            goto fail;
-         }
-         *profile_size = element_size;
-
-         if (store->bounded_index) {
-            bounded_argument[store->argument] = true;
-            profile->resource_access_add[store->argument] =
-               MAX2(profile->resource_access_add[store->argument],
-                    store->bounded_max);
-            continue;
-         }
-
-         affine_argument[store->argument] = true;
-
-         const uint32_t tail = store->components - 1;
-         if (store->index_add > UINT32_MAX - tail) {
-            *reason = "Apple9 store range exceeds 32 bits";
-            util_dynarray_fini(&emitter.bytes);
-            goto fail;
-         }
-         const uint32_t add = store->index_add + tail;
-         if (store->index_scale != 1 || add != 0) {
-            profile->resource_access_scale[store->argument] =
-               MAX2(profile->resource_access_scale[store->argument],
-                    store->index_scale);
-            profile->resource_access_add[store->argument] =
-               MAX2(profile->resource_access_add[store->argument], add);
-         }
-      }
-
-      util_dynarray_foreach(&loads, struct apple9_scalar_load, load) {
-         const uint8_t element_size = load->bit_size / 8;
-         uint8_t *profile_size =
-            &profile->resource_access_element_size[load->argument];
-         if (*profile_size != 0 && *profile_size != element_size) {
-            *reason =
-               "Apple9 one resource uses incompatible scalar element sizes";
-            util_dynarray_fini(&emitter.bytes);
-            goto fail;
-         }
-         *profile_size = element_size;
-         if (load->bounded_index) {
-            bounded_argument[load->argument] = true;
-            profile->resource_access_add[load->argument] = MAX2(
-               profile->resource_access_add[load->argument], load->bounded_max);
-            continue;
-         }
-
-         affine_argument[load->argument] = true;
-         uint32_t scale = memcmp(load->affine.stride, affine.stride,
-                                 sizeof(load->affine.stride)) == 0
-                             ? 1
-                             : (uint32_t)load->affine.stride[0];
-         uint32_t add = (uint32_t)load->affine.base;
-         if (scale == 1 && add == 0)
-            continue;
-         profile->resource_access_scale[load->argument] =
-            MAX2(profile->resource_access_scale[load->argument], scale);
-         profile->resource_access_add[load->argument] =
-            MAX2(profile->resource_access_add[load->argument], add);
-      }
-      for (unsigned i = 0; i < resource_count; ++i) {
-         if (bounded_argument[i] && !affine_argument[i])
-            profile->resource_access_mode[i] =
-               AGX_APPLE9_COMPUTE_ACCESS_BOUNDED_INDEX;
-      }
    }
 
    free(lower.ssa_to_vreg);
