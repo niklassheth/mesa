@@ -58,7 +58,9 @@ enum workload {
    WORKLOAD_NOT,
    WORKLOAD_INEG,
    WORKLOAD_U2F,
+   WORKLOAD_U2F_LAST_USE,
    WORKLOAD_I2F,
+   WORKLOAD_I2F_RETAINED,
    WORKLOAD_F2I,
    WORKLOAD_F2U,
    WORKLOAD_SHL,
@@ -128,7 +130,9 @@ static const char *workload_names[WORKLOAD_COUNT] = {
    [WORKLOAD_NOT] = "not",
    [WORKLOAD_INEG] = "ineg",
    [WORKLOAD_U2F] = "u2f",
+   [WORKLOAD_U2F_LAST_USE] = "u2f-last-use",
    [WORKLOAD_I2F] = "i2f",
+   [WORKLOAD_I2F_RETAINED] = "i2f-retained",
    [WORKLOAD_F2I] = "f2i",
    [WORKLOAD_F2U] = "f2u",
    [WORKLOAD_SHL] = "shl",
@@ -179,7 +183,11 @@ static const char *workload_expressions[WORKLOAD_COUNT] = {
    [WORKLOAD_NOT] = "~gid",
    [WORKLOAD_INEG] = "uint(-int(gid))",
    [WORKLOAD_U2F] = "floatBitsToUint(float(gid))",
+   [WORKLOAD_U2F_LAST_USE] =
+      "floatBitsToUint(float(gid ^ 0x80000000u))",
    [WORKLOAD_I2F] = "floatBitsToUint(float(int(gid)-8192))",
+   [WORKLOAD_I2F_RETAINED] =
+      "floatBitsToUint(float(int(gid)-8192)) ^ uint(int(gid)-8192)",
    [WORKLOAD_F2I] =
       "uint(int(uintBitsToFloat(0x3f000000u|((gid&0x3ffu)<<12u))*37.0-20.0))",
    [WORKLOAD_F2U] =
@@ -745,8 +753,14 @@ expected(enum workload workload, uint32_t gid)
       return 0u - gid;
    case WORKLOAD_U2F:
       return float_bits((float)gid);
+   case WORKLOAD_U2F_LAST_USE:
+      return float_bits((float)(gid ^ 0x80000000u));
    case WORKLOAD_I2F:
       return float_bits((float)((int32_t)gid - 8192));
+   case WORKLOAD_I2F_RETAINED: {
+      int32_t value = (int32_t)gid - 8192;
+      return float_bits((float)value) ^ (uint32_t)value;
+   }
    case WORKLOAD_F2I: {
       float x = bits_float(0x3f000000u | ((gid & 0x3ffu) << 12u));
       return (uint32_t)(int32_t)(x * 37.0f - 20.0f);

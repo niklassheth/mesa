@@ -61,18 +61,6 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_DEVICE_STORE,
 };
 
-enum agx_apple9_device_store_form {
-   AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU,
-
-   /* The native direct-copy corpus always feeds the 0x56 store from a
-    * slot-6 device load.  Hardware experiments suggest a broader mechanism,
-    * but keep that synthetic-only behavior out of the initial compiler: a
-    * caller may select this form only for a slot-6 producer.  The store still
-    * names the value through its half-register/GPR field; it does not encode a
-    * separate slot selector. */
-   AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6,
-};
-
 enum agx_apple9_select_condition {
    AGX_APPLE9_SELECT_FEQ = 0x00,
    AGX_APPLE9_SELECT_FGT = 0x02,
@@ -184,10 +172,11 @@ struct agx_apple9_vir_instr {
    uint8_t live_after_mask;
 
    /*
-    * Scoreboard slot consumed by this instruction.  Slot 0 reads only the
-    * ordinary GPR path.  The machine encoding is instruction-specific: FALU
-    * uses a binary selector while integer logic uses a six-bit one-hot mask.
-    * This is independent of per-source release bits.
+    * The one pending-result slot consumed by this instruction, or NONE.
+    * Metal has not been observed making one instruction consume multiple
+    * slots. The selected encoding translates this logical slot into either
+    * a binary index or a one-hot physical field. This is independent of
+    * per-source release bits.
     */
    uint8_t scoreboard_slot;
 
@@ -195,10 +184,6 @@ struct agx_apple9_vir_instr {
     * user has no proven slot-bearing form.  It consumes the assigned slot
     * immediately and leaves an ordinary GPR value for the original users. */
    bool scoreboard_materialize;
-
-   /* Selected only after the scoreboard pass has proven whether an exact
-    * load-to-store handoff owns native slot 6. */
-   enum agx_apple9_device_store_form device_store_form;
 
    /*
     * Fragment iterator/perspective producers are addressed by compact ALU
@@ -351,11 +336,11 @@ bool agx_apple9_pack_device_load_scalar_raw(
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_store_scalar(
    unsigned data, unsigned index, unsigned binding, unsigned bits,
-   enum agx_apple9_device_store_form form, bool release_index,
+   enum agx_apple9_scoreboard_slot scoreboard_slot, bool release_index,
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_store_vector_u32(
    unsigned data, unsigned index, unsigned binding, unsigned components,
-   enum agx_apple9_device_store_form form, bool release_index,
+   enum agx_apple9_scoreboard_slot scoreboard_slot, bool release_index,
    struct agx_apple9_packed_instruction *packed);
 
 #ifdef __cplusplus

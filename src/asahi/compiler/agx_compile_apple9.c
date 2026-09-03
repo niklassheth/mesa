@@ -1838,10 +1838,12 @@ apple9_emit_device_store_vir(struct apple9_emitter *emitter,
       components == 1
          ? agx_apple9_pack_device_store_scalar(
               data[0], index, instruction->immediate, instruction->memory_bits,
-              instruction->device_store_form, release_index, &packed)
+              (enum agx_apple9_scoreboard_slot)instruction->scoreboard_slot,
+              release_index, &packed)
          : agx_apple9_pack_device_store_vector_u32(
               data[0], index, instruction->immediate, components,
-              instruction->device_store_form, release_index, &packed);
+              (enum agx_apple9_scoreboard_slot)instruction->scoreboard_slot,
+              release_index, &packed);
    if (!packed_ok || !apple9_emit_packed(emitter, &packed))
       goto invalid;
    return true;

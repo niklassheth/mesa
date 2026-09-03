@@ -116,6 +116,20 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_PSEUDO = 0xff,
 };
 
+/*
+ * Apple9 instructions encode pending-result dependencies in one of four
+ * physical layouts. VIR names at most one logical slot for every consumer;
+ * the selected machine encoding owns the translation into either a binary
+ * slot index or a one-hot physical bit.
+ */
+enum agx_apple9_dependency_layout {
+   AGX_APPLE9_DEPENDENCY_NONE = 0,
+   AGX_APPLE9_DEPENDENCY_INDEX_45_47,
+   AGX_APPLE9_DEPENDENCY_INDEX_61_63,
+   AGX_APPLE9_DEPENDENCY_MASK_12_17,
+   AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63,
+};
+
 #define AGX_APPLE9_MAX_ENCODING_OPERANDS 5
 
 struct agx_apple9_encoding_info {
@@ -124,6 +138,7 @@ struct agx_apple9_encoding_info {
    uint8_t operand_count;
    bool allocator_safe;
    enum agx_apple9_evidence evidence;
+   enum agx_apple9_dependency_layout dependency_layout;
 
    /* Zero means no cross-operand restriction. */
    uint8_t max_high_gpr_operands;

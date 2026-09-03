@@ -391,13 +391,13 @@ TEST(Apple9Packer, NativeVectorMemoryWidthsMatchValidatedEncodings)
 
       ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
          0, test.index, 1, test.components,
-         AGX_APPLE9_DEVICE_STORE_IMPLICIT_DEVICE_LOAD_SLOT6, true, &packed));
+         AGX_APPLE9_SCOREBOARD_SLOT_6, true, &packed));
       EXPECT_EQ(memcmp(packed.bytes, test.store_load, sizeof(test.store_load)),
                 0);
 
       ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
          0, test.index, 1, test.components,
-         AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+         AGX_APPLE9_SCOREBOARD_SLOT_NONE, true, &packed));
       EXPECT_EQ(memcmp(packed.bytes, test.store_alu, sizeof(test.store_alu)),
                 0);
    }
@@ -429,7 +429,7 @@ TEST(Apple9Packer, NarrowScalarMemoryMatchesOwnMslCorpus)
    EXPECT_EQ(memcmp(packed.bytes, load_u16, sizeof(load_u16)), 0);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      0, 0, 0, 8, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+      0, 0, 0, 8, AGX_APPLE9_SCOREBOARD_SLOT_NONE, true, &packed));
    static const uint8_t store_u8[] = {
       0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x21,
       0x00, 0x21, 0x00, 0x00, 0x90, 0x10, 0x00,
@@ -437,7 +437,7 @@ TEST(Apple9Packer, NarrowScalarMemoryMatchesOwnMslCorpus)
    EXPECT_EQ(memcmp(packed.bytes, store_u8, sizeof(store_u8)), 0);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      0, 0, 0, 16, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+      0, 0, 0, 16, AGX_APPLE9_SCOREBOARD_SLOT_NONE, true, &packed));
    static const uint8_t store_u16[] = {
       0xe7, 0x00, 0x54, 0x00, 0x00, 0x00, 0x21,
       0x00, 0x01, 0x00, 0x00, 0x10, 0x11, 0x00,
@@ -449,17 +449,17 @@ TEST(Apple9Packer, DeviceStoreEncodesAllocatedDataRegister)
 {
    agx_apple9_packed_instruction packed = {};
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      17, 9, 3, 32, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+      17, 9, 3, 32, AGX_APPLE9_SCOREBOARD_SLOT_NONE, true, &packed));
    EXPECT_EQ(packed.bytes[2], 0x54);
    EXPECT_EQ(packed.bytes[3], 34);
    EXPECT_EQ(packed.bytes[4], 3);
    EXPECT_EQ(packed.bytes[5], 9);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
-      40, 7, 2, 4, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+      40, 7, 2, 4, AGX_APPLE9_SCOREBOARD_SLOT_NONE, true, &packed));
    EXPECT_EQ(packed.bytes[3], 80);
    EXPECT_FALSE(agx_apple9_pack_device_store_scalar(
-      1, 0, 0, 16, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+      1, 0, 0, 16, AGX_APPLE9_SCOREBOARD_SLOT_NONE, true, &packed));
 }
 
 TEST(Apple9Packer, DeviceStoreIndexLifetimeMatchesNativeAccessDescriptor)
@@ -467,15 +467,15 @@ TEST(Apple9Packer, DeviceStoreIndexLifetimeMatchesNativeAccessDescriptor)
    agx_apple9_packed_instruction packed = {};
 
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      17, 9, 3, 32, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, false, &packed));
+      17, 9, 3, 32, AGX_APPLE9_SCOREBOARD_SLOT_NONE, false, &packed));
    EXPECT_EQ(packed.bytes[6], 0x20);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
-      17, 9, 3, 32, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, true, &packed));
+      17, 9, 3, 32, AGX_APPLE9_SCOREBOARD_SLOT_NONE, true, &packed));
    EXPECT_EQ(packed.bytes[6], 0x21);
 
    ASSERT_TRUE(agx_apple9_pack_device_store_vector_u32(
-      40, 7, 2, 4, AGX_APPLE9_DEVICE_STORE_IMPLICIT_ALU, false, &packed));
+      40, 7, 2, 4, AGX_APPLE9_SCOREBOARD_SLOT_NONE, false, &packed));
    EXPECT_EQ(packed.bytes[6], 0x20);
 }
 
@@ -524,7 +524,7 @@ TEST(Apple9Packer, ScalarConversionsAndArithmeticShiftMatchT8132Forms)
 
    instruction.op = AGX_APPLE9_VIR_I2F32;
    instruction.encoding = AGX_APPLE9_ENC_SINT_TO_FLOAT;
-   static const uint8_t i2f[] = {0xa7, 0x17, 0x54, 0x20,
+   static const uint8_t i2f[] = {0xa7, 0x07, 0x54, 0x20,
                                  0x03, 0x44, 0xac, 0x60};
    ASSERT_TRUE(
       agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason))
@@ -533,12 +533,30 @@ TEST(Apple9Packer, ScalarConversionsAndArithmeticShiftMatchT8132Forms)
 
    instruction.op = AGX_APPLE9_VIR_U2F32;
    instruction.encoding = AGX_APPLE9_ENC_UINT_TO_FLOAT;
-   static const uint8_t u2f[] = {0xa7, 0x17, 0x54, 0x20,
+   static const uint8_t u2f[] = {0xa7, 0x07, 0x54, 0x20,
                                  0x03, 0x44, 0xac, 0x20};
    ASSERT_TRUE(
       agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason))
       << reason;
    EXPECT_EQ(memcmp(packed.bytes, u2f, sizeof(u2f)), 0);
+
+   instruction.live_after_mask = 1;
+   static const uint8_t retained_u2f[] = {0xa7, 0x07, 0x54, 0x20,
+                                          0x03, 0x44, 0x8c, 0x20};
+   ASSERT_TRUE(
+      agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason))
+      << reason;
+   EXPECT_EQ(memcmp(packed.bytes, retained_u2f, sizeof(retained_u2f)), 0);
+
+   instruction.op = AGX_APPLE9_VIR_I2F32;
+   instruction.encoding = AGX_APPLE9_ENC_SINT_TO_FLOAT;
+   static const uint8_t retained_i2f[] = {0xa7, 0x07, 0x54, 0x20,
+                                          0x03, 0x44, 0x8c, 0x60};
+   ASSERT_TRUE(
+      agx_apple9_pack_vir_instruction(&instruction, phys, &packed, &reason))
+      << reason;
+   EXPECT_EQ(memcmp(packed.bytes, retained_i2f, sizeof(retained_i2f)), 0);
+   instruction.live_after_mask = 0;
 
    instruction.op = AGX_APPLE9_VIR_F2I32;
    instruction.encoding = AGX_APPLE9_ENC_FLOAT_TO_SINT;
@@ -666,7 +684,7 @@ TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
    ASSERT_EQ(packed.length, 10u);
 
    /* Same all-sources-dead envelope as EXP-M4-16's hardware probe. */
-   uint8_t expected[] = {0x9f, 0x01, 0x56, 0x00, 0x02,
+   uint8_t expected[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
                          0x00, 0x00, 0xa8, 0x17, 0x05};
    uint64_t word = 0;
    memcpy(&word, expected, sizeof(word));
@@ -1018,7 +1036,7 @@ TEST(Apple9Packer, ImmediateFloatCarriesScoreboardSlot)
    agx_apple9_packed_instruction packed = {};
    EXPECT_FALSE(agx_apple9_pack_vir_instruction(&add, phys, &packed, &reason));
    ASSERT_NE(reason, nullptr);
-   EXPECT_NE(strstr(reason, "unsupported scoreboard slot"), nullptr);
+   EXPECT_NE(strstr(reason, "dependency"), nullptr);
 }
 
 TEST(Apple9Vir, ScalarLoadAutoStartsAtSlot6)
@@ -1280,7 +1298,7 @@ TEST(Apple9Vir, RawLoadTokenDefinesProducerScoreboardSlot)
    agx_apple9_vir_finish(&program);
 }
 
-TEST(Apple9Vir, UnsupportedFirstConsumerGetsSlot6Materialization)
+TEST(Apple9Vir, IntegerAddDirectlyConsumesSlot6)
 {
    agx_apple9_vir_program program;
    agx_apple9_vir_init(&program);
@@ -1302,14 +1320,11 @@ TEST(Apple9Vir, UnsupportedFirstConsumerGetsSlot6Materialization)
    const char *reason = nullptr;
    ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
       << (reason ? reason : "");
-   ASSERT_EQ(program.instruction_count, 3u);
+   ASSERT_EQ(program.instruction_count, 2u);
    EXPECT_EQ(program.instructions[0].producer_scoreboard_slot, 6u);
-   EXPECT_TRUE(program.instructions[1].scoreboard_materialize);
-   EXPECT_EQ(program.instructions[1].op, AGX_APPLE9_VIR_IOR);
-   EXPECT_EQ(program.instructions[1].encoding, AGX_APPLE9_ENC_LOGIC_EXTENDED);
    EXPECT_EQ(program.instructions[1].scoreboard_slot, 6u);
-   EXPECT_EQ(program.instructions[2].scoreboard_slot, 0u);
-   EXPECT_EQ(program.instructions[2].src[0], program.instructions[1].dest);
+   EXPECT_EQ(program.instructions[1].op, AGX_APPLE9_VIR_IADD);
+   EXPECT_EQ(program.instructions[1].src[0], load);
    agx_apple9_vir_finish(&program);
 }
 
@@ -1403,7 +1418,7 @@ TEST(Apple9Vir, ExplicitMultiSourceGroupRejectsDifferentSlots)
    agx_apple9_vir_finish(&program);
 }
 
-TEST(Apple9Vir, MaterializedVectorStoreRecollectsItsScalarLanes)
+TEST(Apple9Vir, VectorStoreDirectlyConsumesItsLoadTuple)
 {
    agx_apple9_vir_program program;
    agx_apple9_vir_init(&program);
@@ -1448,16 +1463,17 @@ TEST(Apple9Vir, MaterializedVectorStoreRecollectsItsScalarLanes)
                        ? i
                        : store_index;
    }
-   ASSERT_NE(collect_index, UINT_MAX);
-   ASSERT_EQ(store_index, collect_index + 1);
-   const uint32_t tuple = program.instructions[collect_index].dest;
+   ASSERT_EQ(collect_index, UINT_MAX);
+   ASSERT_NE(store_index, UINT_MAX);
+   EXPECT_EQ(program.instructions[store_index].scoreboard_slot,
+             AGX_APPLE9_SCOREBOARD_SLOT_1);
    for (unsigned c = 0; c < 4; ++c)
-      EXPECT_EQ(program.instructions[store_index].src[c], tuple + c);
+      EXPECT_EQ(program.instructions[store_index].src[c], vector + c);
 
    ASSERT_TRUE(agx_apple9_allocate_vir(&program, &reason))
       << (reason ? reason : "");
    for (unsigned c = 1; c < 4; ++c)
-      EXPECT_EQ(program.phys[tuple + c], program.phys[tuple] + c);
+      EXPECT_EQ(program.phys[vector + c], program.phys[vector] + c);
    agx_apple9_vir_finish(&program);
 }
 
@@ -1524,7 +1540,7 @@ TEST(Apple9Packer, LowRegisterSelectMatchesCallerOwnedCompilerForm)
    EXPECT_FALSE(
       agx_apple9_pack_vir_instruction(&select, high_phys, &packed, &reason));
    ASSERT_NE(reason, nullptr);
-   EXPECT_NE(strstr(reason, "unsupported scoreboard slot"), nullptr);
+   EXPECT_NE(strstr(reason, "dependency"), nullptr);
 }
 
 TEST(Apple9Packer, SelectConditionAndEqualityModeMatchHardwareSweeps)
