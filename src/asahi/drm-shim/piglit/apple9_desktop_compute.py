@@ -49,12 +49,12 @@ _VARIABLE_GROUP_TESTS = [
     os.path.join(_VARIABLE_GROUP_ROOT, "separate-global-id-2.shader_test"),
 ]
 if (
-    len(_SUPPORTED_EXECUTION_TESTS) != 8
+    len(_SUPPORTED_EXECUTION_TESTS) != 9
     or len(_LINKER_TESTS) != 7
     or len(_EXECUTION_TESTS) != 28
 ):
     raise RuntimeError(
-        "expected 8 supported execution, 7 linker, and 28 discovery "
+        "expected 9 supported execution, 7 linker, and 28 discovery "
         "execution tests; found {}, {}, and {}".format(
             len(_SUPPORTED_EXECUTION_TESTS),
             len(_LINKER_TESTS),

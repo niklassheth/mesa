@@ -2156,6 +2156,7 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 {
    struct pipe_caps *caps = (struct pipe_caps *)&pscreen->caps;
    struct agx_screen *screen = agx_screen(pscreen);
+   const bool apple9_compute = agx_apple9_compute_enabled(&screen->dev);
 
    u_init_pipe_screen_caps(pscreen, 1);
 
@@ -2268,7 +2269,11 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
 
    caps->vertex_input_alignment = PIPE_VERTEX_INPUT_ALIGNMENT_ELEMENT;
 
-   caps->query_pipeline_statistics_single = true;
+   /* Apple9 indirect dispatch does not yet accumulate compute invocation
+    * statistics.  Do not expose ARB_pipeline_statistics_query until every
+    * supported dispatch form has correct query semantics.
+    */
+   caps->query_pipeline_statistics_single = !apple9_compute;
 
    caps->max_texture_2d_size = 16384;
    caps->max_texture_cube_levels = 15; /* Max 16384x16384 */

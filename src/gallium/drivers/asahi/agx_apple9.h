@@ -12,6 +12,10 @@
 
 #include "asahi/compiler/agx_apple9_profile.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct agx_device;
 struct agx_bo;
 struct agx_apple9_render_package;
@@ -253,6 +257,34 @@ bool agx_apple9_build_compute_state(
 bool agx_apple9_compute_state_address_supported(uint64_t usc_exec_base,
                                                 uint64_t state_address);
 
+/*
+ * Launch-visible geometry has two intentionally different representations.
+ * A direct dispatch publishes total thread counts.  An indirect dispatch
+ * publishes a GPU pointer to raw threadgroup counts plus the local-size scale
+ * used by the opaque launch program.  Keeping the alternatives tagged avoids
+ * reading agx_grid.count[] from its indirect-pointer union member.
+ */
+enum agx_apple9_compute_geometry_mode {
+   AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
+   AGX_APPLE9_COMPUTE_GEOMETRY_INDIRECT,
+};
+
+struct agx_apple9_compute_geometry {
+   enum agx_apple9_compute_geometry_mode mode;
+   union {
+      uint32_t threads[3];
+      uint64_t group_counts;
+   };
+   uint32_t local[3];
+};
+
+/* Populate only the geometry-owned fields of a zeroed 0x80-byte superset
+ * resource record.  This is intentionally independent of opaque carrier
+ * data so the direct/indirect contract can be unit tested exactly. */
+bool agx_apple9_build_compute_geometry_fields(
+   void *record, size_t record_size, uint64_t record_address,
+   const struct agx_apple9_compute_geometry *geometry);
+
 /* Source-build one complete executable archive containing one main. */
 bool agx_apple9_build_compute_archive_image(
    void *mapping, size_t mapping_size, const void *main, size_t main_size,
@@ -263,14 +295,16 @@ bool agx_apple9_build_compute_dispatch(
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint32_t state_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count, const uint32_t global[3]);
+   unsigned resource_count,
+   const struct agx_apple9_compute_geometry *geometry);
 
 bool agx_apple9_build_compute_dispatch_persistent(
    void *mapping, size_t mapping_size, uint64_t usc_exec_base,
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint64_t state_address, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count, const uint32_t global[3]);
+   unsigned resource_count,
+   const struct agx_apple9_compute_geometry *geometry);
 
 void
 agx_apple9_build_compute_package(void *mapping, uint64_t base, const void *main,
@@ -424,5 +458,9 @@ agx_apple9_direct_draw_size(const struct agx_apple9_render_pipeline *pipeline);
 uint8_t *agx_apple9_emit_direct_draw(
    uint8_t *out, const struct agx_apple9_render_pipeline *pipeline,
    unsigned vertex_count, unsigned instance_count, unsigned vertex_start);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

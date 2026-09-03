@@ -7,13 +7,23 @@ against independent CPU formulas. Piglit batches those logical cases in one
 process and one EGL context, but records each case as a separate subtest and
 can resume at the next case after a failure.
 
-The current T8132 hardware baseline is 93 passes and one exact-output failure:
-`u2f`. The runner continues after ordinary oracle mismatches, so this known
-compiler regression does not hide later results.
+The current T8132 hardware baseline is 117 passes with complete output and
+guard checks. The runner continues after ordinary oracle mismatches so one
+failure cannot hide later results.
+
+The geometry group also covers native indirect dispatch rather than only
+direct-grid bookkeeping. Its exact guarded-buffer cases include asymmetric 2D
+and 3D records, nonzero indirect-buffer offsets, a zero group dimension, and a
+record written by an ordinary preceding compute shader. Dedicated direct and
+indirect cases read all three components of `gl_NumWorkGroups`; the latter is
+also exercised with a GPU-authored record and no CPU readback. The ten-case
+geometry group passes in one cold-boot process on T8132. The complete native
+batch reaches 137 exact hardware publications because several lifecycle cases
+contain multiple dispatches.
 
 The desktop OpenGL profile remains declarative. Its default set contains three
-negative linker tests, three variable-workgroup-size tests, and eight exact
-SSBO execution tests. The complete 35-test `ARB_compute_shader` discovery
+negative linker tests, three upstream variable-workgroup-size tests, and nine
+exact SSBO execution tests. The complete 35-test `ARB_compute_shader` discovery
 corpus remains available explicitly. Both profiles use Waffle's surfaceless
 EGL backend; GLX and X11 are not required.
 
@@ -50,7 +60,7 @@ src/asahi/drm-shim/piglit/run.sh piglit-gl
 
 Set `T8132_PIGLIT_GL_SUBSET=smoke`, `supported`, `linker-basic`, `linker`,
 `execution`, or `all` to select one exact desktop SSBO test, the enabled
-14-test set, five basic link tests, all seven link tests, the 28 upstream
+15-test set, five basic link tests, all seven link tests, the 28 upstream
 execution tests, or the complete discovery corpus. `supported` is the default.
 The broader subsets intentionally include compiler features that are not yet
 implemented.
@@ -60,6 +70,9 @@ The enabled upstream cases are the negative-link tests `no_local_work_size`,
 the three `ARB_compute_variable_group_size` global-ID tests. They execute a
 runtime 2x1x1 local group and check global, local, and workgroup-derived IDs,
 including two multi-source link arrangements.
+The local variable-size case additionally checks every component of
+`gl_NumWorkGroups` with a non-power-of-two runtime local tuple. The complete
+15-case supported desktop batch passes in one cold-boot process on T8132.
 The remaining upstream positive-link tests need empty compute programs, while
 the other execution tests require general control flow, atomics, images,
 shared memory, barriers, subgroup operations, or other unsupported facilities.

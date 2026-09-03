@@ -5848,12 +5848,13 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       return;
 
    struct agx_device *dev = agx_device(pipe->screen);
+   const bool is_indirect = info->indirect != NULL;
 
    /* A direct dispatch with an empty grid is an API no-op.  Validate this
     * before allocating a batch: subtracting one from a zero grid dimension
     * below used to wrap, while release builds could publish a zero-sized G16
     * hardware launch after the builder's assertions disappeared. */
-   if (!info->indirect) {
+   if (!is_indirect) {
       for (unsigned d = 0; d < 3; ++d) {
          if (!info->grid[d])
             return;
@@ -5889,12 +5890,6 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
 
    struct agx_batch *batch = agx_get_compute_batch(ctx);
    if (cs->apple9_tiny) {
-      if (info->indirect) {
-         fprintf(stderr,
-                 "Apple9 bounded compute does not support indirect dispatch\n");
-         return;
-      }
-
       if (!agx_apple9_compute_dispatch_fits_persistent(
              AGX_APPLE9_COMPUTE_PACKAGE_SIZE, batch->apple9_launch_next,
              batch->apple9_resource_next, &cs->apple9_compute_profile)) {
@@ -5920,7 +5915,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    }
 
    uint64_t indirect = 0;
-   if (info->indirect) {
+   if (is_indirect) {
       struct agx_resource *rsrc = agx_resource(info->indirect);
       if (info->indirect_offset > info->indirect->width0 ||
           info->indirect->width0 - info->indirect_offset < 3 * sizeof(uint32_t)) {
@@ -5956,7 +5951,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    uint64_t apple9_invocation_count = 0;
    if (cs->apple9_tiny) {
       const uint32_t local[3] = {wg.x, wg.y, wg.z};
-      if (!indirect) {
+      if (!is_indirect) {
          const uint32_t global[3] = {
             grid.count[0],
             grid.count[1],
@@ -5966,7 +5961,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
                                                 global, local)) {
             fprintf(
                stderr,
-               "Apple9 compute grid is outside the capture-backed profile\n");
+               "Apple9 compute grid is outside the supported dispatch domain\n");
             return;
          }
 
@@ -6096,13 +6091,22 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       uint32_t launch_offset = batch->apple9_launch_next;
       uint32_t resource_offset = batch->apple9_resource_next;
       uint64_t package_base = batch->apple9_package->va->addr;
-      uint32_t local[3] = {wg.x, wg.y, wg.z};
-      uint32_t global[3] = {grid.count[0], grid.count[1], grid.count[2]};
+      struct agx_apple9_compute_geometry geometry = {
+         .mode = is_indirect ? AGX_APPLE9_COMPUTE_GEOMETRY_INDIRECT
+                             : AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
+         .local = {wg.x, wg.y, wg.z},
+      };
+      if (is_indirect) {
+         geometry.group_counts = indirect;
+      } else {
+         for (unsigned d = 0; d < 3; ++d)
+            geometry.threads[d] = grid.count[d];
+      }
       bool package_built = agx_apple9_build_compute_dispatch_persistent(
          agx_bo_map(batch->apple9_package), batch->apple9_package->size,
          dev->shader_base, package_base, cs->apple9_main_offset, launch_offset,
          cs->apple9_state_address, resource_offset, &cs->apple9_compute_profile,
-         resource_addresses, resource_count, global);
+         resource_addresses, resource_count, &geometry);
       if (!package_built) {
          fprintf(stderr,
                  "Apple9 compute package construction failed after layout "
@@ -6133,16 +6137,18 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       batch->apple9_resource_next += resource_record_size;
 
       const unsigned cdm_record_size =
-         indirect ? AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE
-                  : AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE;
+         is_indirect ? AGX_APPLE9_COMPUTE_INDIRECT_CDM_RECORD_SIZE
+                     : AGX_APPLE9_COMPUTE_CDM_RECORD_SIZE;
       assert(batch->cdm.current + cdm_record_size + 4 <= batch->cdm.end);
       bool cdm_built =
-         indirect ? agx_apple9_emit_indirect_dispatch(
-                       batch->cdm.current, package_base + launch_offset,
-                       indirect, local, &cs->apple9_compute_profile)
-                  : agx_apple9_emit_direct_dispatch(
-                       batch->cdm.current, package_base + launch_offset, global,
-                       local, &cs->apple9_compute_profile);
+         is_indirect
+            ? agx_apple9_emit_indirect_dispatch(
+                 batch->cdm.current, package_base + launch_offset, indirect,
+                 geometry.local, &cs->apple9_compute_profile)
+            : agx_apple9_emit_direct_dispatch(
+                 batch->cdm.current, package_base + launch_offset,
+                 geometry.threads, geometry.local,
+                 &cs->apple9_compute_profile);
       if (!cdm_built) {
          fprintf(stderr, "Apple9 dispatch encoding failed\n");
          return;
@@ -6150,7 +6156,7 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       batch->cdm.current += cdm_record_size;
       batch->apple9_dispatch_count++;
 
-      if (statistic && !indirect) {
+      if (statistic && !is_indirect) {
          agx_query_increment_cpu(ctx, statistic, apple9_invocation_count);
       }
 

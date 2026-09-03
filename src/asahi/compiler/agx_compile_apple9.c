@@ -348,6 +348,7 @@ apple9_instruction_is_in_subset(nir_instr *instr)
              op == nir_intrinsic_load_local_invocation_id ||
              op == nir_intrinsic_load_local_invocation_index ||
              op == nir_intrinsic_load_workgroup_size ||
+             op == nir_intrinsic_load_num_workgroups ||
              op == nir_intrinsic_load_subgroup_invocation ||
              op == nir_intrinsic_load_subgroup_id ||
              op == nir_intrinsic_load_subgroup_size ||
@@ -361,6 +362,7 @@ apple9_instruction_is_in_subset(nir_instr *instr)
 
 struct apple9_dag_lower {
    struct agx_apple9_vir_program program;
+   nir_shader *nir;
    uint32_t *ssa_to_vreg;
    unsigned ssa_map_count;
    uint32_t system_vreg[256];
@@ -435,6 +437,32 @@ apple9_dag_zero(struct apple9_dag_lower *lower)
    return lower->zero_vreg;
 }
 
+static uint32_t
+apple9_dag_system(struct apple9_dag_lower *lower,
+                  struct apple9_system_source system)
+{
+   if (lower->system_vreg[system.selector] == AGX_APPLE9_VREG_INVALID) {
+      enum agx_apple9_vir_opcode op = system.global_id
+                                          ? AGX_APPLE9_VIR_GET_GLOBAL_ID
+                                          : AGX_APPLE9_VIR_GET_SR;
+      enum agx_apple9_encoding encoding =
+         system.zext16 ? AGX_APPLE9_ENC_GET_SR_ZEXT16
+                       : AGX_APPLE9_ENC_GET_SR;
+      uint32_t immediate =
+         system.global_id
+            ? system.selector - 0xa0
+            : system.selector | (system.zext16 ? 0 : (0x10u << 8));
+
+      /* Both GET_SR families have a proven low destination contract.
+       * Immediately move the value to the general bank so the rest of
+       * instruction selection does not inherit that constraint. */
+      lower->system_vreg[system.selector] = apple9_dag_emit_constrained(
+         lower, op, encoding, NULL, 0, immediate);
+   }
+
+   return lower->system_vreg[system.selector];
+}
+
 static enum agx_apple9_vir_opcode
 apple9_dag_binary_opcode(nir_op op)
 {
@@ -501,6 +529,131 @@ apple9_dag_binary_encoding(nir_op op)
 
 static uint32_t apple9_lower_dag_scalar(struct apple9_dag_lower *lower,
                                         nir_scalar scalar);
+static uint32_t apple9_emit_dag_select_raw(
+   struct apple9_dag_lower *lower, uint32_t cmp_a, uint32_t cmp_b,
+   uint32_t if_true, uint32_t if_false, uint32_t immediate);
+static uint32_t apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op,
+                                    uint32_t source, unsigned amount);
+
+static uint32_t
+apple9_dag_hidden_load(struct apple9_dag_lower *lower, unsigned binding,
+                       unsigned element)
+{
+   uint32_t index = apple9_dag_imm(lower, element);
+   if (index == AGX_APPLE9_VREG_INVALID)
+      return index;
+
+   const struct agx_apple9_device_load_contract contract = {
+      .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
+      .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+   };
+   uint32_t value = agx_apple9_vir_emit_device_load(
+      &lower->program, binding, index, &contract);
+   if (value == AGX_APPLE9_VREG_INVALID ||
+       !agx_apple9_vir_set_device_load_contract(
+          &lower->program, value, 0, AGX_APPLE9_SCOREBOARD_SLOT_AUTO)) {
+      lower->reason = "could not emit an Apple9 hidden-resource load";
+      return AGX_APPLE9_VREG_INVALID;
+   }
+
+   return value;
+}
+
+/* Compute ceil(numerator / divisor) for the complete Apple9 dispatch domain.
+ * T8132 exhaustively satisfies |D * frcp(float(D)) - 1| <= 2^-18 for
+ * D=1..1024.  Together with N <= 65535*1024, this makes the rounded quotient
+ * candidate either floor(N/D) or ceil(N/D); one exact integer comparison
+ * selects the latter. */
+static uint32_t
+apple9_dag_ceil_udiv(struct apple9_dag_lower *lower, uint32_t numerator,
+                     uint32_t divisor)
+{
+   if (numerator == AGX_APPLE9_VREG_INVALID ||
+       divisor == AGX_APPLE9_VREG_INVALID)
+      return AGX_APPLE9_VREG_INVALID;
+
+   uint32_t numerator_f = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
+      &numerator, 1, 0);
+   uint32_t divisor_f = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
+      &divisor, 1, 0);
+   uint32_t reciprocal = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_FRCP, AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
+      &divisor_f, 1, 0x03);
+   uint32_t half = apple9_dag_imm(lower, 0x3f000000);
+   uint32_t estimate_sources[3] = {numerator_f, reciprocal, half};
+   uint32_t estimate = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED,
+      estimate_sources, ARRAY_SIZE(estimate_sources), 0);
+   uint32_t quotient = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_F2U32, AGX_APPLE9_ENC_FLOAT_TO_UINT,
+      &estimate, 1, 0);
+   uint32_t zero = apple9_dag_zero(lower);
+   uint32_t product_sources[3] = {quotient, divisor, zero};
+   uint32_t product = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_IMAD, AGX_APPLE9_ENC_INT_MAD_EXTENDED,
+      product_sources, ARRAY_SIZE(product_sources), 0);
+   uint32_t one = apple9_dag_imm(lower, 1);
+   uint32_t increment_sources[2] = {quotient, one};
+   uint32_t incremented = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_IADD, AGX_APPLE9_ENC_INT_ADD_EXTENDED,
+      increment_sources, ARRAY_SIZE(increment_sources), 0);
+
+   return apple9_emit_dag_select_raw(lower, product, numerator, incremented,
+                                     quotient, AGX_APPLE9_SELECT_ULT);
+}
+
+static uint32_t
+apple9_dag_num_workgroups(struct apple9_dag_lower *lower, unsigned component)
+{
+   if (component >= 3) {
+      lower->reason = "Apple9 load_num_workgroups has an invalid component";
+      return AGX_APPLE9_VREG_INVALID;
+   }
+
+   /* Hidden resource 0 is q0 and resource 1 is q1.  Direct dispatches publish
+    * total threads and 1; indirect dispatches publish group counts and local
+    * size.  This is the native normalized package contract. */
+   uint32_t q0 = apple9_dag_hidden_load(lower, 0, component);
+   if (q0 == AGX_APPLE9_VREG_INVALID)
+      return AGX_APPLE9_VREG_INVALID;
+
+   uint32_t divisor;
+   if (lower->nir->info.workgroup_size_variable) {
+      divisor = apple9_dag_system(
+         lower, (struct apple9_system_source){
+                   .selector = 0x98 + component,
+                   .zext16 = true,
+                });
+   } else {
+      const uint32_t local = lower->nir->info.workgroup_size[component];
+      if (!local) {
+         lower->reason =
+            "Apple9 load_num_workgroups has an invalid local size";
+         return AGX_APPLE9_VREG_INVALID;
+      }
+      if (local == 1)
+         return q0;
+      divisor = apple9_dag_imm(lower, local);
+   }
+
+   uint32_t q1 = apple9_dag_hidden_load(lower, 1, component);
+   uint32_t direct = apple9_dag_ceil_udiv(lower, q0, divisor);
+   uint32_t one = apple9_dag_imm(lower, 1);
+   uint32_t mode_sources[2] = {q1, one};
+   uint32_t mode = apple9_dag_emit(
+      lower, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED,
+      mode_sources, ARRAY_SIZE(mode_sources), 0);
+   if (q1 == AGX_APPLE9_VREG_INVALID || direct == AGX_APPLE9_VREG_INVALID ||
+       one == AGX_APPLE9_VREG_INVALID || mode == AGX_APPLE9_VREG_INVALID)
+      return AGX_APPLE9_VREG_INVALID;
+
+   /* q1 == 1 selects the direct ceiling quotient; otherwise q0 is already the
+    * caller's indirect group count. */
+   return apple9_emit_dag_select_raw(lower, mode, one, direct, q0,
+                                     AGX_APPLE9_SELECT_ULT);
+}
 
 static uint32_t
 apple9_lower_dag_source(struct apple9_dag_lower *lower, nir_scalar parent,
@@ -745,25 +898,12 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       if (subgroup_size) {
          /* Native Metal materializes the architectural SIMD width. */
          value = apple9_dag_imm(lower, 32);
+      } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
+                 nir_def_as_intrinsic(scalar.def)->intrinsic ==
+                    nir_intrinsic_load_num_workgroups) {
+         value = apple9_dag_num_workgroups(lower, scalar.comp);
       } else if (apple9_system_source(scalar, &system)) {
-         if (lower->system_vreg[system.selector] == AGX_APPLE9_VREG_INVALID) {
-            enum agx_apple9_vir_opcode op = system.global_id
-                                               ? AGX_APPLE9_VIR_GET_GLOBAL_ID
-                                               : AGX_APPLE9_VIR_GET_SR;
-            enum agx_apple9_encoding encoding =
-               system.zext16 ? AGX_APPLE9_ENC_GET_SR_ZEXT16
-                             : AGX_APPLE9_ENC_GET_SR;
-            uint32_t immediate =
-               system.global_id
-                  ? system.selector - 0xa0
-                  : system.selector | (system.zext16 ? 0 : (0x10u << 8));
-            /* Both GET_SR families have a proven low destination contract.
-             * Immediately move the value to the general bank so the rest of
-             * instruction selection does not inherit that constraint. */
-            lower->system_vreg[system.selector] = apple9_dag_emit_constrained(
-               lower, op, encoding, NULL, 0, immediate);
-         }
-         value = lower->system_vreg[system.selector];
+         value = apple9_dag_system(lower, system);
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_intrinsic &&
                  (nir_def_as_intrinsic(scalar.def)->intrinsic ==
                      nir_intrinsic_load_ssbo ||
@@ -1546,6 +1686,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
    nir_index_ssa_defs(impl);
    struct apple9_dag_lower lower = {
+      .nir = nir,
       .zero_vreg = AGX_APPLE9_VREG_INVALID,
       .loads = loads.data,
       .load_count =

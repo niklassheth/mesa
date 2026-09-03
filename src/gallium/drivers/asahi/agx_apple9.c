@@ -571,15 +571,11 @@ agx_apple9_compute_grid_supported(
          return false;
       if (local[d] > 1024 / threads_per_group)
          return false;
-      threads_per_group *= local[d];
-   }
-
-   uint64_t elements = 1;
-   for (unsigned d = 0; d < 3; ++d) {
-      /* The source NIR byte address is a 32-bit index multiplied by four. */
-      if (global[d] > UINT64_C(0x40000000) / elements)
+      /* The advertised per-axis group limit is also the numerator bound used
+       * by the exact reciprocal ceiling-division proof. */
+      if ((uint64_t)global[d] > (uint64_t)local[d] * 65535)
          return false;
-      elements *= global[d];
+      threads_per_group *= local[d];
    }
 
    return true;
@@ -897,12 +893,13 @@ apple9_build_superset_resource_record(
    uint8_t *package, size_t mapping_size, uint64_t package_base,
    uint32_t resource_table_offset, const struct apple9_compute_abi_desc *abi,
    const uint64_t *resources, unsigned resource_count,
-   const uint32_t global[3])
+   const struct agx_apple9_compute_geometry *geometry)
 {
    const size_t record_size = apple9_compute_resource_record_size_for_abi(abi);
    const size_t division_size = apple9_division_ssbo8_superset.size;
    if (!package || !abi || abi->hidden_resource_count != 3 || !resources ||
-       !global || resource_count == 0 || resource_count > abi->resource_count ||
+       !geometry || resource_count == 0 ||
+       resource_count > abi->resource_count ||
        record_size < AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE ||
        division_size > AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE ||
        !apple9_range_fits(mapping_size,
@@ -922,18 +919,15 @@ apple9_build_superset_resource_record(
           apple9_division_ssbo8_superset.data, division_size);
 
    memset(record, 0, record_size);
-   apple9_put_u64(record + 0x00, record_address + 0x60);
-   apple9_put_u64(record + 0x08, record_address + 0x6c);
+   if (!agx_apple9_build_compute_geometry_fields(
+          record, record_size, record_address, geometry))
+      return false;
    apple9_put_u64(record + 0x10, division_address);
    for (unsigned i = 0; i < abi->resource_count; ++i)
       apple9_put_u64(record + 0x18 + i * sizeof(uint64_t),
                      i < resource_count ? resources[i] : division_address);
    /* qword 11 is the native zero sentinel. */
    apple9_put_u64(record + 0x58, 0);
-   for (unsigned d = 0; d < 3; ++d) {
-      apple9_put_u32(record + 0x60 + d * sizeof(uint32_t), global[d]);
-      apple9_put_u32(record + 0x6c + d * sizeof(uint32_t), 1);
-   }
    return true;
 }
 
@@ -943,10 +937,11 @@ agx_apple9_build_compute_dispatch(
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint32_t state_offset, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count, const uint32_t global[3])
+   unsigned resource_count,
+   const struct agx_apple9_compute_geometry *geometry)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !abi || !resources || !global ||
+   if (!mapping || !abi || !resources || !geometry ||
        resource_count != profile->resource_binding_count)
       return false;
 
@@ -982,7 +977,7 @@ agx_apple9_build_compute_dispatch(
    free(temporary);
    return apple9_build_superset_resource_record(
       package, mapping_size, package_base, resource_table_offset, abi,
-      resources, resource_count, global);
+      resources, resource_count, geometry);
 }
 
 bool
@@ -991,10 +986,11 @@ agx_apple9_build_compute_dispatch_persistent(
    uint64_t package_base, uint32_t main_offset, uint32_t launch_offset,
    uint64_t state_address, uint32_t resource_table_offset,
    const struct agx_apple9_compute_profile *profile, const uint64_t *resources,
-   unsigned resource_count, const uint32_t global[3])
+   unsigned resource_count,
+   const struct agx_apple9_compute_geometry *geometry)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!mapping || !abi || !resources || !global ||
+   if (!mapping || !abi || !resources || !geometry ||
        resource_count != profile->resource_binding_count ||
        (abi->has_dynamic_state && !agx_apple9_compute_state_address_supported(
                                      usc_exec_base, state_address)) ||
@@ -1023,7 +1019,7 @@ agx_apple9_build_compute_dispatch_persistent(
    free(temporary);
    return apple9_build_superset_resource_record(
       package, mapping_size, package_base, resource_table_offset, abi,
-      resources, resource_count, global);
+      resources, resource_count, geometry);
 }
 
 bool
@@ -1064,7 +1060,12 @@ agx_apple9_build_compute_package(
          : 0,
       AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
          AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET,
-      profile, resources, resource_count, (const uint32_t[3]){1, 1, 1});
+      profile, resources, resource_count,
+      &(const struct agx_apple9_compute_geometry){
+         .mode = AGX_APPLE9_COMPUTE_GEOMETRY_DIRECT,
+         .threads = {1, 1, 1},
+         .local = {1, 1, 1},
+      });
    assert(built);
 }
 
@@ -1099,15 +1100,16 @@ agx_apple9_emit_indirect_dispatch(
    const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!out || !abi || profile->variable_local_size ||
-       abi->hidden_resource_count != 3 || !indirect ||
+   if (!out || !abi || abi->hidden_resource_count != 3 || !indirect ||
        (launch & 0x3f) || (indirect & 3) ||
        !apple9_compute_profile_valid(profile, abi))
       return false;
 
    uint64_t threads = 1;
    for (unsigned d = 0; d < 3; ++d) {
-      if (!local[d] || local[d] != profile->local_size[d] ||
+      if (!local[d] ||
+          (!profile->variable_local_size &&
+           local[d] != profile->local_size[d]) ||
           local[d] > 1024 / threads)
          return false;
       threads *= local[d];

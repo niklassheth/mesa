@@ -73,9 +73,12 @@ eight-buffer carrier are loaded from hardcoded paths under
 ```
 
 The carrier resource record has three hidden entries followed by eight visible
-buffer entries and a zero sentinel. The first two hidden entries point to
-per-dispatch grid and unit tuples materialized inside the record. The third
-points to the relocated 8-KiB integer-division helper table in `division.bin`.
+buffer entries and a zero sentinel. For direct dispatch, q0 points to the
+record's total-thread tuple and q1 to `{1,1,1}`. For indirect dispatch, q0 is
+the caller's raw group-count pointer and q1 points to the record's local-size
+scale tuple. The unchanged launch program derives the common execution
+geometry from that tagged representation. The third hidden entry points to the
+relocated 8-KiB integer-division helper table in `division.bin`.
 Unused visible entries are padded with a valid mapped pointer that the compiled
 main cannot reference. The full one-through-eight prefix has passed exact
 hardware output and input/guard-preservation checks through ordinary GLSL,
@@ -170,9 +173,30 @@ Success means exact complete-buffer comparison, not merely command retirement.
 The native cases also verify immutable inputs, poison-filled gaps, leading and
 trailing guards, multiple bindings and dependent addresses. Dedicated cases
 exercise repeated range dispatch, program publication/retirement pressure, and
-ordered reuse of independently compiled programs. `superset-1` through
-`superset-8` specifically compile distinct ordinary GLSL programs and exercise
-every active-resource occupancy of the shared carrier.
+ordered reuse of independently compiled programs.
+`reciprocal-direct`, `reciprocal-retain`, and `reciprocal-materialized` cover
+pending-load handoff, source lifetime, and ordinary-GPR input paths with exact
+FP32 output oracles. `reciprocal-denominators-1-1024` converts every integer
+denominator in the permitted local-size domain with the compiler's ordinary
+U2F and reciprocal path, then checks the returned FP32 values against
+`abs(D * r - 1) <= 2^-18`. On T8132 the worst observed denominator is 981,
+with residual `7.1362592279911041e-8`; no Newton refinement is required for
+the ceiling-division lowering. `ceil-div-grid-domain` executes the compiler's
+complete U2F/reciprocal/FMA/F2U/multiply/compare/correct sequence for eight
+numerators at every denominator, including zero, remainder boundaries, and
+the maximum legal `65535 * D`; all 8,192 exact integer outputs pass on T8132.
+`superset-1` through `superset-8` specifically compile distinct ordinary GLSL
+programs and exercise every active-resource occupancy of the shared carrier.
+
+The indirect-dispatch geometry cases exercise the actual GLES API with CPU-
+and GPU-authored records, nonzero offsets, zero dimensions, and asymmetric 2D
+and 3D grids. `gl_NumWorkGroups` is compiled from the hidden q0/q1 package
+contract and checked in every dimension for direct and indirect execution. It
+does not consume a visible buffer binding or require CPU inspection of the
+indirect record. Direct dispatch computes `ceil(global_threads / local_size)`
+with the measured FP32 reciprocal sequence and one exact integer correction;
+this covers short final workgroups and fixed or runtime local sizes. Indirect
+dispatch returns the caller-provided group count directly.
 
 ## Bring-up boundary
 

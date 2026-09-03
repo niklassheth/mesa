@@ -29,11 +29,18 @@ struct buffer_layout {
 
 struct dispatch_case {
    const char *name;
+   enum {
+      DISPATCH_DIRECT,
+      DISPATCH_INDIRECT_CPU,
+      DISPATCH_INDIRECT_GPU,
+   } source;
+   size_t indirect_offset;
    unsigned local[3];
    unsigned groups[3];
    unsigned width;
    unsigned height;
    unsigned depth;
+   bool report_num_workgroups;
 };
 
 static void
@@ -67,6 +74,13 @@ static GLuint
 build_program(const struct dispatch_case *test)
 {
    char source[2048];
+   const char *fourth_word =
+      test->report_num_workgroups
+         ? "  uvec3 n = gl_NumWorkGroups;\n"
+           "  uint pi = 0xd8000000u | (n.z << 16) | (n.y << 8) | n.x;\n"
+         : "  uint pi = gl_LocalInvocationIndex |"
+           " (gl_WorkGroupSize.x << 8) | (gl_WorkGroupSize.y << 16) |"
+           " (gl_WorkGroupSize.z << 24);\n";
    int length = snprintf(
       source, sizeof(source),
       "#version 310 es\n"
@@ -80,13 +94,11 @@ build_program(const struct dispatch_case *test)
       "  uint pg = 0xa5000000u | (g.z << 16) | (g.y << 8) | g.x;\n"
       "  uint pl = 0xb6000000u | (l.z << 16) | (l.y << 8) | l.x;\n"
       "  uint pw = 0xc7000000u | (w.z << 16) | (w.y << 8) | w.x;\n"
-      "  uint pi = gl_LocalInvocationIndex |"
-      " (gl_WorkGroupSize.x << 8) | (gl_WorkGroupSize.y << 16) |"
-      " (gl_WorkGroupSize.z << 24);\n"
+      "%s"
       "  outbuf.v[i] = uvec4(pg, pl, pw, pi);\n"
       "}\n",
       test->local[0], test->local[1], test->local[2], test->width,
-      test->height);
+      test->height, fourth_word);
    if (length < 0 || (size_t)length >= sizeof(source))
       fail("compute shader source overflow");
 
@@ -116,6 +128,52 @@ build_program(const struct dispatch_case *test)
       glGetProgramInfoLog(program, sizeof(log), &size, log);
       fprintf(stderr, "%s compute link failed: %.*s\n", test->name, size, log);
       fail("compute program link");
+   }
+   return program;
+}
+
+static GLuint
+build_indirect_producer(const struct dispatch_case *test)
+{
+   char source[1024];
+   int length = snprintf(
+      source, sizeof(source),
+      "#version 310 es\n"
+      "layout(local_size_x=1) in;\n"
+      "layout(std430, binding=0) buffer Indirect { uint v[]; } args;\n"
+      "void main() { uint i=gl_GlobalInvocationID.x;"
+      " args.v[i]=(i==0u)?%uu:((i==1u)?%uu:%uu); }\n",
+      test->groups[0], test->groups[1], test->groups[2]);
+   if (length < 0 || (size_t)length >= sizeof(source))
+      fail("indirect producer source overflow");
+
+   GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+   const char *sources[] = {source};
+   glShaderSource(shader, 1, sources, NULL);
+   glCompileShader(shader);
+   GLint ok = GL_FALSE;
+   glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+   if (!ok) {
+      char log[4096];
+      GLsizei size = 0;
+      glGetShaderInfoLog(shader, sizeof(log), &size, log);
+      fprintf(stderr, "%s producer compile failed: %.*s\n", test->name,
+              size, log);
+      fail("indirect producer compile");
+   }
+
+   GLuint program = glCreateProgram();
+   glAttachShader(program, shader);
+   glLinkProgram(program);
+   glDeleteShader(shader);
+   glGetProgramiv(program, GL_LINK_STATUS, &ok);
+   if (!ok) {
+      char log[4096];
+      GLsizei size = 0;
+      glGetProgramInfoLog(program, sizeof(log), &size, log);
+      fprintf(stderr, "%s producer link failed: %.*s\n", test->name, size,
+              log);
+      fail("indirect producer link");
    }
    return program;
 }
@@ -174,15 +232,21 @@ write_expected(uint8_t *expected, const struct buffer_layout *layout,
             const uint32_t local_x = x % test->local[0];
             const uint32_t local_y = y % test->local[1];
             const uint32_t local_z = z % test->local[2];
+            const uint32_t fourth =
+               test->report_num_workgroups
+                  ? 0xd8000000u | (test->groups[2] << 16) |
+                       (test->groups[1] << 8) | test->groups[0]
+                  : (local_x +
+                     test->local[0] *
+                        (local_y + test->local[1] * local_z)) |
+                       (test->local[0] << 8) | (test->local[1] << 16) |
+                       (test->local[2] << 24);
             const uint32_t values[4] = {
                0xa5000000u | (z << 16) | (y << 8) | x,
                0xb6000000u | (local_z << 16) | (local_y << 8) | local_x,
                0xc7000000u | ((z / test->local[2]) << 16) |
                   ((y / test->local[1]) << 8) | (x / test->local[0]),
-               (local_x +
-                test->local[0] * (local_y + test->local[1] * local_z)) |
-                  (test->local[0] << 8) | (test->local[1] << 16) |
-                  (test->local[2] << 24),
+               fourth,
             };
             memcpy(expected + base + index * sizeof(values), values,
                    sizeof(values));
@@ -232,6 +296,85 @@ static const struct dispatch_case geometry_cases[] = {
       .height = 22,
       .depth = 26,
    },
+   {
+      .name = "indirect-grid-2d-asymmetric",
+      .source = DISPATCH_INDIRECT_CPU,
+      .local = {3, 5, 1},
+      .groups = {4, 2, 1},
+      .width = 12,
+      .height = 10,
+      .depth = 1,
+   },
+   {
+      .name = "indirect-grid-3d-asymmetric-offset",
+      .source = DISPATCH_INDIRECT_CPU,
+      .indirect_offset = 20,
+      .local = {2, 2, 2},
+      .groups = {7, 11, 13},
+      .width = 14,
+      .height = 22,
+      .depth = 26,
+   },
+   {
+      .name = "indirect-grid-zero-x",
+      .source = DISPATCH_INDIRECT_CPU,
+      .indirect_offset = 12,
+      .local = {4, 2, 1},
+      .groups = {0, 3, 1},
+      .width = 0,
+      .height = 6,
+      .depth = 1,
+   },
+   {
+      .name = "gpu-produced-indirect-grid-3d",
+      .source = DISPATCH_INDIRECT_GPU,
+      .indirect_offset = 16,
+      .local = {2, 2, 2},
+      .groups = {7, 11, 13},
+      .width = 14,
+      .height = 22,
+      .depth = 26,
+   },
+   {
+      .name = "direct-num-workgroups-asymmetric",
+      .local = {3, 5, 1},
+      .groups = {4, 2, 1},
+      .width = 12,
+      .height = 10,
+      .depth = 1,
+      .report_num_workgroups = true,
+   },
+   {
+      .name = "direct-num-workgroups-nonpower-3d",
+      .local = {3, 5, 7},
+      .groups = {4, 2, 3},
+      .width = 12,
+      .height = 10,
+      .depth = 21,
+      .report_num_workgroups = true,
+   },
+   {
+      .name = "indirect-num-workgroups-3d",
+      .source = DISPATCH_INDIRECT_CPU,
+      .indirect_offset = 28,
+      .local = {2, 2, 2},
+      .groups = {7, 11, 13},
+      .width = 14,
+      .height = 22,
+      .depth = 26,
+      .report_num_workgroups = true,
+   },
+   {
+      .name = "gpu-produced-num-workgroups-3d",
+      .source = DISPATCH_INDIRECT_GPU,
+      .indirect_offset = 24,
+      .local = {2, 2, 2},
+      .groups = {7, 11, 13},
+      .width = 14,
+      .height = 22,
+      .depth = 26,
+      .report_num_workgroups = true,
+   },
 };
 
 const char *const *
@@ -240,6 +383,14 @@ t8132_apple9_geometry_case_names(size_t *count)
    static const char *const names[] = {
       "full-grid-2d-asymmetric",
       "full-grid-3d-asymmetric",
+      "indirect-grid-2d-asymmetric",
+      "indirect-grid-3d-asymmetric-offset",
+      "indirect-grid-zero-x",
+      "gpu-produced-indirect-grid-3d",
+      "direct-num-workgroups-asymmetric",
+      "direct-num-workgroups-nonpower-3d",
+      "indirect-num-workgroups-3d",
+      "gpu-produced-num-workgroups-3d",
    };
    *count = sizeof(names) / sizeof(names[0]);
    return names;
@@ -288,7 +439,47 @@ t8132_apple9_run_geometry_case(const char *name)
    glUseProgram(program);
    glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, output,
                      payload_offset(&layout, 0), PAYLOAD_BYTES);
-   glDispatchCompute(test->groups[0], test->groups[1], test->groups[2]);
+   GLuint indirect_buffer = 0;
+   GLuint producer = 0;
+   if (test->source == DISPATCH_DIRECT) {
+      glDispatchCompute(test->groups[0], test->groups[1], test->groups[2]);
+   } else {
+      const size_t record_size = 3 * sizeof(uint32_t);
+      const size_t indirect_size = test->indirect_offset + record_size;
+      uint8_t *indirect_data = malloc(indirect_size);
+      if (!indirect_data)
+         fail("allocate indirect record");
+      memset(indirect_data, 0xa5, indirect_size);
+      if (test->source == DISPATCH_INDIRECT_CPU) {
+         memcpy(indirect_data + test->indirect_offset, test->groups,
+                3 * sizeof(uint32_t));
+      }
+
+      glGenBuffers(1, &indirect_buffer);
+      glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, indirect_buffer);
+      glBufferData(GL_DISPATCH_INDIRECT_BUFFER, indirect_size, indirect_data,
+                   GL_DYNAMIC_DRAW);
+      free(indirect_data);
+      check_gl("create indirect record");
+
+      if (test->source == DISPATCH_INDIRECT_GPU) {
+         producer = build_indirect_producer(test);
+         glUseProgram(producer);
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, indirect_buffer,
+                           test->indirect_offset, record_size);
+         glDispatchCompute(3, 1, 1);
+         glMemoryBarrier(GL_COMMAND_BARRIER_BIT |
+                         GL_SHADER_STORAGE_BARRIER_BIT);
+         check_gl("produce indirect record");
+
+         glUseProgram(program);
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, output,
+                           payload_offset(&layout, 0), PAYLOAD_BYTES);
+      }
+
+      glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, indirect_buffer);
+      glDispatchComputeIndirect(test->indirect_offset);
+   }
    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
                    GL_SHADER_STORAGE_BARRIER_BIT);
    glFinish();
@@ -298,6 +489,10 @@ t8132_apple9_run_geometry_case(const char *name)
    verify_complete_buffer(output, expected, layout.buffer_bytes);
 
    glDeleteProgram(program);
+   if (producer)
+      glDeleteProgram(producer);
+   if (indirect_buffer)
+      glDeleteBuffers(1, &indirect_buffer);
    glDeleteBuffers(1, &output);
    free(expected);
 }
