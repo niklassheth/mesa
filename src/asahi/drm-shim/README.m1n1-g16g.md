@@ -43,7 +43,8 @@ fails during compilation and the triangle is not a regression gate.
 
 The supported NIR surface is intentionally bounded. It includes arbitrary
 u32 constants; integer add/subtract, negate, multiply, AND/OR/XOR/NOT, shifts,
-signed and unsigned min/max; core float arithmetic and FMA; comparisons and
+signed and unsigned min/max; core float arithmetic, accurate FP32 reciprocal,
+and FMA; comparisons and
 straight-line select; scalar/vector device loads and stores; general constant,
 affine, and runtime buffer indexing; 8/16/32-bit memory formats; and the
 measured system values and dense dispatch geometries used by the fixtures.

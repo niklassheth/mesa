@@ -112,6 +112,68 @@ TEST(Apple9Machine, FullFileBoundaries)
              nullptr);
 }
 
+TEST(Apple9Machine, ReciprocalHasAsymmetricRegisterFiles)
+{
+   EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
+      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_DEST, 95, 32));
+   EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
+      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_DEST, 96, 32));
+   EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
+      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_SRC0, 63, 32));
+   EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
+      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_SRC0, 64, 32));
+}
+
+TEST(Apple9Packer, ReciprocalPacksHandoffLifetimeAndNativeResultHint)
+{
+   const uint8_t phys[] = {18, 7};
+   agx_apple9_vir_instr reciprocal = {
+      .op = AGX_APPLE9_VIR_FRCP,
+      .encoding = AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
+      .dest = 0,
+      .dest_components = 1,
+      .src = {1},
+      .immediate = 0x02,
+      .nr_srcs = 1,
+      .scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_6,
+   };
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&reciprocal, phys, &packed,
+                                               &reason))
+      << (reason ? reason : "no diagnostic");
+   static const uint8_t pending_release[] = {
+      0xaf, 0x00, 0x56, 0x24, 0x02,
+      0x1c, 0x10, 0x48, 0x20, 0x00,
+   };
+   ASSERT_EQ(packed.length, sizeof(pending_release));
+   EXPECT_EQ(memcmp(packed.bytes, pending_release, sizeof(pending_release)), 0);
+
+   reciprocal.immediate = 0x03;
+   reciprocal.live_after_mask = 1;
+   reciprocal.scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&reciprocal, phys, &packed,
+                                               &reason))
+      << (reason ? reason : "no diagnostic");
+   static const uint8_t ordinary_retain[] = {
+      0xaf, 0x00, 0x54, 0x24, 0x03,
+      0x1c, 0x00, 0x48, 0x20, 0x00,
+   };
+   ASSERT_EQ(packed.length, sizeof(ordinary_retain));
+   EXPECT_EQ(memcmp(packed.bytes, ordinary_retain, sizeof(ordinary_retain)), 0);
+
+   for (auto slot : {AGX_APPLE9_SCOREBOARD_SLOT_4,
+                     AGX_APPLE9_SCOREBOARD_SLOT_5}) {
+      reciprocal.scoreboard_slot = slot;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&reciprocal, phys, &packed,
+                                                  &reason))
+         << reason;
+      const unsigned encoded_mask =
+         (packed.bytes[1] >> 4) | ((packed.bytes[2] & 0x3) << 4);
+      EXPECT_EQ(encoded_mask, 1u << (slot - 1));
+   }
+}
+
 TEST(Apple9Packer, RawLoadTokensPackIndependentlyOfIndexAndFraming)
 {
    static const struct {
@@ -667,6 +729,40 @@ TEST(Apple9Machine, StoreDataAndIndexAreAllocatable)
       agx_apple9_encoding_info(AGX_APPLE9_ENC_DEVICE_STORE)->allocator_safe);
 }
 
+TEST(Apple9Machine, DependencyLayoutsAreEncodingProperties)
+{
+   static const struct {
+      agx_apple9_encoding encoding;
+      agx_apple9_dependency_layout layout;
+   } cases[] = {
+      {AGX_APPLE9_ENC_FLOAT2_COMPACT,
+       AGX_APPLE9_DEPENDENCY_INDEX_45_47},
+      {AGX_APPLE9_ENC_FLOAT3_EXTENDED,
+       AGX_APPLE9_DEPENDENCY_INDEX_61_63},
+      {AGX_APPLE9_ENC_INT_ADD_EXTENDED,
+       AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_INT_MAD_EXTENDED,
+       AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_UINT_TO_FLOAT,
+       AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_FLOAT_TO_UINT,
+       AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
+       AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_SHIFT_EXTENDED,
+       AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_DEVICE_STORE,
+       AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_LOGIC_EXTENDED,
+       AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63},
+      {AGX_APPLE9_ENC_DEVICE_LOAD, AGX_APPLE9_DEPENDENCY_NONE},
+   };
+
+   for (const auto &test : cases)
+      EXPECT_EQ(agx_apple9_encoding_info(test.encoding)->dependency_layout,
+                test.layout);
+}
+
 TEST(Apple9Packer, RegisterFormsMatchValidatedProbeTemplates)
 {
    uint8_t phys[] = {64, 2, 95, 5};
@@ -812,6 +908,83 @@ TEST(Apple9Packer, ExtendedLogicUsesOneHotPendingSlotMask)
          EXPECT_EQ(mask, slot == 0 ? 0u : 1u << (slot - 1))
             << "op=" << unsigned(op) << " slot=" << slot;
       }
+   }
+}
+
+TEST(Apple9Packer, IntegerFamilyUsesSharedOneHotDependencyLayout)
+{
+   uint8_t phys[] = {4, 2, 3, 5};
+   agx_apple9_vir_instr instructions[] = {
+      {
+         .op = AGX_APPLE9_VIR_IADD,
+         .encoding = AGX_APPLE9_ENC_INT_ADD_EXTENDED,
+         .dest = 0,
+         .src = {1, 2},
+         .nr_srcs = 2,
+      },
+      {
+         .op = AGX_APPLE9_VIR_IMAD,
+         .encoding = AGX_APPLE9_ENC_INT_MAD_EXTENDED,
+         .dest = 0,
+         .src = {1, 2, 3},
+         .nr_srcs = 3,
+      },
+      {
+         .op = AGX_APPLE9_VIR_U2F32,
+         .encoding = AGX_APPLE9_ENC_UINT_TO_FLOAT,
+         .dest = 0,
+         .src = {1},
+         .nr_srcs = 1,
+      },
+      {
+         .op = AGX_APPLE9_VIR_F2U32,
+         .encoding = AGX_APPLE9_ENC_FLOAT_TO_UINT,
+         .dest = 0,
+         .src = {1},
+         .nr_srcs = 1,
+      },
+      {
+         .op = AGX_APPLE9_VIR_FRCP,
+         .encoding = AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
+         .dest = 0,
+         .src = {1},
+         .immediate = 0x02,
+         .nr_srcs = 1,
+      },
+      {
+         .op = AGX_APPLE9_VIR_ISHR,
+         .encoding = AGX_APPLE9_ENC_SHIFT_EXTENDED,
+         .dest = 0,
+         .src = {1},
+         .immediate = 3,
+         .nr_srcs = 1,
+      },
+   };
+
+   const char *reason = nullptr;
+   for (auto &instruction : instructions) {
+      for (unsigned slot = 0; slot <= 6; ++slot) {
+         instruction.scoreboard_slot = slot;
+         agx_apple9_packed_instruction packed = {};
+         ASSERT_TRUE(agx_apple9_pack_vir_instruction(
+            &instruction, phys, &packed, &reason))
+            << "op=" << unsigned(instruction.op) << " slot=" << slot << " "
+            << (reason ? reason : "");
+         const unsigned mask =
+            (packed.bytes[1] >> 4) | ((packed.bytes[2] & 0x3) << 4);
+         EXPECT_EQ(mask, slot == 0 ? 0u : 1u << (slot - 1))
+            << "op=" << unsigned(instruction.op) << " slot=" << slot;
+      }
+   }
+
+   for (unsigned slot = 0; slot <= 6; ++slot) {
+      agx_apple9_packed_instruction packed = {};
+      ASSERT_TRUE(agx_apple9_pack_device_store_scalar(
+         4, 2, 0, 32, (agx_apple9_scoreboard_slot)slot, true, &packed));
+      const unsigned mask =
+         (packed.bytes[1] >> 4) | ((packed.bytes[2] & 0x3) << 4);
+      EXPECT_EQ(mask, slot == 0 ? 0u : 1u << (slot - 1))
+         << "store slot=" << slot;
    }
 }
 
@@ -1206,6 +1379,55 @@ TEST(Apple9Vir, SevenIndependentPendingGroupsMaterializeOldestHandoff)
       }
    }
    EXPECT_TRUE(general_materialization);
+   agx_apple9_vir_finish(&program);
+}
+
+TEST(Apple9Vir, ReciprocalUsesSharedOneHotDependencySlots)
+{
+   agx_apple9_vir_program program;
+   agx_apple9_vir_init(&program);
+   uint32_t index = agx_apple9_vir_input(&program, 1);
+   uint32_t ordinary = agx_apple9_vir_input(&program, 2);
+   uint32_t loads[5];
+
+   for (unsigned i = 0; i < ARRAY_SIZE(loads); ++i) {
+      loads[i] = agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_DEVICE_LOAD,
+                                     AGX_APPLE9_ENC_DEVICE_LOAD, &index, 1, i);
+      ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(
+         &program, loads[i], 0, AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
+   }
+
+   uint32_t reciprocal = agx_apple9_vir_emit(
+      &program, AGX_APPLE9_VIR_FRCP, AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
+      &loads[4], 1, 0x02);
+   for (unsigned i = 0; i < 4; ++i) {
+      uint32_t sources[] = {loads[i], ordinary};
+      agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_FADD,
+                          AGX_APPLE9_ENC_FLOAT2_COMPACT, sources, 2, 0);
+   }
+   program.output = reciprocal;
+
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_assign_vir_scoreboard_slots(&program, &reason))
+      << (reason ? reason : "");
+
+   unsigned seen_loads = 0, materializations = 0, reciprocals = 0;
+   const uint8_t expected_slots[] = {6, 1, 2, 3, 4};
+   for (unsigned i = 0; i < program.instruction_count; ++i) {
+      const auto &instruction = program.instructions[i];
+      if (instruction.op == AGX_APPLE9_VIR_DEVICE_LOAD) {
+         EXPECT_EQ(instruction.producer_scoreboard_slot,
+                   expected_slots[seen_loads++]);
+      }
+      materializations += instruction.scoreboard_materialize;
+      if (instruction.op == AGX_APPLE9_VIR_FRCP) {
+         ++reciprocals;
+         EXPECT_EQ(instruction.scoreboard_slot, AGX_APPLE9_SCOREBOARD_SLOT_4);
+      }
+   }
+   EXPECT_EQ(seen_loads, ARRAY_SIZE(loads));
+   EXPECT_EQ(materializations, 0u);
+   EXPECT_EQ(reciprocals, 1u);
    agx_apple9_vir_finish(&program);
 }
 
@@ -2018,6 +2240,48 @@ apple9_arbitrary_float_shader()
    return b.shader;
 }
 
+enum apple9_reciprocal_shape {
+   APPLE9_RECIPROCAL_DIRECT_STORE,
+   APPLE9_RECIPROCAL_RETAIN_SOURCE,
+   APPLE9_RECIPROCAL_MATERIALIZED_SOURCE,
+   APPLE9_RECIPROCAL_RESULT_FANOUT,
+};
+
+static nir_shader *
+apple9_reciprocal_shader(enum apple9_reciprocal_shape shape)
+{
+   nir_builder b = apple9_compute_builder("apple9_reciprocal");
+   b.shader->info.num_ssbos =
+      shape == APPLE9_RECIPROCAL_MATERIALIZED_SOURCE ? 3 : 2;
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *offset = nir_imul_imm(&b, gid, 4);
+   nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1), offset,
+                              .access = ACCESS_NON_WRITEABLE);
+   nir_def *source = x;
+   if (shape == APPLE9_RECIPROCAL_MATERIALIZED_SOURCE) {
+      nir_def *y = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 2), offset,
+                                 .access = ACCESS_NON_WRITEABLE);
+      source = nir_fadd(&b, x, y);
+   }
+
+   nir_def *reciprocal = nir_frcp(&b, source);
+   if (shape == APPLE9_RECIPROCAL_RESULT_FANOUT) {
+      /* Make the first use a store and the later use an ALU operation.  The
+       * native result hint describes the complete lifetime, not merely the
+       * first consumer. */
+      apple9_store_output(&b, gid, reciprocal);
+      apple9_store_output(&b, nir_iadd_imm(&b, gid, 64),
+                          nir_fadd(&b, reciprocal, source));
+      return b.shader;
+   }
+
+   nir_def *result = shape == APPLE9_RECIPROCAL_RETAIN_SOURCE
+                        ? nir_fadd(&b, reciprocal, source)
+                        : reciprocal;
+   apple9_store_output(&b, gid, result);
+   return b.shader;
+}
+
 static nir_shader *
 apple9_vector_load_shader()
 {
@@ -2442,6 +2706,51 @@ TEST(Apple9Compiler, GeneralIntegerAndFloatDagsCompile)
                          AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
    apple9_expect_compile(apple9_arbitrary_float_shader(),
                          AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
+}
+
+TEST(Apple9Compiler, ReciprocalUsesNativeHandoffAndLifetimeForms)
+{
+   static const struct {
+      enum apple9_reciprocal_shape shape;
+      uint8_t handoff;
+      uint8_t result_hint;
+      uint8_t source_lifetime;
+   } cases[] = {
+      {APPLE9_RECIPROCAL_DIRECT_STORE, 0x56, 0x02, 0x10},
+      {APPLE9_RECIPROCAL_RETAIN_SOURCE, 0x56, 0x03, 0x00},
+      {APPLE9_RECIPROCAL_MATERIALIZED_SOURCE, 0x54, 0x02, 0x10},
+      {APPLE9_RECIPROCAL_RESULT_FANOUT, 0x56, 0x03, 0x00},
+   };
+
+   for (const auto &test : cases) {
+      SCOPED_TRACE(testing::Message() << "shape=" << test.shape);
+      nir_shader *nir = apple9_reciprocal_shader(test.shape);
+      struct agx_shader_part compiled = {};
+      struct agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(
+         agx_compile_apple9_tiny(nir, &compiled, &profile, &reason))
+         << (reason ? reason : "no diagnostic");
+
+      const uint8_t *binary = (const uint8_t *)compiled.binary;
+      unsigned reciprocals = 0;
+      for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i) {
+         const uint8_t *bytes = binary + i;
+         if (bytes[0] != 0xaf || bytes[1] != 0x00 || bytes[7] != 0x48 ||
+             bytes[8] != 0x20 || bytes[9] != 0x00)
+            continue;
+         ++reciprocals;
+         EXPECT_EQ(bytes[2], test.handoff);
+         EXPECT_EQ(bytes[4], test.result_hint);
+         EXPECT_EQ(bytes[6], test.source_lifetime);
+         EXPECT_LT(bytes[3] >> 1, AGX_APPLE9_GPR_COUNT);
+         EXPECT_LT(bytes[5] >> 2, 64u);
+      }
+      EXPECT_EQ(reciprocals, 1u);
+      EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
+      free(compiled.binary);
+      ralloc_free(nir);
+   }
 }
 
 TEST(Apple9Compiler, VectorLoadsUseOneNativeScoreboardTuple)

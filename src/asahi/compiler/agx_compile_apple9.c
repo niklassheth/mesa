@@ -621,6 +621,7 @@ apple9_instruction_is_in_subset(nir_instr *instr)
       case nir_op_fadd:
       case nir_op_fsub:
       case nir_op_fmul:
+      case nir_op_frcp:
       case nir_op_fmin:
       case nir_op_fmax:
       case nir_op_ffma:
@@ -1251,6 +1252,12 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                   lower, nir_scalar_chase_alu_src(scalar, 0), if_true,
                   if_false);
             }
+         } else if (op == nir_op_frcp) {
+            uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
+            if (source != AGX_APPLE9_VREG_INVALID)
+               value = apple9_dag_emit(
+                  lower, AGX_APPLE9_VIR_FRCP,
+                  AGX_APPLE9_ENC_FLOAT_RECIPROCAL, &source, 1, 0x03);
          } else if (op == nir_op_u2f32 || op == nir_op_i2f32 ||
                     op == nir_op_f2i32 || op == nir_op_f2u32) {
             uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
@@ -1894,6 +1901,36 @@ apple9_infer_device_load_index_contracts(struct agx_apple9_vir_program *program)
    }
 }
 
+static void
+apple9_infer_reciprocal_result_hints(struct agx_apple9_vir_program *program)
+{
+   for (unsigned i = 0; i < program->instruction_count; ++i) {
+      struct agx_apple9_vir_instr *reciprocal = &program->instructions[i];
+      if (reciprocal->op != AGX_APPLE9_VIR_FRCP)
+         continue;
+
+      /* Native Metal selects 0x02 when the result goes directly to memory
+       * and 0x03 when an ALU-family instruction consumes it. Hardware shows
+       * bit 0 is output-inert in the measured low-pressure forms, but keep
+       * the native distinction until its pressure behavior is understood. */
+      reciprocal->immediate = 0x02;
+      for (unsigned j = i + 1; j < program->instruction_count; ++j) {
+         const struct agx_apple9_vir_instr *consumer =
+            &program->instructions[j];
+         bool reads_result = false;
+         for (unsigned s = 0; s < consumer->nr_srcs; ++s)
+            reads_result |= consumer->src[s] == reciprocal->dest;
+         if (!reads_result)
+            continue;
+
+         if (consumer->op != AGX_APPLE9_VIR_DEVICE_STORE) {
+            reciprocal->immediate = 0x03;
+            break;
+         }
+      }
+   }
+}
+
 static bool
 apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
                    struct agx_apple9_compute_profile *profile,
@@ -2035,6 +2072,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
 
    if (!agx_apple9_assign_vir_scoreboard_slots(&lower.program, reason))
       goto fail;
+
+   apple9_infer_reciprocal_result_hints(&lower.program);
 
    /* The byte/subword source selector is not generalized yet.  Scoreboard
     * materialization may have replaced the original load SSA, so constrain

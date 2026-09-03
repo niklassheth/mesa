@@ -321,6 +321,27 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_FLOAT_RECIPROCAL] =
+      {
+         .name = "float_reciprocal",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
+         .operands =
+            {
+               /* EXP-M4-41 exhaustively validates the descriptor geometry:
+                * byte 3 names r0..r95 as dst<<1, while byte 5 names only
+                * r0..r63 as src<<2. */
+               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
    [AGX_APPLE9_ENC_INT_ADD_EXTENDED] =
       {
          .name = "int_add_extended",

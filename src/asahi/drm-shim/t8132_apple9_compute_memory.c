@@ -18,6 +18,10 @@
 #define VALUE_COUNT        64u
 #define INPUT_EXTRA_VALUES (VALUE_COUNT * 3u)
 #define LOCAL_SIZE_X       32u
+#define RECIPROCAL_DENOMINATOR_COUNT 1024u
+#define CEIL_DIV_CASES_PER_DENOMINATOR 8u
+#define CEIL_DIV_CASE_COUNT                                                \
+   (RECIPROCAL_DENOMINATOR_COUNT * CEIL_DIV_CASES_PER_DENOMINATOR)
 #define PAYLOAD_BYTES   ((VALUE_COUNT + INPUT_EXTRA_VALUES) * sizeof(uint32_t))
 #define MIN_GUARD_BYTES 256u
 
@@ -98,6 +102,11 @@ enum workload {
    WORKLOAD_VARIABLE_USHR,
    WORKLOAD_LOADED_COMPARE,
    WORKLOAD_LOADED_FLOAT_DAG,
+   WORKLOAD_RECIPROCAL_DIRECT,
+   WORKLOAD_RECIPROCAL_RETAIN,
+   WORKLOAD_RECIPROCAL_MATERIALIZED,
+   WORKLOAD_RECIPROCAL_DENOMINATORS,
+   WORKLOAD_CEIL_DIV_GRID_DOMAIN,
    WORKLOAD_PRESSURE40,
    WORKLOAD_FOUR_RESOURCE_MIX,
 };
@@ -164,6 +173,16 @@ workload_name(enum workload workload)
       return "loaded-compare";
    case WORKLOAD_LOADED_FLOAT_DAG:
       return "loaded-float-dag";
+   case WORKLOAD_RECIPROCAL_DIRECT:
+      return "reciprocal-direct";
+   case WORKLOAD_RECIPROCAL_RETAIN:
+      return "reciprocal-retain";
+   case WORKLOAD_RECIPROCAL_MATERIALIZED:
+      return "reciprocal-materialized";
+   case WORKLOAD_RECIPROCAL_DENOMINATORS:
+      return "reciprocal-denominators-1-1024";
+   case WORKLOAD_CEIL_DIV_GRID_DOMAIN:
+      return "ceil-div-grid-domain";
    case WORKLOAD_PRESSURE40:
       return "pressure40";
    case WORKLOAD_FOUR_RESOURCE_MIX:
@@ -513,6 +532,47 @@ build_program(enum workload workload)
       "void main(){uint i=gl_GlobalInvocationID.x;float x=a.v[i],y=b.v[i];"
       "float s=x+y,d=x-y;o.v[i]=s*d+min(x,y);}\n";
 
+   static const char reciprocal_direct[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { float v[]; } a;\n"
+      "layout(std430,binding=1) buffer O { float v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;o.v[i]=1.0/a.v[i];}\n";
+
+   static const char reciprocal_retain[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { float v[]; } a;\n"
+      "layout(std430,binding=1) buffer O { float v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;float x=a.v[i];"
+      "o.v[i]=(1.0/x)+x;}\n";
+
+   static const char reciprocal_materialized[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer A { float v[]; } a;\n"
+      "layout(std430,binding=1) readonly buffer B { float v[]; } b;\n"
+      "layout(std430,binding=2) buffer O { float v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "o.v[i]=1.0/(a.v[i]+b.v[i]);}\n";
+
+   static const char reciprocal_denominators[] =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;"
+      "o.v[i]=floatBitsToUint(1.0/float(i+1u));}\n";
+
+   static const char ceil_div_grid_domain[] =
+      "#version 320 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer N { uint v[]; } n;\n"
+      "layout(std430,binding=1) readonly buffer D { uint v[]; } d;\n"
+      "layout(std430,binding=2) buffer O { uint v[]; } o;\n"
+      "void main(){uint i=gl_GlobalInvocationID.x;uint nn=n.v[i],dd=d.v[i];"
+      "uint q=uint(fma(float(nn),1.0/float(dd),0.5));uint p=q*dd;"
+      "o.v[i]=(p<nn)?q+1u:q;}\n";
+
    static const char pressure40[] =
       "#version 310 es\n"
       "layout(local_size_x=32) in;\n"
@@ -633,6 +693,21 @@ build_program(enum workload workload)
    case WORKLOAD_LOADED_FLOAT_DAG:
       source = loaded_float_dag;
       break;
+   case WORKLOAD_RECIPROCAL_DIRECT:
+      source = reciprocal_direct;
+      break;
+   case WORKLOAD_RECIPROCAL_RETAIN:
+      source = reciprocal_retain;
+      break;
+   case WORKLOAD_RECIPROCAL_MATERIALIZED:
+      source = reciprocal_materialized;
+      break;
+   case WORKLOAD_RECIPROCAL_DENOMINATORS:
+      source = reciprocal_denominators;
+      break;
+   case WORKLOAD_CEIL_DIV_GRID_DOMAIN:
+      source = ceil_div_grid_domain;
+      break;
    case WORKLOAD_PRESSURE40:
       source = pressure40;
       break;
@@ -713,6 +788,16 @@ input_c_bits(size_t slot, uint32_t element)
    return value;
 }
 
+static uint32_t
+reciprocal_input_bits(size_t slot, uint32_t element)
+{
+   /* Cycle through exact normal powers of two from 2^-10 through 2^10. The
+    * reciprocal and the retain-case sum therefore both have exact FP32
+    * oracles, independent of the API's allowed reciprocal error. */
+   unsigned exponent = 117u + ((element + 7u * slot) % 21u);
+   return exponent << 23;
+}
+
 static size_t
 payload_offset(const struct buffer_layout *layout, size_t slot)
 {
@@ -786,6 +871,29 @@ seed_inputs(uint8_t *input_a, uint8_t *input_b, uint8_t *input_c,
                     input_b_bits(slot, i));
          write_word(input_c, base + i * sizeof(uint32_t),
                     input_c_bits(slot, i));
+      }
+   }
+}
+
+static void
+seed_reciprocal_inputs(enum workload workload, uint8_t *input_a,
+                       uint8_t *input_b, const struct buffer_layout *layout,
+                       size_t slot_count)
+{
+   if (workload != WORKLOAD_RECIPROCAL_DIRECT &&
+       workload != WORKLOAD_RECIPROCAL_RETAIN &&
+       workload != WORKLOAD_RECIPROCAL_MATERIALIZED)
+      return;
+
+   for (size_t slot = 0; slot < slot_count; ++slot) {
+      const size_t base = payload_offset(layout, slot);
+      for (uint32_t i = 0; i < VALUE_COUNT + INPUT_EXTRA_VALUES; ++i) {
+         float x = bits_float(reciprocal_input_bits(slot, i));
+         float a = workload == WORKLOAD_RECIPROCAL_MATERIALIZED ? x * 0.25f
+                                                                 : x;
+         float b = x * 0.75f;
+         write_word(input_a, base + i * sizeof(uint32_t), float_bits(a));
+         write_word(input_b, base + i * sizeof(uint32_t), float_bits(b));
       }
    }
 }
@@ -947,6 +1055,25 @@ write_expected_output(enum workload workload, uint8_t *output,
          result = float_bits(sum * difference + (a[0] < b ? a[0] : b));
          break;
       }
+      case WORKLOAD_RECIPROCAL_DIRECT: {
+         float x = bits_float(reciprocal_input_bits(slot, i));
+         result = float_bits(1.0f / x);
+         break;
+      }
+      case WORKLOAD_RECIPROCAL_RETAIN: {
+         float x = bits_float(reciprocal_input_bits(slot, i));
+         result = float_bits((1.0f / x) + x);
+         break;
+      }
+      case WORKLOAD_RECIPROCAL_MATERIALIZED: {
+         float x = bits_float(reciprocal_input_bits(slot, i));
+         result = float_bits(1.0f / x);
+         break;
+      }
+      case WORKLOAD_RECIPROCAL_DENOMINATORS:
+      case WORKLOAD_CEIL_DIV_GRID_DOMAIN:
+         fail("workload uses a dedicated oracle");
+         break;
       case WORKLOAD_PRESSURE40:
          for (unsigned j = 0; j < 40; ++j)
             result += input_a_bits(slot, (i + j) & 255u);
@@ -995,6 +1122,212 @@ verify_buffer(GLuint buffer, const char *name, const uint8_t *expected,
    report_byte_mismatch(name, mapped, expected, size);
    if (!glUnmapBuffer(GL_SHADER_STORAGE_BUFFER))
       fail("unmap guarded buffer");
+}
+
+static void
+run_reciprocal_denominator_case(void)
+{
+   GLint alignment_value = 0;
+   glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &alignment_value);
+   if (alignment_value <= 0)
+      fail("invalid reciprocal SSBO alignment");
+
+   const size_t alignment = (size_t)alignment_value > sizeof(uint32_t)
+                               ? (size_t)alignment_value
+                               : sizeof(uint32_t);
+   const size_t payload_offset = align_up(MIN_GUARD_BYTES, alignment);
+   const size_t payload_size =
+      RECIPROCAL_DENOMINATOR_COUNT * sizeof(uint32_t);
+   const size_t buffer_size = payload_offset + payload_size + MIN_GUARD_BYTES;
+   uint8_t *initial = malloc(buffer_size);
+   if (!initial)
+      fail("allocate reciprocal denominator buffer");
+   seed_buffer(initial, buffer_size, 0);
+
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, buffer_size, initial,
+                GL_DYNAMIC_COPY);
+   glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer, payload_offset,
+                     payload_size);
+   check_gl("create reciprocal denominator buffer");
+
+   GLuint program = build_program(WORKLOAD_RECIPROCAL_DENOMINATORS);
+   glUseProgram(program);
+   glDispatchCompute(RECIPROCAL_DENOMINATOR_COUNT / LOCAL_SIZE_X, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   check_gl("execute reciprocal denominator sweep");
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   const uint8_t *mapped =
+      glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer_size,
+                       GL_MAP_READ_BIT);
+   if (!mapped)
+      fail("map reciprocal denominator buffer");
+
+   report_byte_mismatch("reciprocal leading guard", mapped, initial,
+                        payload_offset);
+   report_byte_mismatch("reciprocal trailing guard",
+                        mapped + payload_offset + payload_size,
+                        initial + payload_offset + payload_size,
+                        MIN_GUARD_BYTES);
+
+   const double bound = 0x1p-18;
+   double worst_error = 0.0;
+   uint32_t worst_denominator = 0;
+   uint32_t worst_bits = 0;
+   for (uint32_t denominator = 1;
+        denominator <= RECIPROCAL_DENOMINATOR_COUNT; ++denominator) {
+      uint32_t bits = 0;
+      memcpy(&bits,
+             mapped + payload_offset +
+                (denominator - 1u) * sizeof(uint32_t),
+             sizeof(bits));
+      float reciprocal = bits_float(bits);
+      if ((bits & 0x80000000u) || (bits & 0x7f800000u) == 0x7f800000u ||
+          reciprocal == 0.0f) {
+         fprintf(stderr, "reciprocal D=%u returned bits=%#010x\n",
+                 denominator, bits);
+         fail("invalid reciprocal result");
+      }
+
+      const double product = (double)denominator * (double)reciprocal;
+      const double error = product >= 1.0 ? product - 1.0 : 1.0 - product;
+      if (error > worst_error) {
+         worst_error = error;
+         worst_denominator = denominator;
+         worst_bits = bits;
+      }
+      if (error > bound) {
+         fprintf(stderr,
+                 "reciprocal D=%u bits=%#010x value=%a residual=%.17g "
+                 "bound=%.17g\n",
+                 denominator, bits, (double)reciprocal, error, bound);
+         fail("reciprocal precision contract violated");
+      }
+   }
+
+   printf("T8132_APPLE9_RECIPROCAL_PRECISION_PASS denominators=%u "
+          "worst_d=%u worst_bits=%#010x worst_value=%a residual=%.17g "
+          "bound=%.17g\n",
+          RECIPROCAL_DENOMINATOR_COUNT, worst_denominator, worst_bits,
+          (double)bits_float(worst_bits), worst_error, bound);
+
+   if (!glUnmapBuffer(GL_SHADER_STORAGE_BUFFER))
+      fail("unmap reciprocal denominator buffer");
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(initial);
+}
+
+static uint32_t
+ceil_div_numerator(uint32_t denominator, unsigned variant)
+{
+   switch (variant) {
+   case 0:
+      return 0;
+   case 1:
+      return 1;
+   case 2:
+      return denominator - 1u;
+   case 3:
+      return denominator;
+   case 4:
+      return denominator + 1u;
+   case 5:
+      return 65535u * denominator - 1u;
+   case 6:
+      return 65535u * denominator;
+   case 7: {
+      uint32_t quotient = (denominator * 31337u) % 65535u;
+      uint32_t remainder = denominator == 1u
+                              ? 0u
+                              : ((denominator * 97u + 17u) % denominator) + 1u;
+      return quotient * denominator + remainder;
+   }
+   default:
+      fail("invalid ceil-div test variant");
+      return 0;
+   }
+}
+
+static void
+run_ceil_div_grid_domain_case(void)
+{
+   GLint alignment_value = 0;
+   glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &alignment_value);
+   if (alignment_value <= 0)
+      fail("invalid ceil-div SSBO alignment");
+
+   const size_t alignment = (size_t)alignment_value > sizeof(uint32_t)
+                               ? (size_t)alignment_value
+                               : sizeof(uint32_t);
+   const size_t payload_offset = align_up(MIN_GUARD_BYTES, alignment);
+   const size_t payload_size = CEIL_DIV_CASE_COUNT * sizeof(uint32_t);
+   const size_t buffer_size = payload_offset + payload_size + MIN_GUARD_BYTES;
+   uint8_t *numerators = malloc(buffer_size);
+   uint8_t *denominators = malloc(buffer_size);
+   uint8_t *expected = malloc(buffer_size);
+   if (!numerators || !denominators || !expected)
+      fail("allocate ceil-div buffers");
+
+   seed_buffer(numerators, buffer_size, 0);
+   seed_buffer(denominators, buffer_size, 1);
+   seed_buffer(expected, buffer_size, 2);
+   for (uint32_t denominator = 1;
+        denominator <= RECIPROCAL_DENOMINATOR_COUNT; ++denominator) {
+      for (unsigned variant = 0;
+           variant < CEIL_DIV_CASES_PER_DENOMINATOR; ++variant) {
+         const size_t index =
+            (denominator - 1u) * CEIL_DIV_CASES_PER_DENOMINATOR + variant;
+         const uint32_t numerator =
+            ceil_div_numerator(denominator, variant);
+         const uint32_t quotient =
+            numerator / denominator + (numerator % denominator != 0u);
+         write_word(numerators,
+                    payload_offset + index * sizeof(uint32_t), numerator);
+         write_word(denominators,
+                    payload_offset + index * sizeof(uint32_t), denominator);
+         write_word(expected,
+                    payload_offset + index * sizeof(uint32_t), quotient);
+      }
+   }
+
+   GLuint buffers[3] = {0};
+   glGenBuffers(3, buffers);
+   const uint8_t *images[3] = {numerators, denominators, expected};
+   for (unsigned binding = 0; binding < 3; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, buffer_size, images[binding],
+                   GL_DYNAMIC_COPY);
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding, buffers[binding],
+                        payload_offset, payload_size);
+   }
+   check_gl("create ceil-div buffers");
+
+   GLuint program = build_program(WORKLOAD_CEIL_DIV_GRID_DOMAIN);
+   glUseProgram(program);
+   glDispatchCompute(CEIL_DIV_CASE_COUNT / LOCAL_SIZE_X, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   check_gl("execute ceil-div grid domain");
+
+   verify_buffer(buffers[0], "ceil-div numerators", numerators, buffer_size);
+   verify_buffer(buffers[1], "ceil-div denominators", denominators,
+                 buffer_size);
+   verify_buffer(buffers[2], "ceil-div quotients", expected, buffer_size);
+   printf("T8132_APPLE9_CEIL_DIV_PASS denominators=%u cases=%u\n",
+          RECIPROCAL_DENOMINATOR_COUNT, CEIL_DIV_CASE_COUNT);
+
+   glDeleteProgram(program);
+   glDeleteBuffers(3, buffers);
+   free(expected);
+   free(denominators);
+   free(numerators);
 }
 
 static uint32_t
@@ -1183,6 +1516,11 @@ static const char *const memory_cases[] = {
    "variable-ushr",
    "loaded-compare",
    "loaded-float-dag",
+   "reciprocal-direct",
+   "reciprocal-retain",
+   "reciprocal-materialized",
+   "reciprocal-denominators-1-1024",
+   "ceil-div-grid-domain",
    "pressure40",
    "four-resource-mix",
 };
@@ -1197,6 +1535,16 @@ t8132_apple9_memory_case_names(size_t *count)
 void
 t8132_apple9_run_memory_case(const char *name)
 {
+   if (!strcmp(name, "reciprocal-denominators-1-1024")) {
+      run_reciprocal_denominator_case();
+      return;
+   }
+
+   if (!strcmp(name, "ceil-div-grid-domain")) {
+      run_ceil_div_grid_domain_case();
+      return;
+   }
+
    if (strncmp(name, "superset-", 9) == 0 && name[9] >= '1' &&
        name[9] <= '8' && name[10] == '\0') {
       run_superset_resource_case(name[9] - '0');
@@ -1215,6 +1563,8 @@ t8132_apple9_run_memory_case(const char *name)
       workload == WORKLOAD_VECTOR4_ALU_STORE ||
       workload == WORKLOAD_SYSTEM_LOAD_INDEX || workload == WORKLOAD_AOS_LOAD ||
       workload == WORKLOAD_AOS_STORE || workload == WORKLOAD_SINGLE_LOAD_IADD ||
+      workload == WORKLOAD_RECIPROCAL_DIRECT ||
+      workload == WORKLOAD_RECIPROCAL_RETAIN ||
       workload == WORKLOAD_PRESSURE40;
    const unsigned input_count = has_input_c ? 3 : has_one_input ? 1 : 2;
    const unsigned output_binding = input_count;
@@ -1243,6 +1593,7 @@ t8132_apple9_run_memory_case(const char *name)
    seed_buffer(input_c_seed, layout.buffer_bytes, 2);
    seed_buffer(output_expected, layout.buffer_bytes, 3);
    seed_inputs(input_a_seed, input_b_seed, input_c_seed, &layout, 1);
+   seed_reciprocal_inputs(workload, input_a_seed, input_b_seed, &layout, 1);
 
    GLuint buffers[4] = {0};
    glGenBuffers(4, buffers);
