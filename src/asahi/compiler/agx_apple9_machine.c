@@ -113,8 +113,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
                 * destination map.  Mode 2 reaches r0..r63; r64+ cannot be
                 * represented by this form. */
                GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_SCATTERED,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -133,8 +132,7 @@ static const struct agx_apple9_encoding_info encodings[] = {
                 * hardware-proven compact bank and copy them out through the
                 * independently validated extended logic form. */
                GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 15, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_HARD_LOW |
+                   AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW |
                       AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
@@ -228,14 +226,14 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .dependency_layout = AGX_APPLE9_DEPENDENCY_INDEX_45_47,
          .operands =
             {
-               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 15, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW |
-                      AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
-                   AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
-                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 15,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
    [AGX_APPLE9_ENC_FLOAT2_COMPACT] =
@@ -248,25 +246,21 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .dependency_layout = AGX_APPLE9_DEPENDENCY_INDEX_45_47,
          .operands =
             {
-               GPR(AGX_APPLE9_OPERAND_DEST,
-                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95, 1,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_SCATTERED |
-                      AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
-                   AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC0,
-                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95, 1,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_SCATTERED |
-                      AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
-                   AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC1,
-                   AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95, 1,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_SCATTERED |
-                      AGX_APPLE9_OPERAND_COMPACT_PREFERRED |
-                      AGX_APPLE9_OPERAND_UNIFORM_ALTERNATIVE,
-                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_DEST,
+                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC0,
+                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC1,
+                  AGX_APPLE9_WIDTH_16 | AGX_APPLE9_WIDTH_32, 95,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED | AGX_APPLE9_OPERAND_UNIFORM_ALTERNATIVE,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
    [AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED] =
@@ -334,11 +328,11 @@ static const struct agx_apple9_encoding_info encodings[] = {
                /* EXP-M4-41 exhaustively validates the descriptor geometry:
                 * byte 3 names r0..r95 as dst<<1, while byte 5 names only
                 * r0..r63 as src<<2. */
-               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 95, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                   95, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -485,11 +479,11 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .dependency_layout = AGX_APPLE9_DEPENDENCY_MASK_12_17,
          .operands =
             {
-               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 15, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                   15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 15, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -505,11 +499,11 @@ static const struct agx_apple9_encoding_info encodings[] = {
                /* Both sources use the ordinary 32-bit descriptor
                 * (gpr << 1) | 1.  Source lifetime is encoded independently
                 * in byte 2. */
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -522,11 +516,28 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
          .operands =
             {
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
+   [AGX_APPLE9_ENC_PREDICATE_COMPARE_LOOP] =
+      {
+         .name = "predicate_compare_loop",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
@@ -549,6 +560,54 @@ static const struct agx_apple9_encoding_info encodings[] = {
    [AGX_APPLE9_ENC_EXEC_MASK_POP] =
       {
          .name = "exec_mask_pop",
+         .length = 6,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_LOOP_MASK_PUSH] =
+      {
+         .name = "loop_mask_push",
+         .length = 4,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_LOOP_MASK_UPDATE] =
+      {
+         .name = "loop_mask_update",
+         .length = 4,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_LOOP_MASK_POP] =
+      {
+         .name = "loop_mask_pop",
+         .length = 6,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_JMP_EXEC_ANY] =
+      {
+         .name = "jmp_exec_any",
+         .length = 10,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_JMP_EXEC_NONE] =
+      {
+         .name = "jmp_exec_none",
+         .length = 10,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_BREAK_MASK_UNWIND] =
+      {
+         .name = "break_mask_unwind",
          .length = 6,
          .operand_count = 0,
          .allocator_safe = true,

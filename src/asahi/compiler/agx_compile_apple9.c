@@ -2326,9 +2326,13 @@ apple9_emit_if_predicate(struct apple9_dag_lower *lower, nir_if *nif,
        sources[1] == AGX_APPLE9_VREG_INVALID)
       return false;
 
+   /* The push consumes this condition immediately.  Enclosing lane state is
+    * already saved by the implicit mask stack, so native Metal reuses
+    * predicate bank zero at every ordinary-if nesting depth. */
+   plan.immediate |= AGX_APPLE9_PREDICATE_BANK(0);
    if (!agx_apple9_vir_emit_side_effect(
-          &lower->program, AGX_APPLE9_VIR_PREDICATE_COMPARE,
-          plan.encoding, sources, ARRAY_SIZE(sources), plan.immediate)) {
+          &lower->program, AGX_APPLE9_VIR_PREDICATE_COMPARE, plan.encoding,
+          sources, ARRAY_SIZE(sources), plan.immediate)) {
       lower->reason = "could not emit an Apple9 predicate comparison";
       return false;
    }
@@ -2340,11 +2344,12 @@ static bool
 apple9_emit_exec_mask(struct apple9_dag_lower *lower, bool push, bool invert)
 {
    assert(push || !invert);
+   const unsigned selector = push ? AGX_APPLE9_EXEC_MASK_PREDICATE(0) : 0;
    const bool ok = agx_apple9_vir_emit_side_effect(
       &lower->program,
       push ? AGX_APPLE9_VIR_EXEC_MASK_PUSH : AGX_APPLE9_VIR_EXEC_MASK_POP,
-      push ? AGX_APPLE9_ENC_EXEC_MASK_PUSH : AGX_APPLE9_ENC_EXEC_MASK_POP,
-      NULL, 0, invert ? AGX_APPLE9_EXEC_MASK_INVERT : 0);
+      push ? AGX_APPLE9_ENC_EXEC_MASK_PUSH : AGX_APPLE9_ENC_EXEC_MASK_POP, NULL,
+      0, selector | (invert ? AGX_APPLE9_EXEC_MASK_INVERT : 0));
    if (!ok)
       lower->reason = "could not emit an Apple9 execution-mask operation";
    return ok;

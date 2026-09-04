@@ -15,9 +15,9 @@
 extern "C" {
 #endif
 
-#define AGX_APPLE9_VREG_INVALID          UINT32_MAX
-#define AGX_APPLE9_PHYS_INVALID          UINT8_MAX
-#define AGX_APPLE9_MAX_VIR_SRCS          5
+#define AGX_APPLE9_VREG_INVALID UINT32_MAX
+#define AGX_APPLE9_PHYS_INVALID UINT8_MAX
+#define AGX_APPLE9_MAX_VIR_SRCS 5
 /*
  * A deliberately small semantic IR for the first real Apple9 compiler.
  *
@@ -65,6 +65,12 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_EXEC_MASK_PUSH,
    AGX_APPLE9_VIR_EXEC_MASK_ELSE,
    AGX_APPLE9_VIR_EXEC_MASK_POP,
+   AGX_APPLE9_VIR_LOOP_MASK_PUSH,
+   AGX_APPLE9_VIR_LOOP_MASK_UPDATE,
+   AGX_APPLE9_VIR_LOOP_MASK_POP,
+   AGX_APPLE9_VIR_JMP_EXEC_ANY,
+   AGX_APPLE9_VIR_JMP_EXEC_NONE,
+   AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
    AGX_APPLE9_VIR_DEVICE_STORE,
 };
 
@@ -84,11 +90,37 @@ enum agx_apple9_predicate_extended_condition {
    AGX_APPLE9_PREDICATE_EXT_IEQ = 0x07,
 };
 
-/* These are independent controls.  PREDICATE_INVERT complements the
- * transient predicate produced by either comparison form.  EXEC_MASK_INVERT
- * complements that predicate when it is consumed by EXEC_MASK_PUSH. */
-#define AGX_APPLE9_PREDICATE_INVERT (1u << 8)
-#define AGX_APPLE9_EXEC_MASK_INVERT (1u << 0)
+/* EXP-M4-53 separates the six-entry predicate scratch bank from the implicit
+ * execution-mask stack.  PREDICATE_INVERT complements a comparison result;
+ * EXEC_MASK_INVERT complements the selected predicate when a push consumes
+ * it.  Ordinary nested ifs may therefore reuse bank zero at every depth. */
+#define AGX_APPLE9_PREDICATE_BANK_COUNT 6u
+#define AGX_APPLE9_PREDICATE_INVERT     (1u << 8)
+#define AGX_APPLE9_PREDICATE_BANK_SHIFT 16
+#define AGX_APPLE9_PREDICATE_BANK_MASK                                        \
+   (0x07u << AGX_APPLE9_PREDICATE_BANK_SHIFT)
+#define AGX_APPLE9_PREDICATE_BANK(index)                                      \
+   ((uint32_t)(index) << AGX_APPLE9_PREDICATE_BANK_SHIFT)
+
+#define AGX_APPLE9_EXEC_MASK_INVERT (1u << 8)
+#define AGX_APPLE9_EXEC_MASK_SOURCE(source) (0x01u + 4u * (source))
+#define AGX_APPLE9_EXEC_MASK_PREDICATE(bank)                                  \
+   AGX_APPLE9_EXEC_MASK_SOURCE(bank)
+#define AGX_APPLE9_EXEC_MASK_TRUE  AGX_APPLE9_EXEC_MASK_SOURCE(6)
+#define AGX_APPLE9_EXEC_MASK_FALSE AGX_APPLE9_EXEC_MASK_SOURCE(7)
+
+/* The tested LOOP_MASK_UPDATE form selects the same predicate bank with
+ * 0x02,0x06,0x0a,... .  Bit 0x20 is consumer polarity: EXP-M4-53 proves that
+ * flipping it together with PREDICATE_INVERT preserves exact loop output. */
+#define AGX_APPLE9_LOOP_MASK_INVERT 0x20u
+#define AGX_APPLE9_LOOP_MASK_PREDICATE(bank) (0x02u + 4u * (bank))
+
+/* BREAK_MASK_UNWIND packs the number of scopes crossed and the destination
+ * loop nesting level into independent bytes. */
+#define AGX_APPLE9_BREAK_SCOPE_TAG(immediate)  (((immediate) >> 8) & 0xffu)
+#define AGX_APPLE9_BREAK_LOOP_DEPTH(immediate) ((immediate) & 0xffu)
+#define AGX_APPLE9_BREAK_IMMEDIATE(scope_tag, loop_depth)                      \
+   (((uint32_t)(scope_tag) << 8) | (uint32_t)(loop_depth))
 
 enum agx_apple9_select_condition {
    AGX_APPLE9_SELECT_FEQ = 0x00,
@@ -192,6 +224,9 @@ struct agx_apple9_vir_instr {
     * its allocated physical register. */
    uint32_t target;
    uint32_t immediate;
+   /* Branches name a VIR instruction boundary.  Final signed byte
+    * displacements are patched after variable-size pseudos are emitted. */
+   uint32_t branch_target;
    uint8_t nr_srcs;
 
    /* Scoreboard slot published by an asynchronous producer.  Ordinary ALU
@@ -276,6 +311,11 @@ bool agx_apple9_vir_emit_side_effect(struct agx_apple9_vir_program *program,
                                      enum agx_apple9_encoding encoding,
                                      const uint32_t *src, unsigned nr_srcs,
                                      uint32_t immediate);
+
+bool agx_apple9_vir_emit_branch(struct agx_apple9_vir_program *program,
+                                enum agx_apple9_vir_opcode op,
+                                enum agx_apple9_encoding encoding,
+                                uint32_t target_instruction);
 
 uint32_t agx_apple9_vir_input(struct agx_apple9_vir_program *program,
                               unsigned phys);

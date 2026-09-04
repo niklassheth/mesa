@@ -1893,8 +1893,8 @@ TEST(Apple9Packer, PredicateFormsEncodePolarityAndSourceLifetime)
    const uint8_t high_phys[] = {63, 62};
    predicate.immediate = AGX_APPLE9_PREDICATE_ULT;
    predicate.live_after_mask = 0;
-   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&predicate, high_phys, &packed,
-                                               &reason))
+   ASSERT_TRUE(
+      agx_apple9_pack_vir_instruction(&predicate, high_phys, &packed, &reason))
       << (reason ? reason : "");
    const uint8_t high[] = {0x0a, 0x7f, 0x3a, 0x7d, 0x05, 0xc0};
    EXPECT_EQ(memcmp(packed.bytes, high, sizeof(high)), 0);
@@ -1917,14 +1917,36 @@ TEST(Apple9Packer, PredicateFormsEncodePolarityAndSourceLifetime)
                                   0x00, 0x00, 0xc0, 0x00, 0x00};
    EXPECT_EQ(memcmp(packed.bytes, float_equal, sizeof(float_equal)), 0);
 
-   predicate.immediate = AGX_APPLE9_PREDICATE_EXT_FGE_SEQUENCE |
-                         AGX_APPLE9_PREDICATE_INVERT;
+   predicate.immediate =
+      AGX_APPLE9_PREDICATE_EXT_FGE_SEQUENCE | AGX_APPLE9_PREDICATE_INVERT;
    ASSERT_TRUE(
       agx_apple9_pack_vir_instruction(&predicate, phys, &packed, &reason))
       << (reason ? reason : "");
    const uint8_t float_ge[] = {0x1a, 0x03, 0x3b, 0x05, 0x06,
                                0x00, 0x02, 0xc0, 0x00, 0x00};
    EXPECT_EQ(memcmp(packed.bytes, float_ge, sizeof(float_ge)), 0);
+
+   /* Native nested breaks keep the predicate at the target loop's level,
+    * independent of how many conditional scopes are unwound. */
+   predicate.encoding = AGX_APPLE9_ENC_PREDICATE_COMPARE_LOOP;
+   predicate.immediate =
+      AGX_APPLE9_PREDICATE_EXT_IEQ | AGX_APPLE9_PREDICATE_BANK(1);
+   predicate.live_after_mask = 0;
+   ASSERT_TRUE(
+      agx_apple9_pack_vir_instruction(&predicate, phys, &packed, &reason))
+      << (reason ? reason : "");
+   const uint8_t loop_depth_one[] = {0x2a, 0x03, 0x23, 0x05, 0x06,
+                                     0x00, 0x07, 0x00, 0x00, 0x00};
+   EXPECT_EQ(memcmp(packed.bytes, loop_depth_one, sizeof(loop_depth_one)), 0);
+
+   predicate.immediate =
+      AGX_APPLE9_PREDICATE_EXT_IEQ | AGX_APPLE9_PREDICATE_BANK(2);
+   ASSERT_TRUE(
+      agx_apple9_pack_vir_instruction(&predicate, phys, &packed, &reason))
+      << (reason ? reason : "");
+   const uint8_t loop_depth_two[] = {0x4a, 0x03, 0x23, 0x05, 0x06,
+                                     0x00, 0x07, 0x00, 0x00, 0x00};
+   EXPECT_EQ(memcmp(packed.bytes, loop_depth_two, sizeof(loop_depth_two)), 0);
 }
 
 TEST(Apple9Packer, SimpleExecutionMaskScopeMatchesOwnSourceMetal)
@@ -1935,12 +1957,18 @@ TEST(Apple9Packer, SimpleExecutionMaskScopeMatchesOwnSourceMetal)
       uint8_t bytes[6];
       uint8_t length;
    } cases[] = {
-      {AGX_APPLE9_VIR_EXEC_MASK_PUSH, AGX_APPLE9_ENC_EXEC_MASK_PUSH,
-       {0x0f, 0x05, 0x54, 0x01}, 4},
-      {AGX_APPLE9_VIR_EXEC_MASK_ELSE, AGX_APPLE9_ENC_EXEC_MASK_ELSE,
-       {0x0f, 0x04, 0x04, 0x19}, 4},
-      {AGX_APPLE9_VIR_EXEC_MASK_POP, AGX_APPLE9_ENC_EXEC_MASK_POP,
-       {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00}, 6},
+      {AGX_APPLE9_VIR_EXEC_MASK_PUSH,
+       AGX_APPLE9_ENC_EXEC_MASK_PUSH,
+       {0x0f, 0x05, 0x54, 0x01},
+       4},
+      {AGX_APPLE9_VIR_EXEC_MASK_ELSE,
+       AGX_APPLE9_ENC_EXEC_MASK_ELSE,
+       {0x0f, 0x04, 0x04, 0x19},
+       4},
+      {AGX_APPLE9_VIR_EXEC_MASK_POP,
+       AGX_APPLE9_ENC_EXEC_MASK_POP,
+       {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00},
+       6},
    };
 
    for (const auto &test : cases) {
@@ -1948,6 +1976,9 @@ TEST(Apple9Packer, SimpleExecutionMaskScopeMatchesOwnSourceMetal)
          .op = test.op,
          .encoding = test.encoding,
          .dest = AGX_APPLE9_VREG_INVALID,
+         .immediate = test.op == AGX_APPLE9_VIR_EXEC_MASK_PUSH
+                         ? AGX_APPLE9_EXEC_MASK_PREDICATE(0)
+                         : 0,
       };
       agx_apple9_packed_instruction packed = {};
       const char *reason = nullptr;
@@ -1962,7 +1993,8 @@ TEST(Apple9Packer, SimpleExecutionMaskScopeMatchesOwnSourceMetal)
       .op = AGX_APPLE9_VIR_EXEC_MASK_PUSH,
       .encoding = AGX_APPLE9_ENC_EXEC_MASK_PUSH,
       .dest = AGX_APPLE9_VREG_INVALID,
-      .immediate = AGX_APPLE9_EXEC_MASK_INVERT,
+      .immediate =
+         AGX_APPLE9_EXEC_MASK_PREDICATE(0) | AGX_APPLE9_EXEC_MASK_INVERT,
    };
    agx_apple9_packed_instruction packed = {};
    const char *reason = nullptr;
@@ -1972,6 +2004,69 @@ TEST(Apple9Packer, SimpleExecutionMaskScopeMatchesOwnSourceMetal)
    const uint8_t expected[] = {0x0f, 0x05, 0x54, 0x21};
    ASSERT_EQ(packed.length, sizeof(expected));
    EXPECT_EQ(memcmp(packed.bytes, expected, sizeof(expected)), 0);
+}
+
+TEST(Apple9Packer, StructuredLoopControlMatchesOwnSourceMetal)
+{
+   const struct {
+      agx_apple9_vir_opcode op;
+      agx_apple9_encoding encoding;
+      uint32_t immediate;
+      uint8_t bytes[10];
+      uint8_t length;
+   } cases[] = {
+      {AGX_APPLE9_VIR_LOOP_MASK_PUSH,
+       AGX_APPLE9_ENC_LOOP_MASK_PUSH,
+       0,
+       {0x0f, 0x05, 0x54, 0x1a},
+       4},
+      {AGX_APPLE9_VIR_LOOP_MASK_UPDATE,
+       AGX_APPLE9_ENC_LOOP_MASK_UPDATE,
+       0x22,
+       {0x8f, 0x04, 0x54, 0x22},
+       4},
+      {AGX_APPLE9_VIR_LOOP_MASK_UPDATE,
+       AGX_APPLE9_ENC_LOOP_MASK_UPDATE,
+       0x2a,
+       {0x8f, 0x04, 0x54, 0x2a},
+       4},
+      {AGX_APPLE9_VIR_JMP_EXEC_ANY,
+       AGX_APPLE9_ENC_JMP_EXEC_ANY,
+       (uint32_t)(int32_t)-58,
+       {0x0f, 0x00, 0x54, 0xc6, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00},
+       10},
+      {AGX_APPLE9_VIR_JMP_EXEC_NONE,
+       AGX_APPLE9_ENC_JMP_EXEC_NONE,
+       92,
+       {0x0f, 0x01, 0x54, 0x5c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+       10},
+      {AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
+       AGX_APPLE9_ENC_BREAK_MASK_UNWIND,
+       AGX_APPLE9_BREAK_IMMEDIATE(3, 2),
+       {0x8f, 0x05, 0x54, 0x03, 0x00, 0x02},
+       6},
+      {AGX_APPLE9_VIR_LOOP_MASK_POP,
+       AGX_APPLE9_ENC_LOOP_MASK_POP,
+       0,
+       {0x0f, 0x06, 0x04, 0x02, 0x00, 0x00},
+       6},
+   };
+
+   for (const auto &test : cases) {
+      agx_apple9_vir_instr instruction = {
+         .op = test.op,
+         .encoding = test.encoding,
+         .dest = AGX_APPLE9_VREG_INVALID,
+         .immediate = test.immediate,
+      };
+      agx_apple9_packed_instruction packed = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&instruction, nullptr,
+                                                  &packed, &reason))
+         << (reason ? reason : "");
+      ASSERT_EQ(packed.length, test.length);
+      EXPECT_EQ(memcmp(packed.bytes, test.bytes, test.length), 0);
+   }
 }
 
 TEST(Apple9Allocator, ReleasesKilledSourcesAfterTheirConsumer)
