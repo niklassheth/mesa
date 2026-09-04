@@ -39,6 +39,7 @@ enum agx_apple9_operand_role {
    AGX_APPLE9_OPERAND_SRC3,
    AGX_APPLE9_OPERAND_INDEX,
    AGX_APPLE9_OPERAND_STORE_DATA,
+   AGX_APPLE9_OPERAND_ATOMIC_DATA,
 };
 
 enum agx_apple9_width {
@@ -122,6 +123,8 @@ enum agx_apple9_encoding {
    AGX_APPLE9_ENC_BREAK_MASK_UNWIND,
    AGX_APPLE9_ENC_DEVICE_LOAD,
    AGX_APPLE9_ENC_DEVICE_STORE,
+   AGX_APPLE9_ENC_DEVICE_ATOMIC,
+   AGX_APPLE9_ENC_DEVICE_ATOMIC_RESULT,
    AGX_APPLE9_ENC_COUNT,
 
    /* Semantic IR pseudos have no machine encoding.  Keep them out of the

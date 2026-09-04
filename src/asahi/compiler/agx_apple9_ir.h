@@ -72,6 +72,26 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_JMP_EXEC_NONE,
    AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
    AGX_APPLE9_VIR_DEVICE_STORE,
+   AGX_APPLE9_VIR_DEVICE_ATOMIC,
+   AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT,
+};
+
+/* Shared native five-bit operation selector used by the device and
+ * threadgroup atomic families.  The current compiler emits the independently
+ * hardware-validated per-lane device form. */
+enum agx_apple9_atomic_op {
+   AGX_APPLE9_ATOMIC_ADD = 0x10,
+   AGX_APPLE9_ATOMIC_AND = 0x11,
+   AGX_APPLE9_ATOMIC_CMPXCHG = 0x12,
+   AGX_APPLE9_ATOMIC_FADD = 0x13,
+   AGX_APPLE9_ATOMIC_SMAX = 0x14,
+   AGX_APPLE9_ATOMIC_SMIN = 0x15,
+   AGX_APPLE9_ATOMIC_OR = 0x16,
+   AGX_APPLE9_ATOMIC_SUB = 0x1b,
+   AGX_APPLE9_ATOMIC_UMAX = 0x1c,
+   AGX_APPLE9_ATOMIC_UMIN = 0x1d,
+   AGX_APPLE9_ATOMIC_XCHG = 0x1e,
+   AGX_APPLE9_ATOMIC_XOR = 0x1f,
 };
 
 enum agx_apple9_predicate_condition {
@@ -217,6 +237,8 @@ struct agx_apple9_vir_instr {
     * also define an adjacent dest_components tuple; stores have no SSA
     * destination and carry their ordered data values in src[0..N-1]. */
    uint8_t memory_components;
+   enum agx_apple9_atomic_op atomic_op;
+   bool atomic_discard;
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
    /* MASKED_COPY is a predecessor-edge assignment into storage defined by a
     * MERGE pseudo.  Keeping this distinct from dest preserves SSA: MERGE has
@@ -281,7 +303,7 @@ struct agx_apple9_vir_program {
     * Values may enter or leave the bounded program in fixed physical GPRs.
     * This is used by fragment interpolation/color packing, whose surrounding
     * stage instructions have an independently validated register contract.
-   */
+    */
    uint8_t *fixed_phys;
    /* Optional per-value upper bound used to propagate a constrained
     * consumer's compact-register requirement back to its producer. */
@@ -329,14 +351,18 @@ uint32_t agx_apple9_vir_emit_device_load_vector(
  * register allocation. The pseudo is coalesced when possible and otherwise
  * lowered to copies after allocation, following the Apple8 AGX IR model. */
 uint32_t agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
-                                    const uint32_t *src,
-                                    unsigned components);
+                                     const uint32_t *src, unsigned components);
 uint32_t agx_apple9_vir_emit_merge(struct agx_apple9_vir_program *program);
 bool agx_apple9_vir_emit_masked_copy(struct agx_apple9_vir_program *program,
-                                    uint32_t target, uint32_t source);
-bool agx_apple9_vir_emit_device_store(
+                                     uint32_t target, uint32_t source);
+bool agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
+                                      unsigned binding, uint32_t index,
+                                      const uint32_t *data, unsigned components,
+                                      unsigned bits);
+bool agx_apple9_vir_emit_device_atomic(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
-   const uint32_t *data, unsigned components, unsigned bits);
+   const uint32_t *data, unsigned data_components,
+   enum agx_apple9_atomic_op op, bool discard_result, uint32_t *result_out);
 bool agx_apple9_vir_set_device_load_contract(
    struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
    enum agx_apple9_scoreboard_slot scoreboard_slot);
@@ -396,7 +422,6 @@ bool agx_apple9_pack_mov_imm32(unsigned dst, uint32_t value,
 bool agx_apple9_pack_mov(unsigned dst, unsigned src,
                          struct agx_apple9_packed_instruction *packed);
 
-
 bool
 agx_apple9_pack_device_load_u32(unsigned dst, unsigned index, unsigned binding,
                                 uint8_t flags,
@@ -431,6 +456,11 @@ bool agx_apple9_pack_device_store_scalar(
 bool agx_apple9_pack_device_store_vector_u32(
    unsigned data, unsigned index, unsigned binding, unsigned components,
    enum agx_apple9_scoreboard_slot scoreboard_slot, bool release_index,
+   struct agx_apple9_packed_instruction *packed);
+bool agx_apple9_pack_device_atomic(
+   unsigned index, unsigned data, unsigned binding, enum agx_apple9_atomic_op op,
+   bool discard_result,
+   enum agx_apple9_scoreboard_slot input_dependency,
    struct agx_apple9_packed_instruction *packed);
 
 #ifdef __cplusplus
