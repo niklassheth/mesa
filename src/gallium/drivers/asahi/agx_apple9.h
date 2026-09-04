@@ -235,6 +235,10 @@ bool agx_apple9_compute_grid_supported(
    const struct agx_apple9_compute_profile *profile, const uint32_t global[3],
    const uint32_t local[3]);
 
+/* Indirect dispatch is a launch/package ABI property. */
+bool agx_apple9_compute_indirect_dispatch_supported(
+   const struct agx_apple9_compute_profile *profile);
+
 /* Pure layout preflight used to roll a full batch before mutating it. */
 bool agx_apple9_compute_dispatch_fits(
    size_t mapping_size, uint32_t launch_offset, uint32_t state_offset,

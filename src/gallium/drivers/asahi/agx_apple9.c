@@ -37,11 +37,15 @@ struct apple9_external_blob {
 static struct apple9_external_blob apple9_constant_ssbo8_superset;
 static struct apple9_external_blob apple9_launch_ssbo8_superset;
 static struct apple9_external_blob apple9_division_ssbo8_superset;
+static struct apple9_external_blob apple9_constant_native_atomic8;
+static struct apple9_external_blob apple9_launch_native_atomic8;
 static struct apple9_external_blob apple9_g16_render_package_zst;
 static struct apple9_external_blob apple9_render_interleaved_vbo_launch;
 
-static util_once_flag apple9_compute_blobs_once = UTIL_ONCE_FLAG_INIT;
-static bool apple9_compute_blobs_loaded;
+static util_once_flag apple9_superset_blobs_once = UTIL_ONCE_FLAG_INIT;
+static util_once_flag apple9_atomic_blobs_once = UTIL_ONCE_FLAG_INIT;
+static bool apple9_superset_blobs_loaded;
+static bool apple9_atomic_blobs_loaded;
 
 static bool
 apple9_load_external_blob(const char *name, struct apple9_external_blob *out)
@@ -66,9 +70,9 @@ apple9_load_external_blob(const char *name, struct apple9_external_blob *out)
 }
 
 static void
-apple9_load_compute_blobs_once(void)
+apple9_load_superset_blobs_once(void)
 {
-   apple9_compute_blobs_loaded =
+   apple9_superset_blobs_loaded =
       apple9_load_external_blob("carrier8/constant.bin",
                                 &apple9_constant_ssbo8_superset) &&
       apple9_load_external_blob("carrier8/launch.bin",
@@ -77,11 +81,28 @@ apple9_load_compute_blobs_once(void)
                                 &apple9_division_ssbo8_superset);
 }
 
-static bool
-apple9_compute_blobs_available(void)
+static void
+apple9_load_atomic_blobs_once(void)
 {
-   util_call_once(&apple9_compute_blobs_once, apple9_load_compute_blobs_once);
-   return apple9_compute_blobs_loaded;
+   apple9_atomic_blobs_loaded =
+      apple9_load_external_blob("carrier8-atomic/constant.bin",
+                                &apple9_constant_native_atomic8) &&
+      apple9_load_external_blob("carrier8-atomic/launch.bin",
+                                &apple9_launch_native_atomic8);
+}
+
+static bool
+apple9_superset_blobs_available(void)
+{
+   util_call_once(&apple9_superset_blobs_once, apple9_load_superset_blobs_once);
+   return apple9_superset_blobs_loaded;
+}
+
+static bool
+apple9_atomic_blobs_available(void)
+{
+   util_call_once(&apple9_atomic_blobs_once, apple9_load_atomic_blobs_once);
+   return apple9_atomic_blobs_loaded;
 }
 
 static util_once_flag apple9_render_blobs_once = UTIL_ONCE_FLAG_INIT;
@@ -119,6 +140,7 @@ struct apple9_compute_abi_desc {
    uint32_t cdm_config;
    uint32_t cdm_constant;
    uint32_t cdm_tail;
+   bool supports_indirect_dispatch;
 };
 
 static const uint8_t *
@@ -160,17 +182,30 @@ apple9_compute_abi(const struct agx_apple9_compute_profile *profile)
       .cdm_config = 0x00880000,
       .cdm_constant = 0x01000040,
       .cdm_tail = 0x60000160,
+      .supports_indirect_dispatch = true,
+   };
+   static const struct apple9_compute_abi_desc native_atomic8 = {
+      .constant_blob = &apple9_constant_native_atomic8,
+      .launch_blob = &apple9_launch_native_atomic8,
+      .archive_call_offset = 0x70,
+      .helper_slots = 10,
+      .resource_count = AGX_APPLE9_COMPUTE_MAX_RESOURCES,
+      .hidden_resource_count = 0,
+      .resource_record_size = 0x80,
+      .has_dynamic_state = true,
+      .cdm_config = 0x00080000,
+      .cdm_constant = 0x01000000,
+      .cdm_tail = 0x60010060,
    };
 
    if (!profile)
       return NULL;
 
-   if (!apple9_compute_blobs_available())
-      return NULL;
-
    switch (profile->abi) {
    case AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET:
-      return &ssbo8_superset;
+      return apple9_superset_blobs_available() ? &ssbo8_superset : NULL;
+   case AGX_APPLE9_COMPUTE_ABI_SSBO8_ATOMIC:
+      return apple9_atomic_blobs_available() ? &native_atomic8 : NULL;
    default:
       return NULL;
    }
@@ -581,6 +616,14 @@ agx_apple9_compute_grid_supported(
    return true;
 }
 
+bool
+agx_apple9_compute_indirect_dispatch_supported(
+   const struct agx_apple9_compute_profile *profile)
+{
+   const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
+   return abi && abi->supports_indirect_dispatch;
+}
+
 static void
 apple9_init_compute_archive(uint8_t *code, unsigned helper_slots)
 {
@@ -896,38 +939,48 @@ apple9_build_superset_resource_record(
    const struct agx_apple9_compute_geometry *geometry)
 {
    const size_t record_size = apple9_compute_resource_record_size_for_abi(abi);
-   const size_t division_size = apple9_division_ssbo8_superset.size;
-   if (!package || !abi || abi->hidden_resource_count != 3 || !resources ||
+   if (!package || !abi || !resources ||
        !geometry || resource_count == 0 ||
        resource_count > abi->resource_count ||
        record_size < AGX_APPLE9_COMPUTE_SUPERSET_RESOURCE_STRIDE ||
-       division_size > AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE ||
-       !apple9_range_fits(mapping_size,
-                          AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET,
-                          AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE) ||
        package_base > UINT64_MAX - resource_table_offset - 0x6c ||
-       package_base > UINT64_MAX - AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET)
+       (abi->hidden_resource_count != 0 &&
+        (apple9_division_ssbo8_superset.size >
+            AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE ||
+         !apple9_range_fits(mapping_size,
+                            AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET,
+                            AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE) ||
+         package_base >
+            UINT64_MAX - AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET)))
       return false;
 
    uint8_t *record = package + resource_table_offset;
    uint64_t record_address = package_base + resource_table_offset;
-   uint64_t division_address =
-      package_base + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET;
-   memset(package + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET, 0,
-          AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE);
-   memcpy(package + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET,
-          apple9_division_ssbo8_superset.data, division_size);
 
    memset(record, 0, record_size);
-   if (!agx_apple9_build_compute_geometry_fields(
-          record, record_size, record_address, geometry))
-      return false;
-   apple9_put_u64(record + 0x10, division_address);
-   for (unsigned i = 0; i < abi->resource_count; ++i)
-      apple9_put_u64(record + 0x18 + i * sizeof(uint64_t),
-                     i < resource_count ? resources[i] : division_address);
-   /* qword 11 is the native zero sentinel. */
-   apple9_put_u64(record + 0x58, 0);
+   if (abi->hidden_resource_count == 0) {
+      for (unsigned i = 0; i < abi->resource_count; ++i)
+         apple9_put_u64(record + i * sizeof(uint64_t),
+                        i < resource_count ? resources[i] : 0);
+   } else {
+      uint64_t division_address =
+         package_base + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET;
+      memset(package + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET, 0,
+             AGX_APPLE9_COMPUTE_DIVISION_TABLE_SIZE);
+      memcpy(package + AGX_APPLE9_COMPUTE_DIVISION_TABLE_OFFSET,
+             apple9_division_ssbo8_superset.data,
+             apple9_division_ssbo8_superset.size);
+      if (abi->hidden_resource_count != 3 ||
+          !agx_apple9_build_compute_geometry_fields(
+             record, record_size, record_address, geometry))
+         return false;
+      apple9_put_u64(record + 0x10, division_address);
+      for (unsigned i = 0; i < abi->resource_count; ++i)
+         apple9_put_u64(record + 0x18 + i * sizeof(uint64_t),
+                        i < resource_count ? resources[i] : division_address);
+      /* qword 11 is the native zero sentinel. */
+      apple9_put_u64(record + 0x58, 0);
+   }
    return true;
 }
 
@@ -1100,7 +1153,7 @@ agx_apple9_emit_indirect_dispatch(
    const struct agx_apple9_compute_profile *profile)
 {
    const struct apple9_compute_abi_desc *abi = apple9_compute_abi(profile);
-   if (!out || !abi || abi->hidden_resource_count != 3 || !indirect ||
+   if (!out || !abi || !abi->supports_indirect_dispatch || !indirect ||
        (launch & 0x3f) || (indirect & 3) ||
        !apple9_compute_profile_valid(profile, abi))
       return false;

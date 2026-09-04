@@ -5888,6 +5888,14 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
    }
    struct agx_compiled_shader *cs = variant->data;
 
+   if (cs->apple9_tiny && is_indirect &&
+       !agx_apple9_compute_indirect_dispatch_supported(
+          &cs->apple9_compute_profile)) {
+      fprintf(stderr,
+              "Apple9 compute package ABI does not support indirect dispatch\n");
+      return;
+   }
+
    struct agx_batch *batch = agx_get_compute_batch(ctx);
    if (cs->apple9_tiny) {
       if (!agx_apple9_compute_dispatch_fits_persistent(
