@@ -2654,6 +2654,24 @@ apple9_nested_if_shader()
 }
 
 static nir_shader *
+apple9_deep_if_shader(unsigned depth)
+{
+   nir_builder b = apple9_compute_builder("apple9_deep_if");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_if *nested[32];
+
+   assert(depth <= ARRAY_SIZE(nested));
+   for (unsigned i = 0; i < depth; ++i)
+      nested[i] = nir_push_if(&b, nir_ult_imm(&b, gid, 32 - i));
+
+   apple9_store_output(&b, gid, nir_iadd_imm(&b, gid, 0x100));
+   for (unsigned i = depth; i > 0; --i)
+      nir_pop_if(&b, nested[i - 1]);
+
+   return b.shader;
+}
+
+static nir_shader *
 apple9_nested_phi_shader()
 {
    nir_builder b = apple9_compute_builder("apple9_nested_phi");
@@ -2725,6 +2743,176 @@ apple9_short_circuit_shader(bool is_or)
       nir_pop_if(&b, result);
    }
 
+   return b.shader;
+}
+
+static nir_shader *
+apple9_counted_loop_shader(bool with_continue)
+{
+   nir_builder b = apple9_compute_builder(
+      with_continue ? "apple9_loop_continue" : "apple9_counted_loop");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *limit = nir_iadd_imm(&b, nir_iand_imm(&b, gid, 7), 1);
+   nir_def *initial = nir_imm_int(&b, 0);
+   apple9_store_output(&b, gid, nir_imm_int(&b, 0xfeed0000));
+
+   nir_loop *loop = nir_push_loop(&b);
+   if (with_continue)
+      nir_loop_add_continue_construct(loop);
+   nir_block *entry = nir_cf_node_as_block(nir_cf_node_prev(&loop->cf_node));
+   nir_block *header = nir_loop_first_block(loop);
+   nir_phi_instr *phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&phi->instr, &phi->def, 1, 32);
+   nir_phi_instr_add_src(phi, entry, initial);
+
+   nir_def *header_value =
+      nir_iadd(&b, nir_imul_imm(&b, &phi->def, 0x101), gid);
+   nir_break_if(&b, nir_uge(&b, &phi->def, limit));
+   if (with_continue) {
+      nir_if *skip =
+         nir_push_if(&b, nir_ine_imm(&b, nir_iand_imm(&b, &phi->def, 1), 0));
+      nir_jump(&b, nir_jump_continue);
+      nir_pop_if(&b, skip);
+   }
+
+   /* Deliberately reuse a value formed in the loop-test block after the
+    * natural break. Its durable register must be refreshed at the latch. */
+   nir_def *value = nir_iadd(&b, header_value,
+                             nir_ixor(&b, gid, nir_imm_int(&b, 0x12340000)));
+   apple9_store_output(&b, gid, value);
+
+   if (with_continue)
+      nir_push_continue(&b, loop);
+   nir_def *next = nir_iadd_imm(&b, &phi->def, 1);
+   nir_phi_instr_add_src(phi, nir_cursor_current_block(b.cursor), next);
+   nir_pop_loop(&b, loop);
+
+   b.cursor = nir_after_phis(header);
+   nir_builder_instr_insert(&b, &phi->instr);
+   nir_validate_shader(b.shader, "Apple9 counted loop test");
+   return b.shader;
+}
+
+static nir_shader *
+apple9_nested_loop_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_nested_loops");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *outer_initial = nir_imm_int(&b, 0);
+   apple9_store_output(&b, gid, nir_imm_int(&b, 0));
+
+   nir_loop *outer = nir_push_loop(&b);
+   nir_block *outer_entry =
+      nir_cf_node_as_block(nir_cf_node_prev(&outer->cf_node));
+   nir_block *outer_header = nir_loop_first_block(outer);
+   nir_phi_instr *outer_phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&outer_phi->instr, &outer_phi->def, 1, 32);
+   nir_phi_instr_add_src(outer_phi, outer_entry, outer_initial);
+   nir_break_if(&b, nir_uge_imm(&b, &outer_phi->def, 3));
+
+   nir_def *inner_initial = nir_imm_int(&b, 0);
+   nir_loop *inner = nir_push_loop(&b);
+   nir_block *inner_entry =
+      nir_cf_node_as_block(nir_cf_node_prev(&inner->cf_node));
+   nir_block *inner_header = nir_loop_first_block(inner);
+   nir_phi_instr *inner_phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&inner_phi->instr, &inner_phi->def, 1, 32);
+   nir_phi_instr_add_src(inner_phi, inner_entry, inner_initial);
+   nir_break_if(&b, nir_uge_imm(&b, &inner_phi->def, 2));
+   apple9_store_output(
+      &b, gid,
+      nir_iadd(&b, nir_imul_imm(&b, &outer_phi->def, 16), &inner_phi->def));
+   nir_def *inner_next = nir_iadd_imm(&b, &inner_phi->def, 1);
+   nir_phi_instr_add_src(inner_phi, nir_cursor_current_block(b.cursor),
+                         inner_next);
+   nir_pop_loop(&b, inner);
+   nir_cursor after_inner = b.cursor;
+   b.cursor = nir_after_phis(inner_header);
+   nir_builder_instr_insert(&b, &inner_phi->instr);
+   b.cursor = after_inner;
+
+   nir_def *outer_next = nir_iadd_imm(&b, &outer_phi->def, 1);
+   nir_phi_instr_add_src(outer_phi, nir_cursor_current_block(b.cursor),
+                         outer_next);
+   nir_pop_loop(&b, outer);
+   b.cursor = nir_after_phis(outer_header);
+   nir_builder_instr_insert(&b, &outer_phi->instr);
+   nir_validate_shader(b.shader, "Apple9 nested loop test");
+   return b.shader;
+}
+
+static nir_shader *
+apple9_general_break_loop_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_general_break_loop");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *initial = nir_imm_int(&b, 0);
+   nir_def *limit = nir_iadd_imm(&b, nir_iand_imm(&b, gid, 7), 2);
+
+   nir_loop *loop = nir_push_loop(&b);
+   nir_block *entry = nir_cf_node_as_block(nir_cf_node_prev(&loop->cf_node));
+   nir_block *header = nir_loop_first_block(loop);
+   nir_phi_instr *phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&phi->instr, &phi->def, 1, 32);
+   nir_phi_instr_add_src(phi, entry, initial);
+   nir_break_if(&b, nir_uge(&b, &phi->def, limit));
+
+   nir_def *selector = nir_iand_imm(&b, nir_iadd(&b, &phi->def, gid), 3);
+   nir_if *conditional = nir_push_if(&b, nir_ieq_imm(&b, selector, 1));
+   /* Observable work before the jump keeps this as a general nested break,
+    * rather than the direct-break lowering used for `if (condition) break`. */
+   apple9_store_output(&b, gid,
+                       nir_ixor(&b, &phi->def, nir_imm_int(&b, 0x7b000000)));
+   nir_jump(&b, nir_jump_break);
+   nir_pop_if(&b, conditional);
+
+   nir_def *next = nir_iadd_imm(&b, &phi->def, 1);
+   nir_phi_instr_add_src(phi, nir_cursor_current_block(b.cursor), next);
+   nir_pop_loop(&b, loop);
+   b.cursor = nir_after_phis(header);
+   nir_builder_instr_insert(&b, &phi->instr);
+   nir_validate_shader(b.shader, "Apple9 general loop-break test");
+   return b.shader;
+}
+
+/* Put the terminating edge between two unrelated conditional regions.  This
+ * is intentionally not the source-shaped "condition at the header or latch"
+ * pattern recognized by the old Apple9 loop matcher: the backend must walk
+ * the structured NIR loop itself and lower the break wherever it occurs. */
+static nir_shader *
+apple9_mid_body_break_loop_shader()
+{
+   nir_builder b = apple9_compute_builder("apple9_mid_body_break_loop");
+   nir_def *gid = apple9_global_id_x(&b);
+   nir_def *initial = nir_imm_int(&b, 0);
+   nir_def *limit = nir_iadd_imm(&b, nir_iand_imm(&b, gid, 3), 1);
+
+   nir_loop *loop = nir_push_loop(&b);
+   nir_block *entry = nir_cf_node_as_block(nir_cf_node_prev(&loop->cf_node));
+   nir_block *header = nir_loop_first_block(loop);
+   nir_phi_instr *phi = nir_phi_instr_create(b.shader);
+   nir_def_init(&phi->instr, &phi->def, 1, 32);
+   nir_phi_instr_add_src(phi, entry, initial);
+
+   nir_if *prefix =
+      nir_push_if(&b, nir_ine_imm(&b, nir_iand_imm(&b, gid, 1), 0));
+   apple9_store_output(&b, gid, nir_iadd_imm(&b, &phi->def, 0x100));
+   nir_pop_if(&b, prefix);
+
+   nir_break_if(&b, nir_uge(&b, &phi->def, limit));
+
+   nir_if *suffix = nir_push_if(
+      &b, nir_ine_imm(&b, nir_iand_imm(&b, nir_iadd(&b, gid, &phi->def), 2),
+                      0));
+   apple9_store_output(&b, gid, nir_iadd_imm(&b, &phi->def, 0x200));
+   nir_pop_if(&b, suffix);
+
+   nir_def *next = nir_iadd_imm(&b, &phi->def, 1);
+   nir_phi_instr_add_src(phi, nir_cursor_current_block(b.cursor), next);
+   nir_pop_loop(&b, loop);
+   b.cursor = nir_after_phis(header);
+   nir_builder_instr_insert(&b, &phi->instr);
+   nir_validate_shader(b.shader, "Apple9 mid-body loop-break test");
    return b.shader;
 }
 
@@ -2808,6 +2996,19 @@ apple9_binary_find_sequence(const struct agx_shader_part *compiled,
          return i;
    }
    return UINT_MAX;
+}
+
+static unsigned
+apple9_binary_count_exec_pushes(const struct agx_shader_part *compiled)
+{
+   const uint8_t *binary = (const uint8_t *)compiled->binary;
+   unsigned count = 0;
+   for (unsigned i = 0; i + 4 <= compiled->info.binary_size; ++i) {
+      if (binary[i] == 0x0f && binary[i + 1] == 0x05 && binary[i + 2] == 0x54 &&
+          (binary[i + 3] & 3) == 1)
+         ++count;
+   }
+   return count;
 }
 
 static unsigned
@@ -3620,6 +3821,27 @@ TEST(Apple9Compiler, NestedIfElseUsesImplicitMaskStack)
    ralloc_free(nir);
 }
 
+TEST(Apple9Compiler, DeepIfNestingDoesNotConsumePredicateBanks)
+{
+   constexpr unsigned depth = 32;
+   nir_shader *nir = apple9_deep_if_shader(depth);
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   const uint8_t bank_zero_push[] = {0x0f, 0x05, 0x54, 0x01};
+   const uint8_t pop[] = {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00};
+   EXPECT_EQ(apple9_binary_count_exec_pushes(&compiled), depth);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, bank_zero_push,
+                                          sizeof(bank_zero_push)),
+             depth);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), depth);
+
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
 TEST(Apple9Compiler, NestedVectorPhisResolveAtEachReconvergence)
 {
    nir_shader *nir = apple9_nested_phi_shader();
@@ -3661,17 +3883,187 @@ TEST(Apple9Compiler, StructuredShortCircuitAndOrCompileWithoutSpeculation)
       ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
          << (reason ? reason : "no diagnostic");
 
-      EXPECT_EQ(apple9_binary_count_sequence(&compiled, push, sizeof(push)) +
-                   apple9_binary_count_sequence(
-                      &compiled, inverted_push, sizeof(inverted_push)),
-                2u);
-      EXPECT_EQ(apple9_binary_count_sequence(&compiled, else_mask,
-                                              sizeof(else_mask)),
-                is_or ? 1u : 0u);
+      EXPECT_EQ(apple9_binary_count_exec_pushes(&compiled), 2u);
+      EXPECT_EQ(
+         apple9_binary_count_sequence(&compiled, else_mask, sizeof(else_mask)),
+         is_or ? 1u : 0u);
       EXPECT_EQ(apple9_binary_count_sequence(&compiled, pop, sizeof(pop)), 2u);
       free(compiled.binary);
       ralloc_free(nir);
    }
+}
+
+TEST(Apple9Compiler, CountedLoopCarriesSsaAndPatchesStartRelativeBackedge)
+{
+   nir_shader *nir = apple9_counted_loop_shader(false);
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   const uint8_t loop_push[] = {0x0f, 0x05, 0x54, 0x1a};
+   const uint8_t loop_update[] = {0x8f, 0x04, 0x54, 0x22};
+   const uint8_t loop_pop[] = {0x0f, 0x06, 0x04, 0x02, 0x00, 0x00};
+   const uint8_t break_one_if[] = {0x8f, 0x05, 0x54, 0x03, 0x00, 0x01};
+   const uint8_t exit_if_none[] = {0x0f, 0x01, 0x54};
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_push, sizeof(loop_push)),
+      0u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_update, sizeof(loop_update)),
+      1u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_pop, sizeof(loop_pop)), 1u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, break_one_if,
+                                          sizeof(break_one_if)),
+             0u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, exit_if_none,
+                                          sizeof(exit_if_none)),
+             1u);
+
+   const uint8_t *binary = (const uint8_t *)compiled.binary;
+   unsigned branches = 0;
+   for (unsigned offset = 0; offset + 10 <= compiled.info.binary_size;
+        ++offset) {
+      if (binary[offset] != 0x0f || binary[offset + 1] != 0x00 ||
+          binary[offset + 2] != 0x54 || binary[offset + 9] != 0x00)
+         continue;
+      int64_t displacement = 0;
+      for (unsigned byte = 0; byte < 6; ++byte)
+         displacement |= (int64_t)binary[offset + 3 + byte] << (8 * byte);
+      if (displacement & (INT64_C(1) << 47))
+         displacement |= ~((INT64_C(1) << 48) - 1);
+      const int64_t target = (int64_t)offset + displacement;
+      EXPECT_LT(target, (int64_t)offset);
+      EXPECT_GE(target, 0);
+      EXPECT_LT(target, (int64_t)compiled.info.binary_size);
+      ++branches;
+   }
+   EXPECT_EQ(branches, 1u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, NestedLoopsUseIndependentMaskDepthAndBreakTargets)
+{
+   nir_shader *nir = apple9_nested_loop_shader();
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   const uint8_t loop_push[] = {0x0f, 0x05, 0x54, 0x1a};
+   const uint8_t outer_update[] = {0x8f, 0x04, 0x54, 0x22};
+   const uint8_t inner_update[] = {0x8f, 0x04, 0x54, 0x26};
+   const uint8_t loop_pop[] = {0x0f, 0x06, 0x04, 0x02, 0x00, 0x00};
+   const uint8_t outer_break[] = {0x8f, 0x05, 0x54, 0x03, 0x00, 0x01};
+   const uint8_t inner_break[] = {0x8f, 0x05, 0x54, 0x03, 0x00, 0x02};
+   const uint8_t exit_if_none[] = {0x0f, 0x01, 0x54};
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_push, sizeof(loop_push)),
+      1u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, outer_update,
+                                          sizeof(outer_update)),
+             1u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, inner_update,
+                                          sizeof(inner_update)),
+             1u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_pop, sizeof(loop_pop)), 2u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, outer_break, sizeof(outer_break)),
+      0u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, inner_break, sizeof(inner_break)),
+      0u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, exit_if_none,
+                                          sizeof(exit_if_none)),
+             2u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, ContinueConstructLowersToStructuredMaskedLatch)
+{
+   nir_shader *nir = apple9_counted_loop_shader(true);
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   const uint8_t loop_push[] = {0x0f, 0x05, 0x54, 0x1a};
+   const uint8_t loop_update[] = {0x8f, 0x04, 0x54, 0x22};
+   const uint8_t loop_pop[] = {0x0f, 0x06, 0x04, 0x02, 0x00, 0x00};
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_push, sizeof(loop_push)),
+      0u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_update, sizeof(loop_update)),
+      1u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_pop, sizeof(loop_pop)), 1u);
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, StructuredLoopDoesNotRequireCanonicalTestPosition)
+{
+   nir_shader *nir = apple9_mid_body_break_loop_shader();
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   const uint8_t loop_push[] = {0x0f, 0x05, 0x54, 0x1a};
+   const uint8_t loop_update[] = {0x8f, 0x04, 0x54, 0x22};
+   const uint8_t loop_pop[] = {0x0f, 0x06, 0x04, 0x02, 0x00, 0x00};
+   const uint8_t exit_if_none[] = {0x0f, 0x01, 0x54};
+
+   /* The top-level loop uses the hardware's implicit initial mask.  The two
+    * ordinary conditionals have their own kind-1 scopes; the middle break
+    * directly updates the loop mask, and the loop ends in one bare backedge
+    * plus its kind-2 pop. */
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_push, sizeof(loop_push)),
+      0u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_update, sizeof(loop_update)),
+      1u);
+   EXPECT_EQ(
+      apple9_binary_count_sequence(&compiled, loop_pop, sizeof(loop_pop)), 1u);
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, exit_if_none,
+                                          sizeof(exit_if_none)),
+             1u);
+   EXPECT_EQ(apple9_binary_count_exec_pushes(&compiled), 2u);
+
+   const uint8_t *binary = (const uint8_t *)compiled.binary;
+   unsigned backedges = 0;
+   for (unsigned offset = 0; offset + 10 <= compiled.info.binary_size;
+        ++offset) {
+      if (binary[offset] != 0x0f || binary[offset + 1] != 0x00 ||
+          binary[offset + 2] != 0x54 || binary[offset + 9] != 0x00)
+         continue;
+      ++backedges;
+   }
+   EXPECT_EQ(backedges, 1u);
+
+   free(compiled.binary);
+   ralloc_free(nir);
+}
+
+TEST(Apple9Compiler, GeneralNestedBreakUsesNativeMaskUnwind)
+{
+   nir_shader *nir = apple9_general_break_loop_shader();
+   struct agx_shader_part compiled = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_compile_apple9_tiny(nir, &compiled, nullptr, &reason))
+      << (reason ? reason : "no diagnostic");
+
+   const uint8_t unwind[] = {0x8f, 0x05, 0x54, 0x03, 0x00, 0x01};
+   EXPECT_EQ(apple9_binary_count_sequence(&compiled, unwind, sizeof(unwind)),
+             1u);
+   free(compiled.binary);
+   ralloc_free(nir);
 }
 
 TEST(Apple9Compiler, ConditionalLoadsAreCompletedInsideTheirMaskRegions)

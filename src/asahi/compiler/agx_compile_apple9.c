@@ -293,9 +293,18 @@ apple9_validate_cf_list(struct exec_list *list, const char **reason)
             return false;
          break;
       }
+      case nir_cf_node_loop: {
+         nir_loop *loop = nir_cf_node_as_loop(node);
+         if (nir_loop_has_continue_construct(loop)) {
+            *reason = "Apple9 loop continuation constructs were not lowered";
+            return false;
+         }
+         if (!apple9_validate_cf_list(&loop->body, reason))
+            return false;
+         break;
+      }
       default:
-         *reason =
-            "Apple9 control flow currently supports structured if/else only";
+         *reason = "Apple9 compiler requires structured NIR control flow";
          return false;
       }
    }
@@ -304,10 +313,10 @@ apple9_validate_cf_list(struct exec_list *list, const char **reason)
 }
 
 static bool
-apple9_cf_list_has_if(struct exec_list *list)
+apple9_cf_list_has_control_flow(struct exec_list *list)
 {
    foreach_list_typed(nir_cf_node, node, node, list) {
-      if (node->type == nir_cf_node_if)
+      if (node->type == nir_cf_node_if || node->type == nir_cf_node_loop)
          return true;
       if (node->type != nir_cf_node_block)
          return false;
@@ -409,10 +418,22 @@ apple9_instruction_is_in_subset(nir_instr *instr)
    }
    case nir_instr_type_phi:
       return true;
+   case nir_instr_type_jump: {
+      nir_jump_type type = nir_instr_as_jump(instr)->type;
+      return type == nir_jump_break || type == nir_jump_continue;
+   }
    default:
       return false;
    }
 }
+
+struct apple9_loop_context {
+   struct apple9_loop_context *parent;
+   nir_loop *nir;
+   nir_block *exit;
+   unsigned depth;
+   unsigned mask_depth;
+};
 
 struct apple9_dag_lower {
    struct agx_apple9_vir_program program;
@@ -429,6 +450,8 @@ struct apple9_dag_lower {
    unsigned active_load_instruction_count;
    unsigned active_emitted_load_count;
    bool structured_cf;
+   unsigned mask_depth;
+   struct apple9_loop_context *loop;
    const char *reason;
 };
 
@@ -2065,15 +2088,22 @@ apple9_block_has_phi(nir_block *block)
 }
 
 static bool
+apple9_block_has_jump(nir_block *block)
+{
+   nir_instr *last = nir_block_last_instr(block);
+   return last != NULL && last->type == nir_instr_type_jump;
+}
+
+static bool
 apple9_cf_list_has_effects(const struct apple9_dag_lower *lower,
-                           struct util_dynarray *stores,
-                           struct exec_list *list)
+                           struct util_dynarray *stores, struct exec_list *list)
 {
    foreach_list_typed(nir_cf_node, node, node, list) {
       if (node->type == nir_cf_node_block) {
          nir_block *block = nir_cf_node_as_block(node);
          if (apple9_block_has_load(lower, block) ||
-             apple9_block_has_store(stores, block) || apple9_block_has_phi(block))
+             apple9_block_has_store(stores, block) ||
+             apple9_block_has_phi(block) || apple9_block_has_jump(block))
             return true;
       } else if (node->type == nir_cf_node_if) {
          nir_if *nif = nir_cf_node_as_if(node);
@@ -2083,6 +2113,10 @@ apple9_cf_list_has_effects(const struct apple9_dag_lower *lower,
              apple9_cf_list_has_effects(lower, stores, &nif->then_list) ||
              apple9_cf_list_has_effects(lower, stores, &nif->else_list))
             return true;
+      } else if (node->type == nir_cf_node_loop) {
+         nir_loop *loop = nir_cf_node_as_loop(node);
+         if (apple9_cf_list_has_effects(lower, stores, &loop->body))
+            return true;
       }
    }
 
@@ -2091,7 +2125,7 @@ apple9_cf_list_has_effects(const struct apple9_dag_lower *lower,
 
 static unsigned
 apple9_load_instruction_count_in_block(const struct apple9_dag_lower *lower,
-                                        nir_block *block)
+                                       nir_block *block)
 {
    unsigned count = 0;
    for (unsigned i = 0; i < lower->load_count; ++i) {
@@ -2147,19 +2181,72 @@ apple9_find_store(struct util_dynarray *stores, nir_intrinsic_instr *intr)
    return NULL;
 }
 
+static bool apple9_emit_phi_copies_for_edge(struct apple9_dag_lower *lower,
+                                            nir_block *merge,
+                                            nir_block *predecessor);
+
+static bool
+apple9_block_reaches(nir_block *block, nir_block *successor)
+{
+   return block != NULL && (block->successors[0] == successor ||
+                            block->successors[1] == successor);
+}
+
+static bool
+apple9_emit_jump(struct apple9_dag_lower *lower, nir_block *block,
+                 nir_jump_instr *jump)
+{
+   if (jump->type == nir_jump_continue) {
+      lower->reason =
+         "Apple9 encountered a continue after continuation lowering";
+      return false;
+   }
+   if (jump->type != nir_jump_break || lower->loop == NULL) {
+      lower->reason = "Apple9 supports only structured loop break jumps";
+      return false;
+   }
+
+   if (apple9_block_reaches(block, lower->loop->exit) &&
+       !apple9_emit_phi_copies_for_edge(lower, lower->loop->exit, block))
+      return false;
+
+   if (lower->mask_depth < lower->loop->mask_depth) {
+      lower->reason = "Apple9 loop break has an invalid mask-stack depth";
+      return false;
+   }
+
+   /* The native six-byte break form counts conditional scopes relative to
+    * the target loop independently of nested-loop depth.  A direct break is
+    * tag 2, one enclosing if is tag 3, and so on. */
+   const unsigned scope_tag = 2 + (lower->mask_depth - lower->loop->mask_depth);
+   if (scope_tag > UINT8_MAX || lower->loop->depth > UINT8_MAX) {
+      lower->reason = "Apple9 loop nesting exceeds the encoded break fields";
+      return false;
+   }
+
+   const bool ok = agx_apple9_vir_emit_side_effect(
+      &lower->program, AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
+      AGX_APPLE9_ENC_BREAK_MASK_UNWIND, NULL, 0,
+      AGX_APPLE9_BREAK_IMMEDIATE(scope_tag, lower->loop->depth));
+   if (!ok)
+      lower->reason = "could not emit an Apple9 loop break";
+   return ok;
+}
+
 /* Emit one NIR block in its original instruction order. Pure SSA expressions
  * are still recursively selected, but dominance guarantees that recursion
  * cannot pull a definition across an earlier side effect. Device loads are
  * issued where their NIR instruction occurs and stores are appended exactly
  * where their intrinsic occurs. */
 static bool
-apple9_emit_block(struct apple9_dag_lower *lower,
-                  struct util_dynarray *stores, nir_block *block)
+apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
+                  nir_block *block)
 {
    lower->active_load_block = block;
    lower->active_load_instruction_count =
       apple9_load_instruction_count_in_block(lower, block);
    lower->active_emitted_load_count = 0;
+   bool loads_materialized = false;
 
    nir_foreach_instr(instr, block) {
       if (instr->type == nir_instr_type_phi) {
@@ -2173,6 +2260,14 @@ apple9_emit_block(struct apple9_dag_lower *lower,
                return false;
             }
          }
+         continue;
+      }
+
+      if (instr->type == nir_instr_type_jump) {
+         if (!apple9_materialize_loads_in_block(lower, block) ||
+             !apple9_emit_jump(lower, block, nir_instr_as_jump(instr)))
+            return false;
+         loads_materialized = true;
          continue;
       }
 
@@ -2214,7 +2309,7 @@ apple9_emit_block(struct apple9_dag_lower *lower,
    /* Pending asynchronous values are local to the current execution-mask
     * region. Keep the correctness-first invariant that none crosses a NIR
     * block boundary in a structured program. */
-   if (lower->structured_cf &&
+   if (lower->structured_cf && !loads_materialized &&
        !apple9_materialize_loads_in_block(lower, block))
       return false;
 
@@ -2243,8 +2338,8 @@ apple9_predicate_condition(const struct apple9_compare *compare,
       /* Native Metal uses this double-inverted extended sequence.  Unlike
        * !(a < b), it preserves IEEE unordered/NaN behavior. */
       plan->encoding = AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED;
-      plan->immediate = AGX_APPLE9_PREDICATE_EXT_FGE_SEQUENCE |
-                        AGX_APPLE9_PREDICATE_INVERT;
+      plan->immediate =
+         AGX_APPLE9_PREDICATE_EXT_FGE_SEQUENCE | AGX_APPLE9_PREDICATE_INVERT;
       plan->invert_push = true;
       return true;
    } else if (compare->domain == APPLE9_COMPARE_UNSIGNED &&
@@ -2297,11 +2392,10 @@ apple9_predicate_condition(const struct apple9_compare *compare,
 }
 
 static bool
-apple9_emit_if_predicate(struct apple9_dag_lower *lower, nir_if *nif,
-                         bool *invert_push)
+apple9_emit_condition_predicate(struct apple9_dag_lower *lower,
+                                nir_def *condition, bool *invert_push)
 {
-   nir_scalar predicate =
-      apple9_chase_trivial(nir_get_scalar(nif->condition.ssa, 0));
+   nir_scalar predicate = apple9_chase_trivial(nir_get_scalar(condition, 0));
 
    struct apple9_predicate_plan plan;
    struct apple9_compare compare;
@@ -2341,6 +2435,14 @@ apple9_emit_if_predicate(struct apple9_dag_lower *lower, nir_if *nif,
 }
 
 static bool
+apple9_emit_if_predicate(struct apple9_dag_lower *lower, nir_if *nif,
+                         bool *invert_push)
+{
+   return apple9_emit_condition_predicate(lower, nif->condition.ssa,
+                                          invert_push);
+}
+
+static bool
 apple9_emit_exec_mask(struct apple9_dag_lower *lower, bool push, bool invert)
 {
    assert(push || !invert);
@@ -2371,53 +2473,41 @@ apple9_emit_exec_mask_else(struct apple9_dag_lower *lower)
  * definition whose storage remains live while both predecessor edges
  * conditionally write it. */
 static bool
-apple9_prepare_phis(struct apple9_dag_lower *lower, nir_if *nif,
-                    nir_block *merge)
+apple9_prepare_phis(struct apple9_dag_lower *lower, nir_block *merge)
 {
-   nir_block *then_pred = apple9_cf_list_last_block(&nif->then_list);
-   nir_block *else_pred = apple9_cf_list_last_block(&nif->else_list);
-   if (then_pred == NULL || else_pred == NULL) {
-      lower->reason = "Apple9 if/else has an incomplete structured arm";
-      return false;
-   }
-
    nir_foreach_phi(phi, merge) {
       if (phi->def.num_components < 1 || phi->def.num_components > 4 ||
           (phi->def.bit_size != 1 && phi->def.bit_size != 8 &&
-           phi->def.bit_size != 16 &&
-           phi->def.bit_size != 32)) {
+           phi->def.bit_size != 16 && phi->def.bit_size != 32)) {
          lower->reason =
-            "Apple9 if/else requires one-to-four-component 1/8/16/32-bit phis";
+            "Apple9 requires one-to-four-component 1/8/16/32-bit phis";
          return false;
       }
 
-      bool has_then = false;
-      bool has_else = false;
+      unsigned sources = 0;
       nir_foreach_phi_src(src, phi) {
-         if (src->pred == then_pred && !has_then)
-            has_then = true;
-         else if (src->pred == else_pred && !has_else)
-            has_else = true;
-         else {
-            lower->reason =
-               "Apple9 if/else phi has a predecessor outside its two arms";
+         if (!apple9_block_reaches(src->pred, merge)) {
+            lower->reason = "Apple9 phi source is not a CFG predecessor";
             return false;
          }
+         ++sources;
       }
-      if (!has_then || !has_else) {
-         lower->reason = "Apple9 if/else phi requires both arm values";
+      if (sources == 0) {
+         lower->reason = "Apple9 phi has no predecessor values";
          return false;
       }
 
       for (unsigned c = 0; c < phi->def.num_components; ++c) {
          const unsigned key = phi->def.index * 4 + c;
          if (key >= lower->ssa_map_count) {
-            lower->reason = "Apple9 if/else phi has an invalid SSA index";
+            lower->reason = "Apple9 phi has an invalid SSA index";
             return false;
          }
+         if (lower->ssa_to_vreg[key] != AGX_APPLE9_VREG_INVALID)
+            continue;
          uint32_t merge_vreg = agx_apple9_vir_emit_merge(&lower->program);
          if (merge_vreg == AGX_APPLE9_VREG_INVALID) {
-            lower->reason = "out of memory allocating an Apple9 merge value";
+            lower->reason = "out of memory allocating an Apple9 phi value";
             return false;
          }
          lower->ssa_to_vreg[key] = merge_vreg;
@@ -2445,7 +2535,7 @@ apple9_emit_phi_copies_for_edge(struct apple9_dag_lower *lower,
       }
 
       if (source == NULL) {
-         lower->reason = "Apple9 if/else phi edge is incomplete";
+         lower->reason = "Apple9 phi edge is incomplete";
          return false;
       }
 
@@ -2453,7 +2543,7 @@ apple9_emit_phi_copies_for_edge(struct apple9_dag_lower *lower,
          const unsigned key = phi->def.index * 4 + c;
          if (key >= lower->ssa_map_count ||
              lower->ssa_to_vreg[key] == AGX_APPLE9_VREG_INVALID) {
-            lower->reason = "Apple9 if/else phi edge is incomplete";
+            lower->reason = "Apple9 phi edge is incomplete";
             return false;
          }
 
@@ -2462,10 +2552,10 @@ apple9_emit_phi_copies_for_edge(struct apple9_dag_lower *lower,
                              ? apple9_lower_bool_scalar(lower, source_scalar)
                              : apple9_lower_dag_scalar(lower, source_scalar);
          if (value == AGX_APPLE9_VREG_INVALID ||
-             !agx_apple9_vir_emit_masked_copy(
-                &lower->program, lower->ssa_to_vreg[key], value)) {
+             !agx_apple9_vir_emit_masked_copy(&lower->program,
+                                              lower->ssa_to_vreg[key], value)) {
             if (lower->reason == NULL)
-               lower->reason = "could not emit an Apple9 masked phi-edge copy";
+               lower->reason = "could not emit an Apple9 phi-edge copy";
             return false;
          }
       }
@@ -2479,9 +2569,284 @@ static bool apple9_emit_cf_list(struct apple9_dag_lower *lower,
                                 struct exec_list *list);
 
 static bool
+apple9_emit_loop_mask_op(struct apple9_dag_lower *lower,
+                         enum agx_apple9_vir_opcode op,
+                         enum agx_apple9_encoding encoding, uint32_t immediate,
+                         const char *failure)
+{
+   const bool ok = agx_apple9_vir_emit_side_effect(
+      &lower->program, op, encoding, NULL, 0, immediate);
+   if (!ok)
+      lower->reason = failure;
+   return ok;
+}
+
+static bool
+apple9_emit_loop_backedge(struct apple9_dag_lower *lower,
+                          unsigned header_instruction)
+{
+   if (!agx_apple9_vir_emit_branch(&lower->program, AGX_APPLE9_VIR_JMP_EXEC_ANY,
+                                   AGX_APPLE9_ENC_JMP_EXEC_ANY,
+                                   header_instruction)) {
+      lower->reason = "could not emit an Apple9 loop backedge";
+      return false;
+   }
+   return true;
+}
+
+/* Recognize the NIR shape for `if (condition) break`. It is lowered directly
+ * into a loop-mask update rather than pushing a temporary conditional scope. */
+static nir_block *
+apple9_direct_break_arm(struct exec_list *list)
+{
+   nir_block *result = NULL;
+   foreach_list_typed(nir_cf_node, node, node, list) {
+      if (node->type != nir_cf_node_block || result != NULL)
+         return NULL;
+
+      nir_block *block = nir_cf_node_as_block(node);
+      unsigned instructions = 0;
+      nir_foreach_instr(instr, block) {
+         ++instructions;
+         if (instr->type != nir_instr_type_jump ||
+             nir_instr_as_jump(instr)->type != nir_jump_break)
+            return NULL;
+      }
+      if (instructions != 1)
+         return NULL;
+      result = block;
+   }
+   return result;
+}
+
+static bool
+apple9_emit_loop_predicate(struct apple9_dag_lower *lower,
+                           nir_if *nif, bool break_on_true,
+                           unsigned predicate_bank)
+{
+   /* Native loop breaks publish an extended integer-equality predicate before
+    * LOOP_MASK_UPDATE. Keep this correctness-first lowering general by
+    * materializing the NIR Boolean to 0/1, then comparing it with zero.  The
+    * loop update removes lanes selected by this predicate, so select the
+    * break edge itself: compare with one for a true-arm break and with zero
+    * for a false-arm break.  In particular, do not extrapolate the ordinary
+    * predicate's byte-0 inversion bit to this loop-tail form; native loop
+    * predicates use an explicit scratch-bank convention.
+    *
+    * Metal often avoids the materialization by strength-reducing comparisons
+    * to equality with a terminal value. That is an independent optimization. */
+   nir_scalar condition =
+      apple9_chase_trivial(nir_get_scalar(nif->condition.ssa, 0));
+   uint32_t sources[2] = {
+      apple9_lower_bool_scalar(lower, condition),
+      apple9_dag_imm(lower, break_on_true ? 1 : 0),
+   };
+   if (sources[0] == AGX_APPLE9_VREG_INVALID ||
+       sources[1] == AGX_APPLE9_VREG_INVALID)
+      return false;
+
+   if (!agx_apple9_vir_emit_side_effect(
+          &lower->program, AGX_APPLE9_VIR_PREDICATE_COMPARE,
+          AGX_APPLE9_ENC_PREDICATE_COMPARE_LOOP, sources, ARRAY_SIZE(sources),
+          AGX_APPLE9_PREDICATE_EXT_IEQ |
+             AGX_APPLE9_PREDICATE_BANK(predicate_bank))) {
+      lower->reason = "could not emit an Apple9 loop completion predicate";
+      return false;
+   }
+   return true;
+}
+
+/* A source-level `if (condition) break` consumes its condition directly; the
+ * condition is not first pushed as another ordinary mask scope.  Directly in
+ * a loop, native Metal updates the current loop-mask entry and skips to the
+ * loop pop when no lanes remain.  Beneath additional observable conditionals,
+ * the six-byte form removes the matching lanes from the target loop while
+ * unwinding those active scopes.
+ *
+ * Branch targets are left unresolved here.  apple9_emit_loop() patches every
+ * unresolved JMP_EXEC_NONE in this loop body to the loop-pop instruction once
+ * its final instruction index is known. */
+static bool
+apple9_emit_direct_loop_break_if(struct apple9_dag_lower *lower,
+                                 struct util_dynarray *stores, nir_if *nif,
+                                 bool *handled)
+{
+   *handled = false;
+   if (lower->loop == NULL)
+      return true;
+
+   nir_block *then_break = apple9_direct_break_arm(&nif->then_list);
+   nir_block *else_break = apple9_direct_break_arm(&nif->else_list);
+   const bool then_empty =
+      !apple9_cf_list_has_effects(lower, stores, &nif->then_list);
+   const bool else_empty =
+      !apple9_cf_list_has_effects(lower, stores, &nif->else_list);
+   if (!((then_break != NULL && else_empty) ||
+         (else_break != NULL && then_empty)))
+      return true;
+
+   const bool break_on_true = then_break != NULL;
+   nir_block *break_predecessor = break_on_true ? then_break : else_break;
+
+   /* Exit phis must receive their breaking-edge values while precisely the
+    * breaking lanes are active.  Use a temporary ordinary mask only for the
+    * copies, then restore the loop mask before performing the direct update. */
+   if (apple9_block_has_phi(lower->loop->exit)) {
+      bool invert_break = false;
+      if (!apple9_emit_if_predicate(lower, nif, &invert_break) ||
+          !apple9_emit_exec_mask(lower, true, invert_break ^ !break_on_true))
+         return false;
+      ++lower->mask_depth;
+      if (!apple9_emit_phi_copies_for_edge(lower, lower->loop->exit,
+                                           break_predecessor) ||
+          !apple9_emit_exec_mask(lower, false, false))
+         return false;
+      assert(lower->mask_depth > 0);
+      --lower->mask_depth;
+   }
+
+   /* The direct update consumes the predicate associated with the current
+    * loop-mask entry.  BREAK_MASK_UNWIND is different: native Metal keeps
+    * the predicate tied to the target loop while additional conditional
+    * scopes accumulate above it.  Thus one and two enclosing ifs both use
+    * bank 1 for a depth-one loop; a break from an inner depth-two loop uses
+    * bank 2. */
+   const bool direct_update = lower->mask_depth == lower->loop->mask_depth;
+   const unsigned predicate_bank =
+      direct_update ? lower->loop->depth - 1 : lower->loop->depth;
+   if (predicate_bank >= AGX_APPLE9_PREDICATE_BANK_COUNT) {
+      lower->reason = "Apple9 loop control exhausted the predicate scratch bank";
+      return false;
+   }
+   if (!apple9_emit_loop_predicate(lower, nif, break_on_true, predicate_bank))
+      return false;
+
+   if (direct_update) {
+      const unsigned selector =
+         AGX_APPLE9_LOOP_MASK_INVERT |
+         AGX_APPLE9_LOOP_MASK_PREDICATE(predicate_bank);
+      if (!apple9_emit_loop_mask_op(
+             lower, AGX_APPLE9_VIR_LOOP_MASK_UPDATE,
+             AGX_APPLE9_ENC_LOOP_MASK_UPDATE, selector,
+             "could not emit an Apple9 direct-break loop-mask update") ||
+          !agx_apple9_vir_emit_branch(
+             &lower->program, AGX_APPLE9_VIR_JMP_EXEC_NONE,
+             AGX_APPLE9_ENC_JMP_EXEC_NONE, AGX_APPLE9_VREG_INVALID)) {
+         if (lower->reason == NULL)
+            lower->reason = "could not emit an Apple9 direct-break branch";
+         return false;
+      }
+   } else {
+      const unsigned scope_tag =
+         2 + (lower->mask_depth - lower->loop->mask_depth);
+      if (scope_tag > UINT8_MAX || lower->loop->depth > UINT8_MAX ||
+          !agx_apple9_vir_emit_side_effect(
+             &lower->program, AGX_APPLE9_VIR_BREAK_MASK_UNWIND,
+             AGX_APPLE9_ENC_BREAK_MASK_UNWIND, NULL, 0,
+             AGX_APPLE9_BREAK_IMMEDIATE(scope_tag, lower->loop->depth))) {
+         if (lower->reason == NULL)
+            lower->reason = "could not emit an Apple9 nested loop break";
+         return false;
+      }
+   }
+
+   *handled = true;
+   return true;
+}
+
+static bool
+apple9_emit_loop(struct apple9_dag_lower *lower, struct util_dynarray *stores,
+                 nir_loop *loop)
+{
+   nir_cf_node *previous = nir_cf_node_prev(&loop->cf_node);
+   nir_cf_node *next = nir_cf_node_next(&loop->cf_node);
+   if (previous == NULL || previous->type != nir_cf_node_block ||
+       next == NULL || next->type != nir_cf_node_block) {
+      lower->reason = "Apple9 loop lacks structured entry or exit blocks";
+      return false;
+   }
+
+   nir_block *entry = nir_cf_node_as_block(previous);
+   nir_block *header = nir_loop_first_block(loop);
+   nir_block *latch = nir_loop_last_block(loop);
+   nir_block *exit = nir_cf_node_as_block(next);
+
+   if (apple9_block_has_phi(header)) {
+      if (!apple9_prepare_phis(lower, header) ||
+          !apple9_emit_phi_copies_for_edge(lower, header, entry))
+         return false;
+   }
+   if (apple9_block_has_phi(exit) && !apple9_prepare_phis(lower, exit))
+      return false;
+
+   /* Match Apple8's structured-loop architecture: the complete NIR body is
+    * one implicit loop. Explicit break edges update or unwind the Apple9 loop
+    * mask, and JMP_EXEC_ANY repeats while that mask still contains lanes.
+    * There is no backend-recognized source-level top/bottom test.
+    *
+    * At top level the hardware supplies the initial loop mask implicitly,
+    * matching native bottom-tested loops. A nested loop must save the
+    * enclosing lane population in an explicit loop scope. */
+   if (lower->mask_depth > 0 &&
+       !apple9_emit_loop_mask_op(lower, AGX_APPLE9_VIR_LOOP_MASK_PUSH,
+                                 AGX_APPLE9_ENC_LOOP_MASK_PUSH, 0,
+                                 "could not emit an Apple9 loop-mask push"))
+      return false;
+   ++lower->mask_depth;
+
+   const unsigned header_instruction = lower->program.instruction_count;
+   struct apple9_loop_context context = {
+      .parent = lower->loop,
+      .nir = loop,
+      .exit = exit,
+      .depth = lower->loop ? lower->loop->depth + 1 : 1,
+      .mask_depth = lower->mask_depth,
+   };
+   lower->loop = &context;
+
+   if (!apple9_emit_cf_list(lower, stores, &loop->body))
+      return false;
+
+   if (apple9_block_reaches(latch, header)) {
+      if (apple9_block_has_phi(header) &&
+          !apple9_emit_phi_copies_for_edge(lower, header, latch))
+         return false;
+      if (!apple9_emit_loop_backedge(lower, header_instruction))
+         return false;
+   }
+
+   lower->loop = context.parent;
+
+   /* Direct breaks branch to this loop's kind-2 pop.  Nested loops have
+    * already resolved their own branches, so the remaining unresolved
+    * JMP_EXEC_NONE instructions in this body's range belong to this loop. */
+   const unsigned loop_pop_instruction = lower->program.instruction_count;
+   for (unsigned i = header_instruction; i < loop_pop_instruction; ++i) {
+      struct agx_apple9_vir_instr *instruction =
+         &lower->program.instructions[i];
+      if (instruction->op == AGX_APPLE9_VIR_JMP_EXEC_NONE &&
+          instruction->branch_target == AGX_APPLE9_VREG_INVALID)
+         instruction->branch_target = loop_pop_instruction;
+   }
+
+   if (!apple9_emit_loop_mask_op(lower, AGX_APPLE9_VIR_LOOP_MASK_POP,
+                                 AGX_APPLE9_ENC_LOOP_MASK_POP, 0,
+                                 "could not emit an Apple9 loop-mask pop"))
+      return false;
+   assert(lower->mask_depth > 0);
+   --lower->mask_depth;
+   return true;
+}
+
+static bool
 apple9_emit_if(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                nir_if *nif)
 {
+   bool handled = false;
+   if (!apple9_emit_direct_loop_break_if(lower, stores, nif, &handled) ||
+       handled)
+      return handled;
+
    nir_cf_node *next = nir_cf_node_next(&nif->cf_node);
    if (next == NULL || next->type != nir_cf_node_block) {
       lower->reason = "Apple9 if/else has no structured merge block";
@@ -2491,46 +2856,48 @@ apple9_emit_if(struct apple9_dag_lower *lower, struct util_dynarray *stores,
    nir_block *merge = nir_cf_node_as_block(next);
    const bool has_phis = apple9_block_has_phi(merge);
    const bool has_then =
-      has_phis ||
-      apple9_cf_list_has_effects(lower, stores, &nif->then_list);
+      has_phis || apple9_cf_list_has_effects(lower, stores, &nif->then_list);
    const bool has_else =
-      has_phis ||
-      apple9_cf_list_has_effects(lower, stores, &nif->else_list);
+      has_phis || apple9_cf_list_has_effects(lower, stores, &nif->else_list);
 
    /* A condition with no observable arm and no escaping value is dead. */
    if (!has_then && !has_else)
       return true;
 
-   if (has_phis && !apple9_prepare_phis(lower, nif, merge))
+   if (has_phis && !apple9_prepare_phis(lower, merge))
       return false;
 
    bool invert_push = false;
    if (!apple9_emit_if_predicate(lower, nif, &invert_push) ||
        !apple9_emit_exec_mask(lower, true, invert_push))
       return false;
+   ++lower->mask_depth;
 
    nir_block *then_pred = apple9_cf_list_last_block(&nif->then_list);
    nir_block *else_pred = apple9_cf_list_last_block(&nif->else_list);
    if ((has_then && !apple9_emit_cf_list(lower, stores, &nif->then_list)) ||
-       (has_phis &&
+       (has_phis && apple9_block_reaches(then_pred, merge) &&
         !apple9_emit_phi_copies_for_edge(lower, merge, then_pred)))
       return false;
 
    if (has_else) {
       if (!apple9_emit_exec_mask_else(lower) ||
           !apple9_emit_cf_list(lower, stores, &nif->else_list) ||
-          (has_phis &&
+          (has_phis && apple9_block_reaches(else_pred, merge) &&
            !apple9_emit_phi_copies_for_edge(lower, merge, else_pred)))
          return false;
    }
 
-   return apple9_emit_exec_mask(lower, false, false);
+   if (!apple9_emit_exec_mask(lower, false, false))
+      return false;
+   assert(lower->mask_depth > 0);
+   --lower->mask_depth;
+   return true;
 }
 
-/* Apple9's mask operations implicitly address the top of a hardware LIFO
- * stack, so nested structured NIR needs no encoded depth. Recursively emit
- * regions in hardware order while keeping ordinary VIR and register
- * allocation linear, matching the actual predicated instruction stream. */
+/* Apple9's mask operations address a recursive hardware mask structure.
+ * Mirror NIR directly: emit each structured block, if, or loop in program
+ * order while keeping VIR and allocation linear. */
 static bool
 apple9_emit_cf_list(struct apple9_dag_lower *lower,
                     struct util_dynarray *stores, struct exec_list *list)
@@ -2545,9 +2912,12 @@ apple9_emit_cf_list(struct apple9_dag_lower *lower,
          if (!apple9_emit_if(lower, stores, nir_cf_node_as_if(node)))
             return false;
          break;
+      case nir_cf_node_loop:
+         if (!apple9_emit_loop(lower, stores, nir_cf_node_as_loop(node)))
+            return false;
+         break;
       default:
-         lower->reason =
-            "Apple9 control flow currently supports structured if/else only";
+         lower->reason = "Apple9 compiler requires structured control flow";
          return false;
       }
    }
@@ -2581,7 +2951,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       .loads = loads.data,
       .load_count =
          util_dynarray_num_elements(&loads, struct apple9_scalar_load),
-      .structured_cf = apple9_cf_list_has_if(&impl->body),
+      .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
    for (unsigned i = 0; i < ARRAY_SIZE(lower.system_vreg); ++i)
       lower.system_vreg[i] = AGX_APPLE9_VREG_INVALID;
@@ -2661,8 +3031,15 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    struct apple9_emitter emitter = {.bytes = UTIL_DYNARRAY_INIT};
    unsigned emission_max_gpr = lower.program.max_phys_gpr;
    struct agx_apple9_packed_instruction packed;
+   unsigned *vir_offsets =
+      malloc((lower.program.instruction_count + 1) * sizeof(*vir_offsets));
+   if (vir_offsets == NULL) {
+      *reason = "out of memory recording Apple9 branch boundaries";
+      goto fail;
+   }
 
    for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
+      vir_offsets[i] = emitter.bytes.size;
       const struct agx_apple9_vir_instr *instruction =
          &lower.program.instructions[i];
       if (instruction->op == AGX_APPLE9_VIR_MERGE)
@@ -2671,15 +3048,17 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          if (!apple9_emit_collect_vir(&emitter, instruction, lower.program.phys,
                                       &emission_max_gpr, reason)) {
             util_dynarray_fini(&emitter.bytes);
+            free(vir_offsets);
             goto fail;
          }
          continue;
       }
       if (instruction->op == AGX_APPLE9_VIR_MASKED_COPY) {
-         if (!apple9_emit_masked_copy_vir(
-                &emitter, instruction, lower.program.phys, &emission_max_gpr,
-                reason)) {
+         if (!apple9_emit_masked_copy_vir(&emitter, instruction,
+                                          lower.program.phys, &emission_max_gpr,
+                                          reason)) {
             util_dynarray_fini(&emitter.bytes);
+            free(vir_offsets);
             goto fail;
          }
          continue;
@@ -2688,6 +3067,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          if (!apple9_emit_device_store_vir(&emitter, instruction,
                                            lower.program.phys, reason)) {
             util_dynarray_fini(&emitter.bytes);
+            free(vir_offsets);
             goto fail;
          }
          continue;
@@ -2711,6 +3091,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          if (*reason == NULL)
             *reason = "Apple9 DAG instruction pack failed";
          util_dynarray_fini(&emitter.bytes);
+         free(vir_offsets);
          goto fail;
       }
       if (getenv("AGX_APPLE9_TRACE") != NULL) {
@@ -2727,6 +3108,56 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          fprintf(stderr, " live=%#x slot=%u\n", instruction->live_after_mask,
                  instruction->scoreboard_slot);
       }
+   }
+   vir_offsets[lower.program.instruction_count] = emitter.bytes.size;
+
+   /* Branch displacements are relative to the start of the branch, not its
+    * end. Resolve them only now: COLLECT and MASKED_COPY pseudos can emit a
+    * variable number of physical instructions after allocation. */
+   for (unsigned i = 0; i < lower.program.instruction_count; ++i) {
+      const struct agx_apple9_vir_instr *instruction =
+         &lower.program.instructions[i];
+      if (instruction->op != AGX_APPLE9_VIR_JMP_EXEC_ANY &&
+          instruction->op != AGX_APPLE9_VIR_JMP_EXEC_NONE)
+         continue;
+
+      if (instruction->branch_target > lower.program.instruction_count) {
+         *reason = "Apple9 branch targets an invalid VIR boundary";
+         util_dynarray_fini(&emitter.bytes);
+         free(vir_offsets);
+         goto fail;
+      }
+      const int64_t displacement =
+         (int64_t)vir_offsets[instruction->branch_target] - vir_offsets[i];
+      if (displacement < INT32_MIN || displacement > INT32_MAX) {
+         *reason = "Apple9 branch displacement exceeds the compiler range";
+         util_dynarray_fini(&emitter.bytes);
+         free(vir_offsets);
+         goto fail;
+      }
+
+      struct agx_apple9_vir_instr resolved = *instruction;
+      resolved.immediate = (uint32_t)(int32_t)displacement;
+      if (!agx_apple9_pack_vir_instruction(&resolved, lower.program.phys,
+                                           &packed, reason) ||
+          packed.length !=
+             agx_apple9_encoding_info(instruction->encoding)->length) {
+         if (*reason == NULL)
+            *reason = "could not resolve an Apple9 branch displacement";
+         util_dynarray_fini(&emitter.bytes);
+         free(vir_offsets);
+         goto fail;
+      }
+      memcpy((uint8_t *)emitter.bytes.data + vir_offsets[i], packed.bytes,
+             packed.length);
+   }
+   free(vir_offsets);
+   if (getenv("AGX_APPLE9_TRACE") != NULL) {
+      fputs("APPLE9_BINARY ", stderr);
+      const uint8_t *binary = emitter.bytes.data;
+      for (unsigned i = 0; i < emitter.bytes.size; ++i)
+         fprintf(stderr, "%02x", binary[i]);
+      fputc('\n', stderr);
    }
    apple9_emit_stop(&emitter);
 
@@ -2776,6 +3207,11 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const char **reason_out)
 {
+   /* Make every source-level continue an ordinary structured masked region
+    * ending at the loop latch. This upstream NIR pass preserves SSA and leaves
+    * one backedge, matching the Apple9 loop machine directly. */
+   nir_lower_continue_constructs(nir);
+
    if (getenv("AGX_APPLE9_TRACE_NIR") != NULL)
       nir_print_shader(nir, stderr);
 
