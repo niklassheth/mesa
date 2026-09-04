@@ -279,8 +279,9 @@ agx_apple9_vir_emit_device_load(
    const struct agx_apple9_device_load_contract *contract)
 {
    if (program == NULL || contract == NULL || binding > UINT8_MAX ||
-       (contract->group_flags &
-        ~(AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)) ||
+       (contract->flags &
+        ~(AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+          AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)) ||
        !apple9_device_load_raw_token_valid(contract->raw_token))
       return AGX_APPLE9_VREG_INVALID;
 
@@ -304,7 +305,7 @@ agx_apple9_vir_emit_device_load(
 
    struct agx_apple9_vir_instr *instruction =
       &program->instructions[program->instruction_count - 1];
-   instruction->device_load_group_flags = contract->group_flags;
+   instruction->device_load_flags = contract->flags;
    instruction->device_load_index_kind = contract->index_kind;
    instruction->device_load_index_first_consumer =
       contract->index_first_load_consumer;
@@ -451,12 +452,13 @@ agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
 
 bool
 agx_apple9_vir_set_device_load_contract(
-   struct agx_apple9_vir_program *program, uint32_t value, uint8_t group_flags,
+   struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
    enum agx_apple9_scoreboard_slot scoreboard_slot)
 {
    if (scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_AUTO) {
-      if (group_flags &
-          ~(AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT))
+      if (flags &
+          ~(AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+            AGX_APPLE9_DEVICE_LOAD_HAS_NEXT))
          return false;
 
       for (unsigned i = 0; i < program->instruction_count; ++i) {
@@ -466,7 +468,7 @@ agx_apple9_vir_set_device_load_contract(
          if (instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD)
             return false;
 
-         instruction->device_load_group_flags = group_flags;
+         instruction->device_load_flags = flags;
          instruction->device_load_raw_token = 0;
          instruction->producer_scoreboard_slot =
             AGX_APPLE9_SCOREBOARD_SLOT_AUTO;
@@ -481,17 +483,18 @@ agx_apple9_vir_set_device_load_contract(
       return false;
 
    return agx_apple9_vir_set_device_load_raw_contract(program, value,
-                                                      group_flags, raw_token);
+                                                      flags, raw_token);
 }
 
 bool
 agx_apple9_vir_set_device_load_raw_contract(
-   struct agx_apple9_vir_program *program, uint32_t value, uint8_t group_flags,
+   struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
    uint16_t raw_token)
 {
    uint8_t scoreboard_slot;
-   if ((group_flags &
-        ~(AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)) ||
+   if ((flags &
+        ~(AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+          AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)) ||
        !apple9_scalar_load_slot_for_token(raw_token, &scoreboard_slot))
       return false;
 
@@ -502,7 +505,7 @@ agx_apple9_vir_set_device_load_raw_contract(
       if (instruction->op != AGX_APPLE9_VIR_DEVICE_LOAD)
          return false;
 
-      instruction->device_load_group_flags = group_flags;
+      instruction->device_load_flags = flags;
       instruction->device_load_raw_token = raw_token;
       instruction->producer_scoreboard_slot = scoreboard_slot;
       return true;
@@ -2097,7 +2100,7 @@ agx_apple9_pack_mov(unsigned dst, unsigned src,
 
 bool
 agx_apple9_pack_device_load_u32(unsigned dst, unsigned index, unsigned binding,
-                                uint8_t group_flags,
+                                uint8_t flags,
                                 enum agx_apple9_scoreboard_slot scoreboard_slot,
                                 struct agx_apple9_packed_instruction *packed)
 {
@@ -2106,33 +2109,33 @@ agx_apple9_pack_device_load_u32(unsigned dst, unsigned index, unsigned binding,
       return false;
 
    return agx_apple9_pack_device_load_u32_raw(
-      dst, index, binding, AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR, group_flags,
+      dst, index, binding, AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR, flags,
       false, raw_token, packed);
 }
 
 bool
 agx_apple9_pack_device_load_u32_raw(
    unsigned dst, unsigned index, unsigned binding,
-   enum agx_apple9_device_load_index_kind index_kind, uint8_t group_flags,
+   enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
    bool index_first_load_consumer, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed)
 {
    return agx_apple9_pack_device_load_scalar_raw(
-      dst, index, binding, 32, index_kind, group_flags,
+      dst, index, binding, 32, index_kind, flags,
       index_first_load_consumer, raw_token, packed);
 }
 
 bool
 agx_apple9_pack_device_load_scalar_raw(
    unsigned dst, unsigned index, unsigned binding, unsigned bits,
-   enum agx_apple9_device_load_index_kind index_kind, uint8_t group_flags,
+   enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
    bool index_first_load_consumer, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed)
 {
    if (bits != 8 && bits != 16 && bits != 32)
       return false;
    if (!agx_apple9_pack_device_load_vector_u32_raw(
-          dst, index, binding, 1, index_kind, group_flags,
+          dst, index, binding, 1, index_kind, flags,
           index_first_load_consumer, raw_token, packed))
       return false;
 
@@ -2147,14 +2150,15 @@ agx_apple9_pack_device_load_scalar_raw(
 bool
 agx_apple9_pack_device_load_vector_u32_raw(
    unsigned dst, unsigned index, unsigned binding, unsigned components,
-   enum agx_apple9_device_load_index_kind index_kind, uint8_t group_flags,
+   enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
    bool index_first_load_consumer, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed)
 {
    if (components < 1 || components > 4 || dst + components > 64 ||
        binding > UINT8_MAX ||
-       (group_flags &
-        ~(AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)) ||
+       (flags &
+        ~(AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+          AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)) ||
        !apple9_device_load_raw_token_valid(raw_token))
       return false;
 
@@ -2175,18 +2179,17 @@ agx_apple9_pack_device_load_vector_u32_raw(
    }
 
    /*
-    * The low-index framing fields currently labelled FIRST/HAS_NEXT and the
-    * scalar-load scoreboard tag are independently encoded.  The field labels
-    * are not a complete semantic decode; multi-load groups do not set FIRST,
-    * and all members of a pending-result group carry the same slot tag.
+    * The raw-system-index address selector, linear HAS_NEXT marker, and
+    * scalar-load scoreboard tag are independently encoded. All members of a
+    * vector-result tuple carry the same slot tag.
     */
    uint8_t bytes[14] = {
       0x67, 0x00, 0x44, 0x00, 0x00, 0x00, 0x20,
       0x00, 0x11, 0x00, 0x00, 0x40, 0x46, 0x00,
    };
-   if (group_flags & AGX_APPLE9_DEVICE_LOAD_FIRST)
+   if (flags & AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX)
       bytes[1] = 0x10;
-   if (group_flags & AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)
+   if (flags & AGX_APPLE9_DEVICE_LOAD_HAS_NEXT)
       bytes[2] = 0x54;
    if (index_first_load_consumer)
       bytes[2] |= 0x02;
@@ -2758,14 +2761,14 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
          return agx_apple9_pack_device_load_scalar_raw(
             phys[instruction->dest], index, instruction->immediate,
             memory_bits, index_lifetime,
-            instruction->device_load_group_flags,
+            instruction->device_load_flags,
             instruction->device_load_index_first_consumer,
             instruction->device_load_raw_token, packed);
       if (memory_bits != 32)
          break;
       return agx_apple9_pack_device_load_vector_u32_raw(
          phys[instruction->dest], index, instruction->immediate, components,
-         index_lifetime, instruction->device_load_group_flags,
+         index_lifetime, instruction->device_load_flags,
          instruction->device_load_index_first_consumer,
          instruction->device_load_raw_token, packed);
    }

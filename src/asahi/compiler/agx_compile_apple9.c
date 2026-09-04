@@ -257,6 +257,7 @@ apple9_element_index(nir_def *offset, nir_scalar *index, unsigned *index_scale,
 
 struct apple9_scalar_load {
    nir_intrinsic_instr *intr;
+   nir_block *block;
    nir_scalar index;
    unsigned argument;
    unsigned component;
@@ -371,8 +372,40 @@ struct apple9_dag_lower {
    unsigned load_count;
    unsigned load_instruction_count;
    unsigned emitted_load_count;
+   nir_block *active_load_block;
+   unsigned active_load_instruction_count;
+   unsigned active_emitted_load_count;
+   bool structured_cf;
    const char *reason;
 };
+
+static uint8_t
+apple9_current_load_flags(struct apple9_dag_lower *lower,
+                          const struct apple9_scalar_load *load,
+                          bool native_vector)
+{
+   assert(lower->active_load_instruction_count > 0);
+   assert(lower->active_emitted_load_count <
+          lower->active_load_instruction_count);
+   assert(lower->emitted_load_count < lower->load_instruction_count);
+
+   uint8_t flags = lower->emitted_load_count + 1 < lower->load_instruction_count
+                      ? AGX_APPLE9_DEVICE_LOAD_HAS_NEXT
+                      : 0;
+
+   /* Native Metal's byte-1 bit 4 is an address-form selector, not a group
+    * boundary. It is set when an unmodified get_sr result supplies the
+    * element index directly. Scalar affine lowering destroys that form;
+    * native vector loads incorporate their natural tuple stride themselves. */
+   struct apple9_system_source system;
+   const unsigned element_add = load->index_add + load->component;
+   if (apple9_system_source(load->index, &system) &&
+       ((native_vector && load->index_add == 0) ||
+        (!native_vector && load->index_scale == 1 && element_add == 0)))
+      flags |= AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX;
+
+   return flags;
+}
 
 static uint32_t
 apple9_dag_emit(struct apple9_dag_lower *lower, enum agx_apple9_vir_opcode op,
@@ -947,15 +980,10 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                return AGX_APPLE9_VREG_INVALID;
             }
 
-            uint8_t flags = lower->load_instruction_count == 1
-                               ? AGX_APPLE9_DEVICE_LOAD_FIRST
-                               : (lower->emitted_load_count + 1 <
-                                        lower->load_instruction_count
-                                     ? AGX_APPLE9_DEVICE_LOAD_HAS_NEXT
-                                     : 0);
+            uint8_t flags = apple9_current_load_flags(lower, load, true);
             const struct agx_apple9_device_load_contract contract = {
                .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-               .group_flags = flags,
+               .flags = flags,
                .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
             };
             const uint32_t base = agx_apple9_vir_emit_device_load_vector(
@@ -975,6 +1003,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                const unsigned lane_key = scalar.def->index * 4 + c;
                lower->ssa_to_vreg[lane_key] = base + c;
             }
+            ++lower->active_emitted_load_count;
             ++lower->emitted_load_count;
             return lower->ssa_to_vreg[key];
          }
@@ -1014,12 +1043,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          if (value != AGX_APPLE9_VREG_INVALID)
             lower->program.instructions[lower->program.instruction_count - 1]
                .memory_bits = load->bit_size;
-         uint8_t flags =
-            lower->load_instruction_count == 1
-               ? AGX_APPLE9_DEVICE_LOAD_FIRST
-               : (lower->emitted_load_count + 1 < lower->load_instruction_count
-                     ? AGX_APPLE9_DEVICE_LOAD_HAS_NEXT
-                     : 0);
+         uint8_t flags = apple9_current_load_flags(lower, load, false);
          if (value == AGX_APPLE9_VREG_INVALID ||
              !agx_apple9_vir_set_device_load_contract(
                 &lower->program, value, flags,
@@ -1029,6 +1053,7 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                                : "could not describe an Apple9 device load";
             return AGX_APPLE9_VREG_INVALID;
          }
+         ++lower->active_emitted_load_count;
          ++lower->emitted_load_count;
       } else if (nir_def_instr_type(scalar.def) == nir_instr_type_alu) {
          nir_op op = nir_scalar_alu_op(scalar);
@@ -1445,6 +1470,7 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
 
                struct apple9_scalar_load load = {
                   .intr = intr,
+                  .block = block,
                   .index = index,
                   .argument = argument,
                   .component = component,
@@ -1700,6 +1726,9 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          first &= lower.loads[earlier].intr != lower.loads[i].intr;
       lower.load_instruction_count += first;
    }
+   /* The pre-control-flow compiler issues one linear load sequence. Structured
+    * lowering replaces this with per-block counts in the following change. */
+   lower.active_load_instruction_count = lower.load_instruction_count;
    agx_apple9_vir_init(&lower.program);
    lower.ssa_map_count = impl->ssa_alloc * 4;
    lower.ssa_to_vreg = malloc(lower.ssa_map_count * sizeof(uint32_t));

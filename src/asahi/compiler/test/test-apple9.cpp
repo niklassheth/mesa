@@ -174,7 +174,7 @@ TEST(Apple9Packer, ReciprocalPacksHandoffLifetimeAndNativeResultHint)
    }
 }
 
-TEST(Apple9Packer, RawLoadTokensPackIndependentlyOfIndexAndFraming)
+TEST(Apple9Packer, RawLoadTokensPackIndependentlyOfIndexAndSequenceFlags)
 {
    static const struct {
       uint16_t token;
@@ -221,7 +221,7 @@ TEST(Apple9Vir, DeviceLoadDirectIndexIsAnSsaSource)
    uint32_t index = agx_apple9_vir_input(&program, 1);
    const agx_apple9_device_load_contract contract = {
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
-      .group_flags = AGX_APPLE9_DEVICE_LOAD_FIRST,
+      .flags = AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
    uint32_t load =
@@ -265,7 +265,7 @@ TEST(Apple9Vir, DeviceLoadComputedIndexIsIndependentOfDestination)
    uint32_t index = agx_apple9_vir_input(&program, 2);
    const agx_apple9_device_load_contract contract = {
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_COMPUTED_GPR,
-      .group_flags = 0,
+      .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
    uint32_t load =
@@ -324,7 +324,7 @@ TEST(Apple9Vir, DeviceLoadIndexLifetimeAssertionsFollowLiveness)
    }
 }
 
-TEST(Apple9Packer, DeviceLoadSeparatesGroupFramingFromScoreboardSlot)
+TEST(Apple9Packer, DeviceLoadSeparatesAddressSequenceFlagsFromScoreboardSlot)
 {
    static const struct {
       uint8_t flags;
@@ -343,15 +343,15 @@ TEST(Apple9Packer, DeviceLoadSeparatesGroupFramingFromScoreboardSlot)
        AGX_APPLE9_SCOREBOARD_SLOT_6,
        {0x67, 0x00, 0x44, 0x04, 0x03, 0x01, 0x20, 0x00, 0x51, 0x01, 0x00, 0x40,
         0x46, 0x00}},
-      {AGX_APPLE9_DEVICE_LOAD_FIRST,
+      {AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
        AGX_APPLE9_SCOREBOARD_SLOT_1,
        {0x67, 0x10, 0x44, 0x04, 0x03, 0x01, 0x20, 0x00, 0x11, 0x00, 0x00, 0x40,
         0x46, 0x00}},
-      {AGX_APPLE9_DEVICE_LOAD_FIRST,
+      {AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
        AGX_APPLE9_SCOREBOARD_SLOT_2,
        {0x67, 0x10, 0x44, 0x04, 0x03, 0x01, 0x20, 0x00, 0x51, 0x00, 0x00, 0x40,
         0x46, 0x00}},
-      {AGX_APPLE9_DEVICE_LOAD_FIRST,
+      {AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
        AGX_APPLE9_SCOREBOARD_SLOT_6,
        {0x67, 0x10, 0x44, 0x04, 0x03, 0x01, 0x20, 0x00, 0x51, 0x01, 0x00, 0x40,
         0x46, 0x00}},
@@ -367,15 +367,18 @@ TEST(Apple9Packer, DeviceLoadSeparatesGroupFramingFromScoreboardSlot)
        AGX_APPLE9_SCOREBOARD_SLOT_6,
        {0x67, 0x00, 0x54, 0x04, 0x03, 0x01, 0x20, 0x00, 0x51, 0x01, 0x00, 0x40,
         0x46, 0x00}},
-      {AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+      {AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+          AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
        AGX_APPLE9_SCOREBOARD_SLOT_1,
        {0x67, 0x10, 0x54, 0x04, 0x03, 0x01, 0x20, 0x00, 0x11, 0x00, 0x00, 0x40,
         0x46, 0x00}},
-      {AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+      {AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+          AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
        AGX_APPLE9_SCOREBOARD_SLOT_2,
        {0x67, 0x10, 0x54, 0x04, 0x03, 0x01, 0x20, 0x00, 0x51, 0x00, 0x00, 0x40,
         0x46, 0x00}},
-      {AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+      {AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+          AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
        AGX_APPLE9_SCOREBOARD_SLOT_6,
        {0x67, 0x10, 0x54, 0x04, 0x03, 0x01, 0x20, 0x00, 0x51, 0x01, 0x00, 0x40,
         0x46, 0x00}},
@@ -413,7 +416,7 @@ TEST(Apple9Packer, NativeVectorMemoryWidthsMatchValidatedEncodings)
       {2,
        0,
        2,
-       AGX_APPLE9_DEVICE_LOAD_FIRST,
+       AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
        {0x67, 0x10, 0x44, 0x00, 0x00, 0x02, 0x20, 0x00, 0x59, 0x01, 0x00, 0x40,
         0x48, 0x00},
        {0xe7, 0x00, 0x56, 0x00, 0x01, 0x02, 0x21, 0x00, 0x19, 0x00, 0x00, 0x10,
@@ -433,7 +436,7 @@ TEST(Apple9Packer, NativeVectorMemoryWidthsMatchValidatedEncodings)
       {4,
        0,
        4,
-       AGX_APPLE9_DEVICE_LOAD_FIRST,
+       AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
        {0x67, 0x10, 0x44, 0x00, 0x00, 0x04, 0x20, 0x00, 0x57, 0x01, 0x00, 0x40,
         0x40, 0x00},
        {0xe7, 0x00, 0x56, 0x00, 0x01, 0x04, 0x21, 0x00, 0x17, 0x00, 0x00, 0x10,
@@ -471,7 +474,8 @@ TEST(Apple9Packer, NarrowScalarMemoryMatchesOwnMslCorpus)
 
    ASSERT_TRUE(agx_apple9_pack_device_load_scalar_raw(
       1, 0, 1, 8, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-      AGX_APPLE9_DEVICE_LOAD_FIRST, false, AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
+      AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX, false,
+      AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
       &packed));
    static const uint8_t load_u8[] = {
       0x67, 0x10, 0x44, 0x02, 0x01, 0x00, 0x20,
@@ -482,7 +486,9 @@ TEST(Apple9Packer, NarrowScalarMemoryMatchesOwnMslCorpus)
 
    ASSERT_TRUE(agx_apple9_pack_device_load_scalar_raw(
       1, 0, 2, 16, AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-      AGX_APPLE9_DEVICE_LOAD_FIRST | AGX_APPLE9_DEVICE_LOAD_HAS_NEXT, false,
+      AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX |
+         AGX_APPLE9_DEVICE_LOAD_HAS_NEXT,
+      false,
       AGX_APPLE9_DEVICE_LOAD_TOKEN_5101, &packed));
    static const uint8_t load_u16[] = {
       0x67, 0x10, 0x54, 0x02, 0x02, 0x00, 0x20,
@@ -1222,7 +1228,7 @@ TEST(Apple9Vir, ScalarLoadAutoStartsAtSlot6)
       agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_DEVICE_LOAD,
                           AGX_APPLE9_ENC_DEVICE_LOAD, &index, 1, 0);
    ASSERT_TRUE(agx_apple9_vir_set_device_load_contract(
-      &program, load, AGX_APPLE9_DEVICE_LOAD_FIRST,
+      &program, load, AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
       AGX_APPLE9_SCOREBOARD_SLOT_AUTO));
    uint32_t sources[] = {load, ordinary};
    agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_FADD,
@@ -1498,7 +1504,7 @@ TEST(Apple9Vir, RawLoadTokenDefinesProducerScoreboardSlot)
    uint32_t alu = agx_apple9_vir_input(&program, 2);
    const agx_apple9_device_load_contract contract = {
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_DIRECT_GPR,
-      .group_flags = 0,
+      .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_9100,
    };
    uint32_t load =
@@ -1950,7 +1956,7 @@ TEST(Apple9Allocator, NativeVectorLoadUsesOneAdjacentTupleAndOneSlot)
    uint32_t index = agx_apple9_vir_input(&program, 4);
    const agx_apple9_device_load_contract contract = {
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR,
-      .group_flags = AGX_APPLE9_DEVICE_LOAD_FIRST,
+      .flags = AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
    uint32_t vector =
@@ -1983,7 +1989,7 @@ TEST(Apple9Allocator, PendingVectorTupleCannotOverlapLaterAsyncDestination)
    uint32_t index = agx_apple9_vir_input(&program, 4);
    const agx_apple9_device_load_contract contract = {
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
-      .group_flags = 0,
+      .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
 
@@ -1996,7 +2002,7 @@ TEST(Apple9Allocator, PendingVectorTupleCannotOverlapLaterAsyncDestination)
 
    const agx_apple9_device_load_contract final_contract = {
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_LAST_USE_GPR,
-      .group_flags = 0,
+      .flags = 0,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
    uint32_t scalar =

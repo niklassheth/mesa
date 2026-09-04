@@ -91,8 +91,15 @@ enum agx_apple9_scoreboard_slot {
    AGX_APPLE9_SCOREBOARD_SLOT_AUTO = 0xff,
 };
 
-enum agx_apple9_device_load_group_flags {
-   AGX_APPLE9_DEVICE_LOAD_FIRST = 1u << 0,
+enum agx_apple9_device_load_flags {
+   /* Byte 1 bit 4 selects the native address form in which the load consumes
+    * a get_sr result directly.  It is not load-group framing: native branch
+    * shaders set it only on a raw system-indexed load, independent of that
+    * load's position in the linear load sequence. */
+   AGX_APPLE9_DEVICE_LOAD_RAW_SYSTEM_INDEX = 1u << 0,
+
+   /* Byte 2 bit 4 marks that another load follows in linear issue order.
+    * Native Metal leaves it set across execution-mask transitions. */
    AGX_APPLE9_DEVICE_LOAD_HAS_NEXT = 1u << 1,
 };
 
@@ -125,12 +132,12 @@ enum agx_apple9_device_load_raw_token {
 
 struct agx_apple9_device_load_contract {
    enum agx_apple9_device_load_index_kind index_kind;
-   uint8_t group_flags;
+   uint8_t flags;
    uint16_t raw_token;
 
    /* Capture-scoped byte-2 bit 1.  Native dependent-load probes correlate it
     * with the first DEVICE_LOAD index consumer of a DEVICE_LOAD result.  It
-    * is independent of scoreboard allocation and group framing. */
+    * is independent of scoreboard allocation and the fields above. */
    bool index_first_load_consumer;
 };
 
@@ -159,9 +166,9 @@ struct agx_apple9_vir_instr {
     * scoreboard pass and is never serialized. */
    uint8_t producer_scoreboard_slot;
 
-   /* Device-load framing fields, independent of the load/cache token.  The
-    * FIRST/HAS_NEXT enum names are labels for measured low-index bits. */
-   uint8_t device_load_group_flags;
+   /* Device-load address/sequence fields, independent of the load/cache
+    * token. */
+   uint8_t device_load_flags;
    enum agx_apple9_device_load_index_kind device_load_index_kind;
    bool device_load_index_first_consumer;
 
@@ -249,10 +256,10 @@ bool agx_apple9_vir_emit_device_store(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    const uint32_t *data, unsigned components, unsigned bits);
 bool agx_apple9_vir_set_device_load_contract(
-   struct agx_apple9_vir_program *program, uint32_t value, uint8_t group_flags,
+   struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
    enum agx_apple9_scoreboard_slot scoreboard_slot);
 bool agx_apple9_vir_set_device_load_raw_contract(
-   struct agx_apple9_vir_program *program, uint32_t value, uint8_t group_flags,
+   struct agx_apple9_vir_program *program, uint32_t value, uint8_t flags,
    uint16_t raw_token);
 bool agx_apple9_vir_set_device_load_index_kind(
    struct agx_apple9_vir_program *program, uint32_t value,
@@ -310,12 +317,12 @@ bool agx_apple9_pack_mov(unsigned dst, unsigned src,
 
 bool
 agx_apple9_pack_device_load_u32(unsigned dst, unsigned index, unsigned binding,
-                                uint8_t group_flags,
+                                uint8_t flags,
                                 enum agx_apple9_scoreboard_slot scoreboard_slot,
                                 struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_load_u32_raw(
    unsigned dst, unsigned index, unsigned binding,
-   enum agx_apple9_device_load_index_kind index_kind, uint8_t group_flags,
+   enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
    bool index_first_load_consumer, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed);
 
@@ -327,12 +334,12 @@ bool agx_apple9_pack_device_load_u32_raw(
  * GPR and set releases it after the address read. */
 bool agx_apple9_pack_device_load_vector_u32_raw(
    unsigned dst, unsigned index, unsigned binding, unsigned components,
-   enum agx_apple9_device_load_index_kind index_kind, uint8_t group_flags,
+   enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
    bool index_first_load_consumer, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_load_scalar_raw(
    unsigned dst, unsigned index, unsigned binding, unsigned bits,
-   enum agx_apple9_device_load_index_kind index_kind, uint8_t group_flags,
+   enum agx_apple9_device_load_index_kind index_kind, uint8_t flags,
    bool index_first_load_consumer, uint16_t raw_token,
    struct agx_apple9_packed_instruction *packed);
 bool agx_apple9_pack_device_store_scalar(
