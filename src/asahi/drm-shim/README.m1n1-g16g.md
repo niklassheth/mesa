@@ -34,9 +34,10 @@ fails during compilation and the triangle is not a regression gate.
 - Gallium owns the compute archive, compiler state, resource records, carrier
   installation, CDM command, BOs, VM bindings, and ordinary
   `drm_asahi_cmd_compute` submission.
-- One eight-buffer superset carrier serves every currently supported shader.
-  A compiled main may use any prefix of one through eight package resources;
-  changing that active count no longer selects a different launch program.
+- One eight-buffer superset carrier serves ordinary compute, while a second
+  own-source eight-buffer carrier supplies the independently validated device-
+  atomic launch contract. A compiled main may use any prefix of one through
+  eight resources in either ABI; resource count does not select a launcher.
 - The shared fixed-USC archive is append-only between installations. A
   screen-wide timeline serializes physical ownership changes, while each
   logical DRM VM keeps its own persistent root in the m1n1 backend.
@@ -44,16 +45,25 @@ fails during compilation and the triangle is not a regression gate.
 The supported NIR surface is intentionally limited. It includes arbitrary
 u32 constants; integer add/subtract, negate, multiply, AND/OR/XOR/NOT, shifts,
 signed and unsigned min/max; core float arithmetic, accurate FP32 reciprocal,
-and FMA; comparisons, straight-line select, and recursively nested structured
-if/else with multiple blocks and sibling regions; scalar/vector device loads
-and stores; general constant, affine, and runtime buffer indexing; 8/16/32-bit
-memory formats; and the measured system values and dense dispatch geometries
-used by the fixtures.
+and FMA; comparisons, straight-line select, recursively nested structured
+if/else, and general structured loops with loop-carried values, `break`,
+`continue`, and nesting within the six encoded predicate scratch banks;
+scalar/vector device loads and stores;
+general constant, affine, and runtime buffer indexing; 8/16/32-bit memory
+formats; and the measured system values and dense dispatch geometries used by
+the fixtures. Scalar 32-bit SSBO atomics include integer add/subtract,
+AND/OR/XOR, signed and unsigned min/max, exchange, compare-exchange, and the
+NIR floating-add operation. Returned and discarded forms, dynamic addresses,
+contention, and masked or looped atomics all use semantic VIR and allocated
+registers. A final-use scalar device-load result may feed a returning atomic
+directly through its allocated scoreboard slot. Live-after values, pending
+indices, compare-exchange tuples, and discarded atomics remain on the
+materialized path until their destructive-input contracts are proven.
 
 The control-flow emitter recursively walks structured NIR and serializes its
-implicit execution-mask stack. Every pending asynchronous result is copied to
-a durable GPR before its NIR block ends, so no pending result crosses a nested
-push, else transition, or reconvergence pop. The load sequence's native
+implicit execution-mask stack. Every pending asynchronous load or atomic
+return is copied to a durable GPR before its NIR block ends, so no pending
+result crosses a nested push, else transition, or reconvergence pop. The load sequence's native
 `HAS_NEXT` bit still follows linear issue order across those transitions, while
 the formerly named `FIRST` bit is now modeled correctly as the raw `get_sr`
 index address form. Arm-local stores use the native compare, execution-mask
@@ -68,27 +78,47 @@ Native select formation remains a future optimization; keeping it disabled for
 CFG phis makes this correctness-first slice exercise masked arm computation and
 reconvergence directly.
 
+Loops follow the public Apple8 compiler's structured architecture while using
+Apple9's independently measured encodings. The emitter recursively walks the
+complete NIR loop body; it does not recognize, clone, or rebuild a special
+header/latch condition. Each structured break updates or unwinds the current
+loop mask wherever it occurs, and one `JMP_EXEC_ANY` repeats the surviving
+lanes. Semantic VIR operations represent loop-mask push/update/pop,
+empty/active-lane branches, and nonlocal break unwinding. Branches name VIR
+boundaries and are resolved to signed, start-relative byte displacements only
+after all variable-sized pseudos have been emitted. Header and exit phis use
+the same predecessor-edge merge architecture as `if` joins, and allocator
+liveness is extended across every backedge. Source `continue` constructs are
+lowered to structured masked latch paths; a `break` beneath nested divergent
+scopes uses the native unwind record tied to its target loop's predicate level.
+The exact hardware corpus covers zero-trip and bottom-tested loops, a break in
+the middle of otherwise conditional loop work, compound conditions, general
+and nested break, continue, three nested loop levels, vector recurrences, and
+per-iteration device loads.
+
 This early bring-up path deliberately does not implement robust buffer access.
 The compiler does not infer resource access bounds, and dispatch does not
 preflight a shader-derived byte span. Buffer indices are passed through to the
 generated address calculation; callers are responsible for binding enough
 storage for every access the shader can make.
 
-Loops, `break`, `continue`, early return, division/modulo, spilling, and
-unmeasured package/resource forms reject rather than falling back to
-capture-assigned registers or opaque native mains.
+Early return, general division/modulo, spilling, and unmeasured
+package/resource forms reject rather than falling back to capture-assigned
+registers or opaque native mains.
 
 ## External development inputs
 
 The repository deliberately does not contain captured Metal package blobs.
-During this bring-up phase, three recapturable inputs from one own-source
-eight-buffer carrier are loaded from hardcoded paths under
+During this bring-up phase, five recapturable inputs from two own-source
+eight-buffer carriers are loaded from hardcoded paths under
 `/home/nsheth/Projects/asahi/tmp/agx-apple9`:
 
 ```text
 /home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/constant.bin
 /home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/launch.bin
 /home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8/division.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8-atomic/constant.bin
+/home/nsheth/Projects/asahi/tmp/agx-apple9/carrier8-atomic/launch.bin
 ```
 
 The carrier resource record has three hidden entries followed by eight visible
@@ -102,6 +132,17 @@ Unused visible entries are padded with a valid mapped pointer that the compiled
 main cannot reference. The full one-through-eight prefix has passed exact
 hardware output and input/guard-preservation checks through ordinary GLSL,
 Gallium, the DRM UAPI, and the G16 shim.
+
+The atomic carrier was captured from the own-source eight-buffer workload in
+`EXP-M4-48-atomic-package`. It publishes the eight caller buffers directly at
+q0--q7, with no hidden geometry or division-table resources. Mesa replaces its
+own-source stage main with the compiled main and patches the launch/archive and
+resource pointers semantically. Direct dispatch, fixed or runtime local size,
+and all ordinary compute system registers are supported. This capture does not
+establish an indirect-dispatch launcher or a `gl_NumWorkGroups` hidden-resource
+contract; those combinations reject instead of reading caller buffers as
+metadata. The two carrier families are loaded independently, so missing atomic
+development inputs do not disable ordinary compute and vice versa.
 
 File lengths are taken from the files. The driver validates only the regions
 it actually installs or patches; it does not require an exact whole-file size.
@@ -124,6 +165,8 @@ The current local T8132 input hashes are:
 a3586e009bd675feb6b67d72b6f8b9500bde15487584c1a054925ac9af2d75ce  carrier8/constant.bin
 62e85e9dd6cca4dd033cb101ad860da28934d8f92d7498d7bd11b42eff0957c3  carrier8/launch.bin
 fbb72c3f6ffb8e4a2fd17c9155d5ae32d7e704eeb5c0c906bef6d315c7299e80  carrier8/division.bin
+9baa760c5185b9e5645bd1299e5ec948674258d6cbb0dc68b1394f1e45f3fd27  carrier8-atomic/constant.bin
+f712c5923161763e175403a715a66e4959239298e3905ce09d03bfe0e026d2ec  carrier8-atomic/launch.bin
 9c7912148f4d4b48b59ba8e720e9dc94d0988f191294394af79849b21fb99cfe  g16_render_package.bin.zst
 da8e9c9df75305fb8d11cd8d468e8cf0f35bb5172e7465777b6d258f243b145b  render_interleaved_vbo_launch.bin
 ```
@@ -249,6 +292,18 @@ numerators at every denominator, including zero, remainder boundaries, and
 the maximum legal `65535 * D`; all 8,192 exact integer outputs pass on T8132.
 `superset-1` through `superset-8` specifically compile distinct ordinary GLSL
 programs and exercise every active-resource occupancy of the shared carrier.
+`device-atomic-native-shape` reproduces the own-source eight-resource Metal
+workload through the normal GLSL compiler and checks every target and four-word
+result record. `device-atomics` checks discarded and returned forms, every
+GLES-visible integer operation, compare-exchange success and failure, signed
+and unsigned min/max, multiple retained results, two writable resources,
+256-lane contention with a return-value permutation oracle, divergent loops
+with discarded and returned atomics, 4,096 exact private-address recurrences,
+and 32 consecutive 1,024-lane dispatches into the same counters. Every result
+and final target is compared, rather than using command retirement as success.
+`device-atomic-pending-load-forwarding` combines a directly forwarded final-use
+load, a live-after load that must be materialized selectively, and an unrelated
+pending load whose lifetime must not be drained by the atomic.
 
 The indirect-dispatch geometry cases exercise the actual GLES API with CPU-
 and GPU-authored records, nonzero offsets, zero dimensions, and asymmetric 2D

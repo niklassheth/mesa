@@ -18,6 +18,7 @@
 #define VALUE_COUNT     16384u
 #define LOCAL_SIZE      256u
 #define MIN_GUARD_BYTES 256u
+#define ARRAY_SIZE(x)   (sizeof(x) / sizeof((x)[0]))
 
 enum workload {
    WORKLOAD_CONSTANT,
@@ -183,8 +184,7 @@ static const char *workload_expressions[WORKLOAD_COUNT] = {
    [WORKLOAD_NOT] = "~gid",
    [WORKLOAD_INEG] = "uint(-int(gid))",
    [WORKLOAD_U2F] = "floatBitsToUint(float(gid))",
-   [WORKLOAD_U2F_LAST_USE] =
-      "floatBitsToUint(float(gid ^ 0x80000000u))",
+   [WORKLOAD_U2F_LAST_USE] = "floatBitsToUint(float(gid ^ 0x80000000u))",
    [WORKLOAD_I2F] = "floatBitsToUint(float(int(gid)-8192))",
    [WORKLOAD_I2F_RETAINED] =
       "floatBitsToUint(float(int(gid)-8192)) ^ uint(int(gid)-8192)",
@@ -1215,7 +1215,10 @@ fill_divergent_input(unsigned variant, unsigned pattern, uint32_t *input)
       if (variant < 2 || (variant >= 10 && variant < 12)) {
          if (pattern == 0) {
             static const uint32_t mixed[] = {
-               0x7fffffffu, 0x80000000u, 0x80000001u, 0x00004567u,
+               0x7fffffffu,
+               0x80000000u,
+               0x80000001u,
+               0x00004567u,
             };
             input[i] = mixed[i & 3] ^ ((i >> 2) & 0x3ffu);
          } else if (pattern == 1) {
@@ -1246,13 +1249,16 @@ fill_divergent_input(unsigned variant, unsigned pattern, uint32_t *input)
          } else {
             const bool equality = variant >= 8;
             input[i] = float_bits(pattern == 1 && equality ? 1.25f
-                                    : pattern == 1          ? 0.5f
-                                                            : 2.0f);
+                                  : pattern == 1           ? 0.5f
+                                                           : 2.0f);
          }
       } else {
          if (pattern == 0) {
             static const uint32_t mixed[] = {
-               0x7fffffffu, 0x80000000u, 0x80000001u, 0x00004567u,
+               0x7fffffffu,
+               0x80000000u,
+               0x80000001u,
+               0x00004567u,
             };
             input[i] = mixed[i & 3];
          } else {
@@ -1314,11 +1320,9 @@ run_simple_divergent_if_else(void)
       {"ine", "raw != 0x80000000u"},
       {"feq", "uintBitsToFloat(raw) == 1.25"},
       {"fne", "uintBitsToFloat(raw) != 1.25"},
-      {"bool-xor",
-       "(raw < 0x80000000u) ^^ ((raw & 1u) != 0u)"},
-      {"bool-select",
-       "((raw & 2u) != 0u) ? (raw < 0x80000000u) : "
-       "(raw >= 0x80000000u)"},
+      {"bool-xor", "(raw < 0x80000000u) ^^ ((raw & 1u) != 0u)"},
+      {"bool-select", "((raw & 2u) != 0u) ? (raw < 0x80000000u) : "
+                      "(raw >= 0x80000000u)"},
    };
    const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
    struct output_layout layout = make_output_layout(3, segment_bytes);
@@ -1331,8 +1335,8 @@ run_simple_divergent_if_else(void)
    glGenBuffers(1, &output_buffer);
    glGenBuffers(1, &input_buffer);
 
-   for (unsigned variant = 0;
-        variant < sizeof(variants) / sizeof(variants[0]); ++variant) {
+   for (unsigned variant = 0; variant < sizeof(variants) / sizeof(variants[0]);
+        ++variant) {
       char source[2048];
       int length = snprintf(
          source, sizeof(source),
@@ -1410,20 +1414,16 @@ run_simple_divergent_if_else(void)
                changed[slot] +=
                   output[i] != poison_word(WORKLOAD_GID, i, slot, seed_id);
                const bool true_arm = divergent_condition(variant, input[i]);
-               const bool selected =
-                  slot == 2 || slot == (true_arm ? 0u : 1u);
+               const bool selected = slot == 2 || slot == (true_arm ? 0u : 1u);
                const uint32_t want =
                   selected
-                     ? (slot == 0
-                           ? (input[i] ^ UINT32_C(0x13579bdf)) + i * 3u
-                           : slot == 1
-                                ? (input[i] + UINT32_C(0x2468ace0)) ^ (i * 5u)
-                                : ((true_arm
-                                       ? input[i] * 9u +
-                                            (i ^ UINT32_C(0x10203))
-                                       : (input[i] ^ UINT32_C(0xa5a55a5a)) -
-                                            i * 7u) ^
-                                   UINT32_C(0x31415926)))
+                     ? (slot == 0 ? (input[i] ^ UINT32_C(0x13579bdf)) + i * 3u
+                        : slot == 1
+                           ? (input[i] + UINT32_C(0x2468ace0)) ^ (i * 5u)
+                           : ((true_arm
+                                  ? input[i] * 9u + (i ^ UINT32_C(0x10203))
+                                  : (input[i] ^ UINT32_C(0xa5a55a5a)) - i * 7u) ^
+                              UINT32_C(0x31415926)))
                      : poison_word(WORKLOAD_GID, i, slot, seed_id);
                if (output[i] != want) {
                   if (mismatches[slot] < 4)
@@ -1545,9 +1545,13 @@ fill_two_source_inputs(enum two_source_compare_kind kind, unsigned pattern,
                        uint32_t *left, uint32_t *right)
 {
    static const uint32_t unsigned_pairs[][2] = {
-      {0, 0},          {0, 1},          {1, 0},
-      {0x7fffffff, 0x80000000},         {0x80000000, 0x7fffffff},
-      {UINT32_MAX, UINT32_MAX},         {UINT32_MAX, 0},
+      {0, 0},
+      {0, 1},
+      {1, 0},
+      {0x7fffffff, 0x80000000},
+      {0x80000000, 0x7fffffff},
+      {UINT32_MAX, UINT32_MAX},
+      {UINT32_MAX, 0},
       {0x12345678, 0x12345679},
    };
    static const uint32_t signed_pairs[][2] = {
@@ -1610,7 +1614,7 @@ fill_two_source_inputs(enum two_source_compare_kind kind, unsigned pattern,
       {0x3f800000, 0x3f800000},
       {0x7fc00000, 0x3f800000},
    };
-   const uint32_t(*candidates)[2] = unsigned_candidates;
+   const uint32_t (*candidates)[2] = unsigned_candidates;
    size_t candidate_count =
       sizeof(unsigned_candidates) / sizeof(unsigned_candidates[0]);
    if (two_source_compare_is_float(kind)) {
@@ -1782,10 +1786,10 @@ run_two_source_comparisons(void)
                   fail("two-source comparison guard changed");
             }
             for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
-               const bool condition = evaluate_two_source_compare(
-                  cases[c].kind, left[i], right[i]);
-               const uint32_t mix = two_source_live_mix(
-                  cases[c].live_sources, left[i], right[i]);
+               const bool condition =
+                  evaluate_two_source_compare(cases[c].kind, left[i], right[i]);
+               const uint32_t mix =
+                  two_source_live_mix(cases[c].live_sources, left[i], right[i]);
                uint32_t want =
                   poison_word(WORKLOAD_COMPARE_COMPLETE, i, slot, seed_id);
                if (slot == 0 && condition)
@@ -1866,9 +1870,9 @@ run_compare_register_pressure(void)
       seed_output_slot(seed, &layout, slot, WORKLOAD_PRESSURE_INT_DAG, 0);
    for (unsigned set = 0; set < value_sets; ++set) {
       for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
-         input[set * VALUE_COUNT + i] =
-            (0x9e3779b9u * (set + 1)) ^ (i * (set * 2u + 3u)) ^
-            (i >> (set & 7));
+         input[set * VALUE_COUNT + i] = (0x9e3779b9u * (set + 1)) ^
+                                        (i * (set * 2u + 3u)) ^
+                                        (i >> (set & 7));
       }
    }
 
@@ -1920,11 +1924,9 @@ run_compare_register_pressure(void)
          const uint32_t merged =
             condition
                ? (input[2 * VALUE_COUNT + i] + input[4 * VALUE_COUNT + i]) ^
-                    (input[6 * VALUE_COUNT + i] +
-                     input[8 * VALUE_COUNT + i])
+                    (input[6 * VALUE_COUNT + i] + input[8 * VALUE_COUNT + i])
                : (input[3 * VALUE_COUNT + i] + input[5 * VALUE_COUNT + i]) ^
-                    (input[7 * VALUE_COUNT + i] +
-                     input[9 * VALUE_COUNT + i]);
+                    (input[7 * VALUE_COUNT + i] + input[9 * VALUE_COUNT + i]);
          const uint32_t want = slot == 0 ? x : merged + sum;
          if (output[i] != want)
             fail("compare-pressure output mismatch");
@@ -2014,13 +2016,11 @@ run_single_region_shapes(void)
                fail("single-region guard changed");
          }
          for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
-            const bool selected = slot == 0 || slot == 3 ||
-                                  (slot == 1 && shapes[shape].has_then &&
-                                   i < VALUE_COUNT / 2) ||
-                                  (slot == 2 && shapes[shape].has_else &&
-                                   i >= VALUE_COUNT / 2);
-            uint32_t want =
-               poison_word(WORKLOAD_COMPARE_DAG, i, slot, shape);
+            const bool selected =
+               slot == 0 || slot == 3 ||
+               (slot == 1 && shapes[shape].has_then && i < VALUE_COUNT / 2) ||
+               (slot == 2 && shapes[shape].has_else && i >= VALUE_COUNT / 2);
+            uint32_t want = poison_word(WORKLOAD_COMPARE_DAG, i, slot, shape);
             if (selected) {
                want = slot == 0   ? i ^ 0x11112222u
                       : slot == 1 ? i + 0x22220000u
@@ -2110,9 +2110,9 @@ run_multiple_phi_vectors(void)
 
    for (unsigned binding = 0; binding < 2; ++binding) {
       glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
-      const uint8_t *mapped = glMapBufferRange(
-         GL_SHADER_STORAGE_BUFFER, 0, layouts[binding].buffer_bytes,
-         GL_MAP_READ_BIT);
+      const uint8_t *mapped =
+         glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
+                          layouts[binding].buffer_bytes, GL_MAP_READ_BIT);
       if (!mapped)
          fail("map multiple-phi result");
       const size_t offset = slot_output_offset(&layouts[binding], 0);
@@ -2138,8 +2138,7 @@ run_multiple_phi_vectors(void)
 
          for (unsigned component = 0; component < 4; ++component) {
             const uint32_t want =
-               then_arm ? gid + component + 1
-                        : gid ^ ((component + 1) * 0x10u);
+               then_arm ? gid + component + 1 : gid ^ ((component + 1) * 0x10u);
             if (output[gid * 4 + component] != want)
                fail("multiple-phi vector mismatch");
          }
@@ -2264,18 +2263,16 @@ run_nested_short_circuit_if_else(void)
          uint32_t want = 0;
          switch (slot) {
          case 0:
-            want = (raw & 1u) != 0u
-                      ? ((raw & 2u) != 0u ? raw + 0x10010010u
-                                          : raw + 0x20020020u)
-                      : ((raw & 4u) != 0u ? raw ^ 0x30030030u
-                                          : raw ^ 0x40040040u);
+            want =
+               (raw & 1u) != 0u
+                  ? ((raw & 2u) != 0u ? raw + 0x10010010u : raw + 0x20020020u)
+                  : ((raw & 4u) != 0u ? raw ^ 0x30030030u : raw ^ 0x40040040u);
             break;
          case 1: {
             uint32_t merged =
                (raw & 8u) != 0u
-                  ? ((raw & 16u) != 0u
-                        ? raw * 3u + 0x51515151u
-                        : (raw ^ 0xa5a55a5au) + 0x16161616u)
+                  ? ((raw & 16u) != 0u ? raw * 3u + 0x51515151u
+                                       : (raw ^ 0xa5a55a5au) + 0x16161616u)
                   : raw * 5u + 0x25252525u;
             want = merged ^ (i * 17u);
             break;
@@ -2285,8 +2282,7 @@ run_nested_short_circuit_if_else(void)
             want = raw ^ 0x31415926u;
             break;
          case 3: {
-            const bool result =
-               (raw & 32u) != 0u && (raw & 64u) != 0u;
+            const bool result = (raw & 32u) != 0u && (raw & 64u) != 0u;
             want = result ? raw + 0x61616161u : raw ^ 0x62626262u;
             break;
          }
@@ -2295,8 +2291,7 @@ run_nested_short_circuit_if_else(void)
             want = raw + 0x27182818u;
             break;
          case 5: {
-            const bool result =
-               (raw & 128u) != 0u || (raw & 256u) != 0u;
+            const bool result = (raw & 128u) != 0u || (raw & 256u) != 0u;
             want = result ? raw + 0x71717171u : raw ^ 0x72727272u;
             break;
          }
@@ -2305,8 +2300,8 @@ run_nested_short_circuit_if_else(void)
             if ((raw & 512u) != 0u)
                want ^= 0x91919191u;
             if ((raw & 1024u) != 0u)
-               want = (raw & 2048u) != 0u ? want + 0xa1a1a1a1u
-                                           : want - 0xb2b2b2b2u;
+               want =
+                  (raw & 2048u) != 0u ? want + 0xa1a1a1a1u : want - 0xb2b2b2b2u;
             break;
          }
 
@@ -2382,8 +2377,7 @@ run_nested_branch_local_loads(void)
       inputs[0][i] = (i & 7u) | ((i * 0x9e3779b9u) & 0xfffffff8u);
       for (unsigned set = 1; set < 5; ++set)
          inputs[set][i] =
-            (0x13579bdfu * set) ^ (i * (0x10203u + set * 0x202u)) ^
-            (i >> set);
+            (0x13579bdfu * set) ^ (i * (0x10203u + set * 0x202u)) ^ (i >> set);
    }
 
    GLuint program = build_compute_source(source);
@@ -2494,7 +2488,10 @@ fill_branch_load_inputs(unsigned pattern, uint32_t *condition,
    for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
       if (pattern == 0) {
          static const uint32_t mixed[] = {
-            0x7fffffffu, 0x80000000u, 0x80000001u, 0x00004567u,
+            0x7fffffffu,
+            0x80000000u,
+            0x80000001u,
+            0x00004567u,
          };
          condition[i] = mixed[i & 3] ^ ((i >> 2) & 0x3ffu);
       } else {
@@ -2613,15 +2610,15 @@ run_branch_local_device_loads(void)
                else if (slot == 1)
                   want = (ev + 0x27182818u) ^ (i * 5u);
                else {
-                  const uint32_t merged =
-                     true_arm ? tv * 9u + (i ^ 0x10203u)
-                              : (ev ^ 0xa5a55a5au) - i * 7u;
+                  const uint32_t merged = true_arm
+                                             ? tv * 9u + (i ^ 0x10203u)
+                                             : (ev ^ 0xa5a55a5au) - i * 7u;
                   want = (merged ^ pv) + 0xdeadbeefu;
                }
             }
 
-            changed[slot] += output[i] !=
-                             poison_word(WORKLOAD_GID, i, slot, pattern);
+            changed[slot] +=
+               output[i] != poison_word(WORKLOAD_GID, i, slot, pattern);
             if (output[i] != want) {
                if (mismatches[slot] < 4)
                   fprintf(stderr,
@@ -2638,8 +2635,8 @@ run_branch_local_device_loads(void)
                  "branch-local-load pattern %u summary: slot0 changed=%u "
                  "mismatches=%u, slot1 changed=%u mismatches=%u, "
                  "slot2 changed=%u mismatches=%u\n",
-                 pattern, changed[0], mismatches[0], changed[1],
-                 mismatches[1], changed[2], mismatches[2]);
+                 pattern, changed[0], mismatches[0], changed[1], mismatches[1],
+                 changed[2], mismatches[2]);
          fail("branch-local-load output mismatch");
       }
       glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
@@ -2655,6 +2652,1535 @@ run_branch_local_device_loads(void)
    free(seed);
 }
 
+static void
+run_basic_loop(bool bottom_tested)
+{
+   static const char *top_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){ uint gid=gl_GlobalInvocationID.x; uint n=gid&7u;"
+      " uint x=gid^0x2468ace0u; uint i=0u;"
+      " for(;i<n;++i) x=x*3u+i+1u;"
+      " output0.v[gid]=uvec4(x,i,n,0xa1000000u|gid); }\n";
+   static const char *bottom_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){ uint gid=gl_GlobalInvocationID.x; uint n=(gid&7u)+1u;"
+      " uint x=gid^0x2468ace0u; uint i=0u;"
+      " do { x=x*3u+i+1u; ++i; } while(i<n);"
+      " output0.v[gid]=uvec4(x,i,n,0xa2000000u|gid); }\n";
+
+   const size_t words = 4 * VALUE_COUNT;
+   const size_t bytes = words * sizeof(uint32_t);
+   uint32_t *seed = malloc(bytes);
+   if (!seed)
+      fail("allocate basic-loop output");
+   for (size_t i = 0; i < words; ++i)
+      seed[i] = 0xdead1000u ^ (uint32_t)i;
+
+   GLuint program =
+      build_compute_source(bottom_tested ? bottom_source : top_source);
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, seed, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffer);
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint32_t *output =
+      glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+   if (!output)
+      fail("map basic-loop output");
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t n = bottom_tested ? (gid & 7u) + 1u : gid & 7u;
+      uint32_t x = gid ^ 0x2468ace0u;
+      uint32_t i = 0;
+      do {
+         if (!bottom_tested && i == n)
+            break;
+         x = x * 3u + i + 1u;
+         ++i;
+      } while (i < n);
+      const uint32_t want[] = {
+         x,
+         i,
+         n,
+         (bottom_tested ? 0xa2000000u : 0xa1000000u) | gid,
+      };
+      for (unsigned c = 0; c < 4; ++c) {
+         if (output[gid * 4 + c] != want[c]) {
+            fprintf(stderr,
+                    "%s-loop word %u component %u=%#x expected=%#x n=%u\n",
+                    bottom_tested ? "bottom" : "top", gid, c,
+                    output[gid * 4 + c], want[c], n);
+            fail("basic-loop output mismatch");
+         }
+      }
+   }
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+/* Exercise the generic structured-loop lowering with a terminating edge that
+ * is deliberately neither the first nor last control-flow node in the body.
+ * The old Apple9 backend recognized only source-shaped header/latch tests and
+ * could not compile this form. */
+static void
+run_mid_body_break_loop(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){ uint gid=gl_GlobalInvocationID.x; uint limit=gid&15u;"
+      " uint value=gid^0x6a09e667u; uint i=0u;"
+      " for(;;){"
+      "  value+=i*0x10203u+0x11111111u;"
+      "  if(((gid+i)&1u)!=0u) value^=0x9e3779b9u+i;"
+      "  else value=value*3u+0x7f4a7c15u;"
+      "  if(i>=limit) break;"
+      "  if(((gid^i)&2u)!=0u) value+=gid*5u+i+0x13579bdfu;"
+      "  else value^=gid*7u+i+0x2468ace0u;"
+      "  ++i;"
+      " }"
+      " output0.v[gid]=uvec4(value,i,limit,0xa3000000u|gid); }\n";
+
+   const size_t words = 4 * VALUE_COUNT;
+   const size_t bytes = words * sizeof(uint32_t);
+   uint32_t *seed = malloc(bytes);
+   if (!seed)
+      fail("allocate mid-body-loop output");
+   for (size_t i = 0; i < words; ++i)
+      seed[i] = 0xdead1800u ^ (uint32_t)i;
+
+   GLuint program = build_compute_source(source);
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, seed, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffer);
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint32_t *output =
+      glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+   if (!output)
+      fail("map mid-body-loop output");
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t limit = gid & 15u;
+      uint32_t value = gid ^ 0x6a09e667u;
+      uint32_t i = 0;
+      for (;;) {
+         value += i * 0x10203u + 0x11111111u;
+         if (((gid + i) & 1u) != 0)
+            value ^= 0x9e3779b9u + i;
+         else
+            value = value * 3u + 0x7f4a7c15u;
+         if (i >= limit)
+            break;
+         if (((gid ^ i) & 2u) != 0)
+            value += gid * 5u + i + 0x13579bdfu;
+         else
+            value ^= gid * 7u + i + 0x2468ace0u;
+         ++i;
+      }
+
+      const uint32_t want[] = {value, i, limit, 0xa3000000u | gid};
+      for (unsigned c = 0; c < 4; ++c) {
+         if (output[gid * 4 + c] != want[c]) {
+            fprintf(stderr,
+                    "mid-body-loop word %u component %u=%#x expected=%#x "
+                    "limit=%u\n",
+                    gid, c, output[gid * 4 + c], want[c], limit);
+            fail("mid-body-loop output mismatch");
+         }
+      }
+   }
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+static void
+run_structured_loops(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){\n"
+      " uint gid=gl_GlobalInvocationID.x;"
+      " uint limit=gid&7u; uint value=gid^0x13579bdfu; uint executed=0u;"
+      " uint break_at=((gid>>8u)&3u)+2u;"
+      " for(uint i=0u;i<limit;++i){"
+      "  if(((i^gid)&3u)==0u) continue;"
+      "  value=value*3u+(i^0x10203040u); ++executed;"
+      "  if(executed==break_at) break;"
+      " }"
+      " uint nested=0u; uint outer_limit=(gid>>3u)&3u;"
+      " uint inner_limit=(gid>>5u)&3u; uint inner_break=(gid>>7u)&3u;"
+      " for(uint o=0u;o<outer_limit;++o){"
+      "  for(uint j=0u;j<inner_limit;++j){"
+      "   if(((o+j+gid)&1u)!=0u) continue;"
+      "   nested=nested*5u+o*7u+j+1u;"
+      "   if(j==inner_break) break;"
+      "  }"
+      "  nested^=o+0x55u;"
+      " }"
+      " output0.v[gid]=uvec4(value,executed,nested,0xc0000000u|"
+      "  (inner_limit<<20u)|(outer_limit<<18u)|gid);"
+      "}\n";
+
+   const size_t output_words = 4 * VALUE_COUNT;
+   const size_t output_bytes = output_words * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(1, output_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   if (!seed)
+      fail("allocate structured-loop buffer");
+
+   const unsigned seed_id = 0x4c4f4f50;
+   const size_t offset = slot_output_offset(&layout, 0);
+   uint32_t *before = (uint32_t *)(seed + offset - layout.guard_bytes);
+   uint32_t *output = (uint32_t *)(seed + offset);
+   uint32_t *after = (uint32_t *)(seed + offset + output_bytes);
+   for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+      before[i] = guard_word(0, 0, i, seed_id);
+      after[i] = guard_word(0, 1, i, seed_id);
+   }
+   for (size_t i = 0; i < output_words; ++i)
+      output[i] = 0xdead0000u ^ (uint32_t)i;
+
+   GLuint program = build_compute_source(source);
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                GL_DYNAMIC_COPY);
+   glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, buffer, offset, output_bytes);
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint8_t *mapped = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+   if (!mapped)
+      fail("map structured-loop output");
+   const uint32_t *mapped_before =
+      (const uint32_t *)(mapped + offset - layout.guard_bytes);
+   const uint32_t *mapped_output = (const uint32_t *)(mapped + offset);
+   const uint32_t *mapped_after =
+      (const uint32_t *)(mapped + offset + output_bytes);
+   for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+      if (mapped_before[i] != guard_word(0, 0, i, seed_id) ||
+          mapped_after[i] != guard_word(0, 1, i, seed_id))
+         fail("structured-loop guard changed");
+   }
+
+   unsigned mismatches[4] = {0};
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t limit = gid & 7u;
+      uint32_t value = gid ^ 0x13579bdfu;
+      uint32_t executed = 0;
+      const uint32_t break_at = ((gid >> 8) & 3u) + 2u;
+      for (uint32_t i = 0; i < limit; ++i) {
+         if (((i ^ gid) & 3u) == 0)
+            continue;
+         value = value * 3u + (i ^ 0x10203040u);
+         ++executed;
+         if (executed == break_at)
+            break;
+      }
+
+      uint32_t nested = 0;
+      const uint32_t outer_limit = (gid >> 3) & 3u;
+      const uint32_t inner_limit = (gid >> 5) & 3u;
+      const uint32_t inner_break = (gid >> 7) & 3u;
+      for (uint32_t o = 0; o < outer_limit; ++o) {
+         for (uint32_t j = 0; j < inner_limit; ++j) {
+            if (((o + j + gid) & 1u) != 0)
+               continue;
+            nested = nested * 5u + o * 7u + j + 1u;
+            if (j == inner_break)
+               break;
+         }
+         nested ^= o + 0x55u;
+      }
+
+      const uint32_t want[] = {
+         value,
+         executed,
+         nested,
+         0xc0000000u | (inner_limit << 20) | (outer_limit << 18) | gid,
+      };
+      for (unsigned component = 0; component < 4; ++component) {
+         const uint32_t got = mapped_output[gid * 4 + component];
+         if (got != want[component]) {
+            if (mismatches[component] < 8)
+               fprintf(stderr,
+                       "structured-loop word %u component %u=%#x "
+                       "expected=%#x limit=%u executed=%u nested=%#x\n",
+                       gid, component, got, want[component], limit, executed,
+                       nested);
+            ++mismatches[component];
+         }
+      }
+   }
+
+   if (mismatches[0] || mismatches[1] || mismatches[2] || mismatches[3]) {
+      fprintf(stderr,
+              "structured-loop mismatches: value=%u executed=%u nested=%u "
+              "tag=%u\n",
+              mismatches[0], mismatches[1], mismatches[2], mismatches[3]);
+      fail("structured-loop output mismatch");
+   }
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+static void
+run_loop_unwind_continue(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){ uint gid=gl_GlobalInvocationID.x;"
+      " uint limit=(gid&15u)+1u; uint stop=(gid>>4u)&7u;"
+      " uint value=gid^0x31415926u; uint executed=0u; uint i=0u;"
+      " for(;i<limit;++i){"
+      "  value=value*3u+i+1u;"
+      "  if(((i+gid)&1u)!=0u){"
+      "   value^=0x10203040u+i;"
+      "   if(((i^gid)&2u)!=0u){"
+      "    value+=0x22334455u+gid;"
+      "    if(i==stop) break;"
+      "    value^=0x55667788u+i;"
+      "   }else value+=0x66778899u+gid;"
+      "  }else value^=0x89abcdefu+gid;"
+      "  if(((i+gid)&4u)!=0u){"
+      "   value+=0x13579bdfu;"
+      "   if(((i^gid)&8u)!=0u) continue;"
+      "   value^=0x2468ace0u;"
+      "  }else value+=0x0badc0deu;"
+      "  value=value*5u+0x55u; ++executed;"
+      " }"
+      " output0.v[gid]=uvec4(value,i,executed,0xd0000000u|gid); }\n";
+
+   const size_t words = 4 * VALUE_COUNT;
+   const size_t bytes = words * sizeof(uint32_t);
+   uint32_t *seed = malloc(bytes);
+   if (!seed)
+      fail("allocate loop-unwind output");
+   for (size_t i = 0; i < words; ++i)
+      seed[i] = 0xdead2000u ^ (uint32_t)i;
+
+   GLuint program = build_compute_source(source);
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, seed, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffer);
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint32_t *output =
+      glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+   if (!output)
+      fail("map loop-unwind output");
+   unsigned mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t limit = (gid & 15u) + 1u;
+      const uint32_t stop = (gid >> 4) & 7u;
+      uint32_t value = gid ^ 0x31415926u;
+      uint32_t executed = 0, i = 0;
+      for (; i < limit; ++i) {
+         value = value * 3u + i + 1u;
+         if (((i + gid) & 1u) != 0) {
+            value ^= 0x10203040u + i;
+            if (((i ^ gid) & 2u) != 0) {
+               value += 0x22334455u + gid;
+               if (i == stop)
+                  break;
+               value ^= 0x55667788u + i;
+            } else {
+               value += 0x66778899u + gid;
+            }
+         } else {
+            value ^= 0x89abcdefu + gid;
+         }
+         if (((i + gid) & 4u) != 0) {
+            value += 0x13579bdfu;
+            if (((i ^ gid) & 8u) != 0)
+               continue;
+            value ^= 0x2468ace0u;
+         } else {
+            value += 0x0badc0deu;
+         }
+         value = value * 5u + 0x55u;
+         ++executed;
+      }
+
+      const uint32_t want[] = {value, i, executed, 0xd0000000u | gid};
+      for (unsigned c = 0; c < 4; ++c) {
+         const uint32_t got = output[gid * 4 + c];
+         if (got != want[c]) {
+            if (mismatches < 12)
+               fprintf(stderr,
+                       "loop-unwind word %u component %u=%#x expected=%#x "
+                       "limit=%u stop=%u\n",
+                       gid, c, got, want[c], limit, stop);
+            ++mismatches;
+         }
+      }
+   }
+   if (mismatches)
+      fail("loop-unwind output mismatch");
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+static void
+run_triple_nested_loops(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){ uint gid=gl_GlobalInvocationID.x;"
+      " uint la=gid&3u,lb=(gid>>2u)&3u,lc=(gid>>4u)&3u;"
+      " uvec4 s=uvec4(gid^0x01020304u,gid+0x11223344u,"
+      "                gid^0x55667788u,gid+0x99aabbccu);"
+      " for(uint a=0u;a<la;++a){"
+      "  s.x=s.x*3u+a+1u;"
+      "  for(uint b=0u;b<lb;++b){"
+      "   s.y=(s.y^s.x)+b+0x31u;"
+      "   for(uint c=0u;c<lc;++c){"
+      "    s.z=s.z*5u+a*17u+b*7u+c+1u;"
+      "    if(((a+b+c+gid)&1u)!=0u) continue;"
+      "    s.w=(s.w^s.z)+a*13u+b*3u+c;"
+      "   }"
+      "   s.x^=s.z+b+0x53u;"
+      "  }"
+      "  s.y+=s.w+a+0x79u;"
+      " }"
+      " output0.v[gid]=s; }\n";
+
+   const size_t words = 4 * VALUE_COUNT;
+   const size_t bytes = words * sizeof(uint32_t);
+   uint32_t *seed = malloc(bytes);
+   if (!seed)
+      fail("allocate triple-loop output");
+   for (size_t i = 0; i < words; ++i)
+      seed[i] = 0xdead3000u ^ (uint32_t)i;
+
+   GLuint program = build_compute_source(source);
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, seed, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffer);
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint32_t *output =
+      glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+   if (!output)
+      fail("map triple-loop output");
+   unsigned mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t la = gid & 3u;
+      const uint32_t lb = (gid >> 2) & 3u;
+      const uint32_t lc = (gid >> 4) & 3u;
+      uint32_t s[] = {
+         gid ^ 0x01020304u,
+         gid + 0x11223344u,
+         gid ^ 0x55667788u,
+         gid + 0x99aabbccu,
+      };
+      for (uint32_t a = 0; a < la; ++a) {
+         s[0] = s[0] * 3u + a + 1u;
+         for (uint32_t b = 0; b < lb; ++b) {
+            s[1] = (s[1] ^ s[0]) + b + 0x31u;
+            for (uint32_t c = 0; c < lc; ++c) {
+               s[2] = s[2] * 5u + a * 17u + b * 7u + c + 1u;
+               if (((a + b + c + gid) & 1u) != 0)
+                  continue;
+               s[3] = (s[3] ^ s[2]) + a * 13u + b * 3u + c;
+            }
+            s[0] ^= s[2] + b + 0x53u;
+         }
+         s[1] += s[3] + a + 0x79u;
+      }
+      for (unsigned c = 0; c < 4; ++c) {
+         const uint32_t got = output[gid * 4 + c];
+         if (got != s[c]) {
+            if (mismatches < 12)
+               fprintf(stderr,
+                       "triple-loop word %u component %u=%#x expected=%#x "
+                       "limits=%u/%u/%u\n",
+                       gid, c, got, s[c], la, lb, lc);
+            ++mismatches;
+         }
+      }
+   }
+   if (mismatches)
+      fail("triple-loop output mismatch");
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+static void
+run_loop_device_loads(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) readonly buffer Counts { uint v[]; } counts;\n"
+      "layout(std430,binding=1) readonly buffer Data { uint v[]; } data0;\n"
+      "layout(std430,binding=2) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){ uint gid=gl_GlobalInvocationID.x;"
+      " uint limit=counts.v[gid]&31u; uint acc=gid^0xa5a55a5au;"
+      " uint consumed=0u;"
+      " for(uint i=0u;i<limit;++i){"
+      "  uint word=data0.v[(gid*17u+i*13u)&16383u];"
+      "  acc=(acc^word)*3u+i+1u;"
+      "  if(((word^gid)&3u)==0u) continue;"
+      "  acc=acc*5u+(word>>3u); ++consumed;"
+      " }"
+      " output0.v[gid]=uvec4(acc,limit,consumed,0xe0000000u|gid); }\n";
+
+   const size_t scalar_bytes = VALUE_COUNT * sizeof(uint32_t);
+   const size_t output_bytes = 4 * scalar_bytes;
+   uint32_t *counts = malloc(scalar_bytes);
+   uint32_t *data = malloc(scalar_bytes);
+   uint32_t *seed = malloc(output_bytes);
+   if (!counts || !data || !seed)
+      fail("allocate loop-load buffers");
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+      counts[i] = (i * 11u + (i >> 3) + 7u) & 31u;
+      data[i] = (i * 0x9e3779b9u) ^ (i >> 5) ^ 0x6a09e667u;
+   }
+   for (size_t i = 0; i < 4 * VALUE_COUNT; ++i)
+      seed[i] = 0xdead4000u ^ (uint32_t)i;
+
+   GLuint program = build_compute_source(source);
+   GLuint buffers[3] = {0};
+   glGenBuffers(3, buffers);
+   const void *initial[] = {counts, data, seed};
+   const size_t sizes[] = {scalar_bytes, scalar_bytes, output_bytes};
+   for (unsigned binding = 0; binding < 3; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, sizes[binding], initial[binding],
+                   GL_DYNAMIC_COPY);
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, buffers[binding]);
+   }
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[2]);
+   const uint32_t *output = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
+                                             output_bytes, GL_MAP_READ_BIT);
+   if (!output)
+      fail("map loop-load output");
+   unsigned mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t limit = counts[gid] & 31u;
+      uint32_t acc = gid ^ 0xa5a55a5au;
+      uint32_t consumed = 0;
+      for (uint32_t i = 0; i < limit; ++i) {
+         const uint32_t word = data[(gid * 17u + i * 13u) & 16383u];
+         acc = (acc ^ word) * 3u + i + 1u;
+         if (((word ^ gid) & 3u) == 0)
+            continue;
+         acc = acc * 5u + (word >> 3);
+         ++consumed;
+      }
+      const uint32_t want[] = {acc, limit, consumed, 0xe0000000u | gid};
+      for (unsigned c = 0; c < 4; ++c) {
+         const uint32_t got = output[gid * 4 + c];
+         if (got != want[c]) {
+            if (mismatches < 12)
+               fprintf(stderr,
+                       "loop-load word %u component %u=%#x expected=%#x "
+                       "limit=%u\n",
+                       gid, c, got, want[c], limit);
+            ++mismatches;
+         }
+      }
+   }
+   if (mismatches)
+      fail("loop-load output mismatch");
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(3, buffers);
+   free(seed);
+   free(data);
+   free(counts);
+}
+
+static void
+run_loop_conditions_and_general_break(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uvec4 v[]; } output0;\n"
+      "void main(){ uint gid=gl_GlobalInvocationID.x;"
+      " uint limit=(gid&15u)+2u,stop=(gid>>4u)&15u;"
+      " uint x=gid^0x6a09e667u,a=0u;"
+      " while(a*3u+(gid&3u)<limit*3u&&a!=stop){"
+      "  x=x*3u+(a*3u+(gid&3u))+0x10203u;++a;}"
+      " uint b=0u,marker=0u;"
+      " for(;b<limit;++b){x=x*5u+b+0x40506u;"
+      "  if(((b^gid)&7u)==3u){x^=0x89abcdefu+b;"
+      "   marker=b+1u;break;}"
+      "  else{x+=0x13579bdfu+gid;}"
+      " }"
+      " output0.v[gid]=uvec4(x,a,b,0xf1000000u|marker);}\n";
+
+   const size_t words = 4 * VALUE_COUNT;
+   const size_t bytes = words * sizeof(uint32_t);
+   uint32_t *seed = malloc(bytes);
+   if (!seed)
+      fail("allocate loop-condition output");
+   for (size_t i = 0; i < words; ++i)
+      seed[i] = 0xdead5000u ^ (uint32_t)i;
+
+   GLuint program = build_compute_source(source);
+   GLuint buffer = 0;
+   glGenBuffers(1, &buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, bytes, seed, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, buffer);
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   const uint32_t *output =
+      glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, bytes, GL_MAP_READ_BIT);
+   if (!output)
+      fail("map loop-condition output");
+   unsigned mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t limit = (gid & 15u) + 2u;
+      const uint32_t stop = (gid >> 4) & 15u;
+      uint32_t x = gid ^ 0x6a09e667u;
+      uint32_t a = 0;
+      while (a * 3u + (gid & 3u) < limit * 3u && a != stop) {
+         x = x * 3u + (a * 3u + (gid & 3u)) + 0x10203u;
+         ++a;
+      }
+
+      uint32_t b = 0, marker = 0;
+      for (; b < limit; ++b) {
+         x = x * 5u + b + 0x40506u;
+         if (((b ^ gid) & 7u) == 3u) {
+            x ^= 0x89abcdefu + b;
+            marker = b + 1u;
+            break;
+         } else {
+            x += 0x13579bdfu + gid;
+         }
+      }
+
+      const uint32_t want[] = {x, a, b, 0xf1000000u | marker};
+      for (unsigned c = 0; c < 4; ++c) {
+         const uint32_t got = output[gid * 4 + c];
+         if (got != want[c]) {
+            if (mismatches < 12)
+               fprintf(stderr,
+                       "loop-condition word %u component %u=%#x expected=%#x "
+                       "limit=%u stop=%u\n",
+                       gid, c, got, want[c], limit, stop);
+            ++mismatches;
+         }
+      }
+   }
+   if (mismatches)
+      fail("loop-condition output mismatch");
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &buffer);
+   free(seed);
+}
+
+static int
+compare_u32(const void *a_, const void *b_)
+{
+   const uint32_t a = *(const uint32_t *)a_;
+   const uint32_t b = *(const uint32_t *)b_;
+   return (a > b) - (a < b);
+}
+
+static uint32_t
+atomic_shape_input(unsigned slot, unsigned gid)
+{
+   return (0x1020304u * (slot + 1)) ^
+          (gid * (0x10101u + slot * 0x111u));
+}
+
+static void
+run_device_atomic_native_shape(void)
+{
+   enum { count = 64, inputs = 6, target_index = 6, output_index = 7 };
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) readonly buffer I0{uint v[];}i0;\n"
+      "layout(std430,binding=1) readonly buffer I1{uint v[];}i1;\n"
+      "layout(std430,binding=2) readonly buffer I2{uint v[];}i2;\n"
+      "layout(std430,binding=3) readonly buffer I3{uint v[];}i3;\n"
+      "layout(std430,binding=4) readonly buffer I4{uint v[];}i4;\n"
+      "layout(std430,binding=5) readonly buffer I5{uint v[];}i5;\n"
+      "layout(std430,binding=6) buffer T{uint v[];}target;\n"
+      "layout(std430,binding=7) buffer O{uvec4 v[];}out0;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      "uint operand=((i0.v[gid]+i1.v[gid])^i2.v[gid])+"
+      "((i3.v[gid]&i4.v[gid])|i5.v[gid]);"
+      "uint old=atomicAdd(target.v[gid],operand);"
+      "out0.v[gid]=uvec4(old,old+operand,operand,gid^0xa917c0deu);}\n";
+
+   uint32_t *initial[8] = {0};
+   size_t sizes[8] = {0};
+   for (unsigned slot = 0; slot < inputs; ++slot) {
+      sizes[slot] = count * sizeof(uint32_t);
+      initial[slot] = malloc(sizes[slot]);
+      if (!initial[slot])
+         fail("allocate atomic-shape input");
+      for (unsigned gid = 0; gid < count; ++gid)
+         initial[slot][gid] = atomic_shape_input(slot, gid);
+   }
+   sizes[target_index] = count * sizeof(uint32_t);
+   sizes[output_index] = count * 4 * sizeof(uint32_t);
+   initial[target_index] = malloc(sizes[target_index]);
+   initial[output_index] = calloc(1, sizes[output_index]);
+   if (!initial[target_index] || !initial[output_index])
+      fail("allocate atomic-shape outputs");
+   for (unsigned gid = 0; gid < count; ++gid)
+      initial[target_index][gid] = 0x60000000u + 17u * gid;
+
+   GLuint program = build_compute_source(source);
+   GLuint buffers[8] = {0};
+   glGenBuffers(8, buffers);
+   for (unsigned slot = 0; slot < 8; ++slot) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[slot]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, sizes[slot], initial[slot],
+                   GL_DYNAMIC_COPY);
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, slot, buffers[slot]);
+   }
+   glUseProgram(program);
+   glDispatchCompute(2, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   unsigned mismatches = 0;
+   for (unsigned slot = target_index; slot <= output_index; ++slot) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[slot]);
+      const uint32_t *got = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
+                                             sizes[slot], GL_MAP_READ_BIT);
+      if (!got)
+         fail("map atomic-shape result");
+      for (unsigned gid = 0; gid < count; ++gid) {
+         uint32_t in[inputs];
+         for (unsigned i = 0; i < inputs; ++i)
+            in[i] = initial[i][gid];
+         uint32_t operand = ((in[0] + in[1]) ^ in[2]) +
+                            ((in[3] & in[4]) | in[5]);
+         uint32_t before = initial[target_index][gid];
+         uint32_t expected[4] = {
+            before, before + operand, operand, gid ^ 0xa917c0deu,
+         };
+         unsigned components = slot == target_index ? 1 : 4;
+         for (unsigned c = 0; c < components; ++c) {
+            uint32_t want = slot == target_index ? expected[1] : expected[c];
+            uint32_t value = got[gid * components + c];
+            if (value != want) {
+               if (mismatches < 8)
+                  fprintf(stderr,
+                          "atomic-shape slot %u gid %u component %u=%#x "
+                          "expected=%#x\n", slot, gid, c, value, want);
+               ++mismatches;
+            }
+         }
+      }
+      glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   }
+
+   glDeleteProgram(program);
+   glDeleteBuffers(8, buffers);
+   for (unsigned slot = 0; slot < 8; ++slot)
+      free(initial[slot]);
+   if (mismatches)
+      fail("atomic native-shape mismatch");
+}
+
+static void
+run_device_atomic_pending_load_forwarding(void)
+{
+   enum {
+      count = 64,
+      output_index = 0,
+      target_index = 1,
+      direct_index = 2,
+      retained_index = 3,
+      unrelated_index = 4,
+      buffers_count = 5,
+   };
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=32) in;\n"
+      "layout(std430,binding=0) buffer O{uint v[];}out0;\n"
+      "layout(std430,binding=1) buffer T{uint v[];}target;\n"
+      "layout(std430,binding=2) readonly buffer D{uint v[];}direct_in;\n"
+      "layout(std430,binding=3) readonly buffer R{uint v[];}retained_in;\n"
+      "layout(std430,binding=4) readonly buffer U{uint v[];}unrelated_in;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      " uint direct=direct_in.v[gid];"
+      " uint retained=retained_in.v[gid];"
+      " uint unrelated=unrelated_in.v[gid];"
+      " uint old0=atomicAdd(target.v[gid*2u],direct);"
+      " uint old1=atomicXor(target.v[gid*2u+1u],retained);"
+      " out0.v[gid*4u+0u]=old0;"
+      " out0.v[gid*4u+1u]=old1;"
+      " out0.v[gid*4u+2u]=retained;"
+      " out0.v[gid*4u+3u]=unrelated;}\n";
+
+   size_t sizes[buffers_count] = {
+      [output_index] = count * 4 * sizeof(uint32_t),
+      [target_index] = count * 2 * sizeof(uint32_t),
+      [direct_index] = count * sizeof(uint32_t),
+      [retained_index] = count * sizeof(uint32_t),
+      [unrelated_index] = count * sizeof(uint32_t),
+   };
+   uint32_t *initial[buffers_count] = {0};
+   for (unsigned binding = 0; binding < buffers_count; ++binding) {
+      initial[binding] = calloc(1, sizes[binding]);
+      if (!initial[binding])
+         fail("allocate pending atomic input");
+   }
+   for (unsigned gid = 0; gid < count; ++gid) {
+      initial[target_index][gid * 2 + 0] = 0x50000000u + gid * 0x101u;
+      initial[target_index][gid * 2 + 1] = 0xa0000000u ^ (gid * 0x10001u);
+      initial[direct_index][gid] = 0x01020304u ^ (gid * 0x1111u);
+      initial[retained_index][gid] = 0x10204081u + gid * 17u;
+      initial[unrelated_index][gid] = 0xc0010000u ^ (gid * 0x10101u);
+   }
+
+   GLuint program = build_compute_source(source);
+   GLuint buffers[buffers_count] = {0};
+   glGenBuffers(buffers_count, buffers);
+   for (unsigned binding = 0; binding < buffers_count; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, sizes[binding], initial[binding],
+                   GL_DYNAMIC_COPY);
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, buffers[binding]);
+   }
+   glUseProgram(program);
+   glDispatchCompute(2, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   unsigned mismatches = 0;
+   for (unsigned binding = output_index; binding <= target_index; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
+      const uint32_t *got = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
+                                             sizes[binding], GL_MAP_READ_BIT);
+      if (!got)
+         fail("map pending atomic result");
+      for (unsigned gid = 0; gid < count; ++gid) {
+         uint32_t expected_output[4] = {
+            initial[target_index][gid * 2 + 0],
+            initial[target_index][gid * 2 + 1],
+            initial[retained_index][gid],
+            initial[unrelated_index][gid],
+         };
+         uint32_t expected_target[2] = {
+            initial[target_index][gid * 2 + 0] + initial[direct_index][gid],
+            initial[target_index][gid * 2 + 1] ^ initial[retained_index][gid],
+         };
+         const uint32_t *expected =
+            binding == output_index ? expected_output : expected_target;
+         const unsigned components = binding == output_index ? 4 : 2;
+         for (unsigned c = 0; c < components; ++c) {
+            if (got[gid * components + c] == expected[c])
+               continue;
+            if (mismatches < 8)
+               fprintf(stderr,
+                       "pending atomic binding %u gid %u component %u=%#x "
+                       "expected=%#x\n",
+                       binding, gid, c, got[gid * components + c], expected[c]);
+            ++mismatches;
+         }
+      }
+      glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   }
+
+   glDeleteProgram(program);
+   glDeleteBuffers(buffers_count, buffers);
+   for (unsigned binding = 0; binding < buffers_count; ++binding)
+      free(initial[binding]);
+   if (mismatches)
+      fail("pending atomic forwarding mismatch");
+}
+
+static void
+run_device_atomics(void)
+{
+   /* Start by isolating the RMW side effect from asynchronous return
+    * publication.  The ordinary read proves that the same resource/index is
+    * addressable; the CPU readback proves that an unused-result atomic was
+    * not optimized away or silently discarded by the machine form. */
+   static const char *baseline_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uint v[]; } output0;\n"
+      "layout(std430,binding=1) buffer Target { uint v[]; } target;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      " uint before=target.v[gid];"
+      " atomicAdd(target.v[gid],gid*3u+1u);"
+      " output0.v[gid]=before;}\n";
+   uint32_t *baseline_output = malloc(VALUE_COUNT * sizeof(uint32_t));
+   uint32_t *baseline_target = malloc(VALUE_COUNT * sizeof(uint32_t));
+   if (!baseline_output || !baseline_target)
+      fail("allocate atomic baseline buffers");
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      baseline_output[gid] = 0xdead5000u ^ gid;
+      baseline_target[gid] = 0x60000000u + gid * 17u;
+   }
+
+   GLuint baseline_program = build_compute_source(baseline_source);
+   GLuint baseline_buffers[2] = {0};
+   glGenBuffers(2, baseline_buffers);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseline_buffers[0]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER,
+                VALUE_COUNT * sizeof(uint32_t), baseline_output,
+                GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, baseline_buffers[0]);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseline_buffers[1]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, VALUE_COUNT * sizeof(uint32_t),
+                baseline_target, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, baseline_buffers[1]);
+   glUseProgram(baseline_program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseline_buffers[0]);
+   const uint32_t *baseline_got = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, VALUE_COUNT * sizeof(uint32_t),
+      GL_MAP_READ_BIT);
+   if (!baseline_got)
+      fail("map atomic baseline output");
+   unsigned baseline_mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      if (baseline_got[gid] != baseline_target[gid]) {
+         if (baseline_mismatches < 8)
+            fprintf(stderr,
+                    "atomic baseline word %u before=%#x expected=%#x\n",
+                    gid, baseline_got[gid], baseline_target[gid]);
+         ++baseline_mismatches;
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, baseline_buffers[1]);
+   const uint32_t *baseline_final = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, VALUE_COUNT * sizeof(uint32_t),
+      GL_MAP_READ_BIT);
+   if (!baseline_final)
+      fail("map atomic baseline target");
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t want = baseline_target[gid] + gid * 3u + 1u;
+      if (baseline_final[gid] != want) {
+         if (baseline_mismatches < 8)
+            fprintf(stderr,
+                    "atomic baseline final word %u=%#x expected=%#x\n", gid,
+                    baseline_final[gid], want);
+         ++baseline_mismatches;
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(baseline_program);
+   glDeleteBuffers(2, baseline_buffers);
+   free(baseline_target);
+   free(baseline_output);
+   if (baseline_mismatches)
+      fail("atomic baseline mismatch");
+
+   /* Keep the first returning probe deliberately small.  Besides making the
+    * old-value oracle unambiguous, this isolates the native atomic-return
+    * landing from later result reuse and from the full operation matrix. */
+   static const char *single_return_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uint v[]; } output0;\n"
+      "layout(std430,binding=1) buffer Target { uint v[]; } target;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      " uint old=atomicAdd(target.v[gid],gid*5u+3u);"
+      " output0.v[gid]=old;}\n";
+   uint32_t *single_output = malloc(VALUE_COUNT * sizeof(uint32_t));
+   uint32_t *single_target = malloc(VALUE_COUNT * sizeof(uint32_t));
+   if (!single_output || !single_target)
+      fail("allocate single-return atomic buffers");
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      single_output[gid] = 0xdead5100u ^ gid;
+      single_target[gid] = 0x61000000u + gid * 19u;
+   }
+   GLuint single_program = build_compute_source(single_return_source);
+   GLuint single_buffers[2] = {0};
+   glGenBuffers(2, single_buffers);
+   const void *single_data[] = {single_output, single_target};
+   for (unsigned b = 0; b < 2; ++b) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, single_buffers[b]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, VALUE_COUNT * sizeof(uint32_t),
+                   single_data[b], GL_DYNAMIC_COPY);
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, b, single_buffers[b]);
+   }
+   glUseProgram(single_program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   unsigned single_mismatches = 0;
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, single_buffers[0]);
+   const uint32_t *single_old = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, VALUE_COUNT * sizeof(uint32_t),
+      GL_MAP_READ_BIT);
+   if (!single_old)
+      fail("map single-return atomic output");
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      if (single_old[gid] != single_target[gid]) {
+         if (single_mismatches < 8)
+            fprintf(stderr,
+                    "single-return atomic old word %u=%#x expected=%#x\n",
+                    gid, single_old[gid], single_target[gid]);
+         ++single_mismatches;
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, single_buffers[1]);
+   const uint32_t *single_final = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, VALUE_COUNT * sizeof(uint32_t),
+      GL_MAP_READ_BIT);
+   if (!single_final)
+      fail("map single-return atomic target");
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t want = single_target[gid] + gid * 5u + 3u;
+      if (single_final[gid] != want) {
+         if (single_mismatches < 8)
+            fprintf(stderr,
+                    "single-return atomic final word %u=%#x expected=%#x\n",
+                    gid, single_final[gid], want);
+         ++single_mismatches;
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(single_program);
+   glDeleteBuffers(2, single_buffers);
+   free(single_target);
+   free(single_output);
+   if (single_mismatches)
+      fail("single-return atomic mismatch");
+
+   /* One invocation executes every GLES-visible 32-bit operation on a
+    * private location. This checks exact returned values, exact final memory,
+    * signedness, compare-exchange success/failure, result fanout, discarded
+    * results, affine addresses, and two independently bound atomic buffers. */
+   static const char *operation_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uint v[]; } output0;\n"
+      "layout(std430,binding=1) buffer UTarget { uint v[]; } target_u;\n"
+      "layout(std430,binding=2) buffer STarget { int v[]; } target_s;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;uint b=gid*9u;"
+      "uint d0=gid*3u+1u,d1=0x0ff00ff0u^gid,d2=0x01020304u^gid;"
+      "uint a=atomicAdd(target_u.v[b+0u],d0);"
+      "uint n=atomicAnd(target_u.v[b+1u],d1);"
+      "uint o=atomicOr(target_u.v[b+2u],d2);"
+      "uint x=atomicXor(target_u.v[b+3u],0xa5a55a5au+gid);"
+      "uint lo=atomicMin(target_u.v[b+4u],gid*7u+3u);"
+      "uint hi=atomicMax(target_u.v[b+5u],0x70000000u-gid);"
+      "uint e=atomicExchange(target_u.v[b+6u],0x33000000u+gid);"
+      "uint c=atomicCompSwap(target_u.v[b+7u],"
+      " (gid&1u)==0u?0x70000000u+gid:0x12340000u+gid,"
+      " 0x44000000u+gid);"
+      "atomicXor(target_u.v[b+8u],0x00ff00ffu^gid);"
+      "int sl=atomicMin(target_s.v[gid*2u],int(gid)-12000);"
+      "int sh=atomicMax(target_s.v[gid*2u+1u],12000-int(gid));"
+      /* Keep each oracle component in its own plane.  Besides making failures
+       * easy to classify, this prevents NIR from coalescing them into a
+       * strided vector store, which is outside the current Apple9 store
+       * encoding model and unrelated to the atomic behavior under test. */
+      "output0.v[gid+0u*16384u]=a;output0.v[gid+1u*16384u]=n;"
+      "output0.v[gid+2u*16384u]=o;output0.v[gid+3u*16384u]=x;"
+      "output0.v[gid+4u*16384u]=lo;output0.v[gid+5u*16384u]=hi;"
+      "output0.v[gid+6u*16384u]=e;output0.v[gid+7u*16384u]=c;"
+      "output0.v[gid+8u*16384u]=uint(sl);"
+      "output0.v[gid+9u*16384u]=uint(sh);"
+      "output0.v[gid+10u*16384u]=(a+0x10203u)^(a+0x40506u);"
+      "output0.v[gid+11u*16384u]=0xa7000000u|gid;}\n";
+
+   const size_t output_words = 3 * 4 * VALUE_COUNT;
+   const size_t unsigned_words = 9 * VALUE_COUNT;
+   const size_t signed_words = 2 * VALUE_COUNT;
+   uint32_t *output_seed = malloc(output_words * sizeof(uint32_t));
+   uint32_t *unsigned_seed = malloc(unsigned_words * sizeof(uint32_t));
+   int32_t *signed_seed = malloc(signed_words * sizeof(int32_t));
+   if (!output_seed || !unsigned_seed || !signed_seed)
+      fail("allocate atomic operation buffers");
+   for (size_t i = 0; i < output_words; ++i)
+      output_seed[i] = 0xdead6000u ^ (uint32_t)i;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      uint32_t *u = unsigned_seed + gid * 9;
+      u[0] = 0x80000000u + gid;
+      u[1] = 0xf0f00000u | gid;
+      u[2] = 0x10000000u | gid;
+      u[3] = 0x5a5aa5a5u ^ gid;
+      u[4] = 0x80000000u + gid;
+      u[5] = gid;
+      u[6] = 0x66000000u + gid;
+      u[7] = 0x70000000u + gid;
+      u[8] = 0x0f0ff0f0u + gid;
+      signed_seed[gid * 2] = (int32_t)gid - 4000;
+      signed_seed[gid * 2 + 1] = 4000 - (int32_t)gid;
+   }
+
+   GLuint operation_program = build_compute_source(operation_source);
+   GLuint operation_buffers[3] = {0};
+   glGenBuffers(3, operation_buffers);
+   const size_t operation_sizes[] = {
+      output_words * sizeof(uint32_t), unsigned_words * sizeof(uint32_t),
+      signed_words * sizeof(int32_t),
+   };
+   const void *operation_initial[] = {output_seed, unsigned_seed, signed_seed};
+   for (unsigned binding = 0; binding < 3; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, operation_buffers[binding]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, operation_sizes[binding],
+                   operation_initial[binding], GL_DYNAMIC_COPY);
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding,
+                       operation_buffers[binding]);
+   }
+   glUseProgram(operation_program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, operation_buffers[0]);
+   const uint32_t *output = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, operation_sizes[0], GL_MAP_READ_BIT);
+   if (!output)
+      fail("map atomic operation output");
+   unsigned mismatches = 0;
+   unsigned output_mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t *u = unsigned_seed + gid * 9;
+      const uint32_t want[] = {
+         u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+         (uint32_t)signed_seed[gid * 2],
+         (uint32_t)signed_seed[gid * 2 + 1],
+         (u[0] + 0x10203u) ^ (u[0] + 0x40506u),
+         0xa7000000u | gid,
+      };
+      for (unsigned c = 0; c < ARRAY_SIZE(want); ++c) {
+         if (output[c * VALUE_COUNT + gid] != want[c]) {
+            if (output_mismatches < 12)
+               fprintf(stderr,
+                       "atomic return word %u component %u=%#x expected=%#x\n",
+                       gid, c, output[c * VALUE_COUNT + gid], want[c]);
+            ++mismatches;
+            ++output_mismatches;
+         }
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, operation_buffers[1]);
+   const uint32_t *final_u = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, operation_sizes[1], GL_MAP_READ_BIT);
+   if (!final_u)
+      fail("map atomic unsigned target");
+   unsigned final_u_mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t *initial = unsigned_seed + gid * 9;
+      const uint32_t d0 = gid * 3u + 1u;
+      const uint32_t d1 = 0x0ff00ff0u ^ gid;
+      const uint32_t d2 = 0x01020304u ^ gid;
+      const uint32_t want[] = {
+         initial[0] + d0,
+         initial[1] & d1,
+         initial[2] | d2,
+         initial[3] ^ (0xa5a55a5au + gid),
+         initial[4] < gid * 7u + 3u ? initial[4] : gid * 7u + 3u,
+         initial[5] > 0x70000000u - gid ? initial[5]
+                                               : 0x70000000u - gid,
+         0x33000000u + gid,
+         (gid & 1u) == 0 ? 0x44000000u + gid : initial[7],
+         initial[8] ^ (0x00ff00ffu ^ gid),
+      };
+      for (unsigned c = 0; c < ARRAY_SIZE(want); ++c) {
+         if (final_u[gid * 9 + c] != want[c]) {
+            if (final_u_mismatches < 12)
+               fprintf(stderr,
+                       "atomic final-u word %u component %u=%#x expected=%#x\n",
+                       gid, c, final_u[gid * 9 + c], want[c]);
+            ++mismatches;
+            ++final_u_mismatches;
+         }
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, operation_buffers[2]);
+   const int32_t *final_s = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, operation_sizes[2], GL_MAP_READ_BIT);
+   if (!final_s)
+      fail("map atomic signed target");
+   unsigned final_s_mismatches = 0;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const int32_t min_data = (int32_t)gid - 12000;
+      const int32_t max_data = 12000 - (int32_t)gid;
+      const int32_t min_want = signed_seed[gid * 2] < min_data
+                                  ? signed_seed[gid * 2]
+                                  : min_data;
+      const int32_t max_want = signed_seed[gid * 2 + 1] > max_data
+                                  ? signed_seed[gid * 2 + 1]
+                                  : max_data;
+      if (final_s[gid * 2] != min_want ||
+          final_s[gid * 2 + 1] != max_want) {
+         if (final_s_mismatches < 12)
+            fprintf(stderr,
+                    "atomic final-s word %u=%d/%d expected=%d/%d\n", gid,
+                    final_s[gid * 2], final_s[gid * 2 + 1], min_want,
+                    max_want);
+         ++mismatches;
+         ++final_s_mismatches;
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   if (mismatches)
+      fail("per-lane atomic operation mismatch");
+
+   glDeleteProgram(operation_program);
+   glDeleteBuffers(3, operation_buffers);
+   free(signed_seed);
+   free(unsigned_seed);
+   free(output_seed);
+
+   /* All 256 lanes contend on one address. Returned values may appear in any
+    * lane order, but their sorted set and the final counter are exact. */
+   static const char *contended_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uint v[]; } output0;\n"
+      "layout(std430,binding=1) buffer Counter { uint v[]; } counter;\n"
+      "void main(){uint lid=gl_LocalInvocationID.x;"
+      " output0.v[lid]=atomicAdd(counter.v[0],1u);}\n";
+   uint32_t contended_output[LOCAL_SIZE];
+   for (unsigned i = 0; i < LOCAL_SIZE; ++i)
+      contended_output[i] = 0xdead7000u ^ i;
+   uint32_t counter = 1000;
+   GLuint contended_program = build_compute_source(contended_source);
+   GLuint contended_buffers[2] = {0};
+   glGenBuffers(2, contended_buffers);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, contended_buffers[0]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(contended_output),
+                contended_output, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, contended_buffers[0]);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, contended_buffers[1]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(counter), &counter,
+                GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, contended_buffers[1]);
+   glUseProgram(contended_program);
+   glDispatchCompute(1, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, contended_buffers[0]);
+   const uint32_t *returns = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, sizeof(contended_output), GL_MAP_READ_BIT);
+   if (!returns)
+      fail("map contended atomic returns");
+   memcpy(contended_output, returns, sizeof(contended_output));
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   qsort(contended_output, LOCAL_SIZE, sizeof(contended_output[0]), compare_u32);
+   for (unsigned i = 0; i < LOCAL_SIZE; ++i) {
+      if (contended_output[i] != 1000u + i)
+         fail("contended atomic return permutation mismatch");
+   }
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, contended_buffers[1]);
+   const uint32_t *final_counter = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, sizeof(counter), GL_MAP_READ_BIT);
+   if (!final_counter || *final_counter != 1000u + LOCAL_SIZE)
+      fail("contended atomic final counter mismatch");
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(contended_program);
+   glDeleteBuffers(2, contended_buffers);
+
+   /* Dynamic, heavily colliding addresses under nested loop/if masks. The
+    * return is intentionally unused, exercising the native discard form; all
+    * adds commute, so every one of 1024 final words has an exact CPU oracle. */
+   static const char *masked_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uint v[]; } output0;\n"
+      "layout(std430,binding=1) buffer Target { uint v[]; } target;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      " uint idx=(gid*40503u+17u)&1023u;uint count=(gid&3u)+1u;"
+      " for(uint i=0u;i<count;++i){"
+      "  if(((gid+i)&1u)!=0u) atomicAdd(target.v[idx],(gid&7u)+i+1u);"
+      "  else atomicAdd(target.v[idx],(gid&3u)+i+3u);"
+      " }output0.v[gid]=0xb8000000u|gid;}\n";
+   uint32_t *masked_output = malloc(VALUE_COUNT * sizeof(uint32_t));
+   uint32_t masked_target[1024];
+   uint32_t masked_want[1024];
+   if (!masked_output)
+      fail("allocate masked atomic output");
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i)
+      masked_output[i] = 0xdead8000u ^ i;
+   for (uint32_t i = 0; i < ARRAY_SIZE(masked_target); ++i)
+      masked_target[i] = masked_want[i] = 0x10000000u + i;
+   for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+      const uint32_t idx = (gid * 40503u + 17u) & 1023u;
+      const uint32_t count = (gid & 3u) + 1u;
+      for (uint32_t i = 0; i < count; ++i)
+         masked_want[idx] += ((gid + i) & 1u) != 0u ? (gid & 7u) + i + 1u
+                                                    : (gid & 3u) + i + 3u;
+   }
+   GLuint masked_program = build_compute_source(masked_source);
+   GLuint masked_buffers[2] = {0};
+   glGenBuffers(2, masked_buffers);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, masked_buffers[0]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, VALUE_COUNT * sizeof(uint32_t),
+                masked_output, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, masked_buffers[0]);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, masked_buffers[1]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(masked_target), masked_target,
+                GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, masked_buffers[1]);
+   glUseProgram(masked_program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, masked_buffers[0]);
+   const uint32_t *masked_result = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, VALUE_COUNT * sizeof(uint32_t),
+      GL_MAP_READ_BIT);
+   if (!masked_result)
+      fail("map masked atomic output");
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+      if (masked_result[i] != (0xb8000000u | i))
+         fail("masked atomic completion output mismatch");
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, masked_buffers[1]);
+   const uint32_t *masked_final = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, sizeof(masked_target), GL_MAP_READ_BIT);
+   if (!masked_final)
+      fail("map masked atomic target");
+   for (unsigned i = 0; i < ARRAY_SIZE(masked_target); ++i) {
+      if (masked_final[i] != masked_want[i])
+         fail("masked atomic target mismatch");
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(masked_program);
+   glDeleteBuffers(2, masked_buffers);
+   free(masked_output);
+
+   /* Returned atomics are harder than discarded side effects: every dynamic
+    * iteration must consume slot 6 before the next atomic reuses it, and each
+    * masked arm must publish its old value before reconvergence. Keep each
+    * lane on a private address so the complete return/final-memory oracle is
+    * deterministic while still stressing divergent loop-carried phis. */
+   enum { returned_count = 4096 };
+   static const char *returned_mask_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Output { uint v[]; } output0;\n"
+      "layout(std430,binding=1) buffer Target { uint v[]; } target;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      " uint acc=0x811c9dc5u;uint count=(gid&3u)+2u;"
+      " for(uint i=0u;i<count;++i){uint old;"
+      "  if(((gid+i)&1u)!=0u)"
+      "   old=atomicAdd(target.v[gid],((i+1u)*3u)+(gid&7u));"
+      "  else old=atomicXor(target.v[gid],"
+      "                         0x01010101u+i*0x00110011u);"
+      "  acc=(acc*16777619u)^old;"
+      " }output0.v[gid*2u]=acc;"
+      " output0.v[gid*2u+1u]=0xc9000000u|count;}\n";
+   uint32_t *returned_output = malloc(returned_count * 2 * sizeof(uint32_t));
+   uint32_t *returned_target = malloc(returned_count * sizeof(uint32_t));
+   uint32_t *returned_want = malloc(returned_count * 2 * sizeof(uint32_t));
+   uint32_t *returned_target_want =
+      malloc(returned_count * sizeof(uint32_t));
+   if (!returned_output || !returned_target || !returned_want ||
+       !returned_target_want)
+      fail("allocate returned masked atomic buffers");
+   for (uint32_t gid = 0; gid < returned_count; ++gid) {
+      returned_output[gid * 2] = 0xdead9000u ^ gid;
+      returned_output[gid * 2 + 1] = 0xdead9100u ^ gid;
+      uint32_t value = 0x71000000u + gid * 13u;
+      uint32_t acc = 0x811c9dc5u;
+      const uint32_t count = (gid & 3u) + 2u;
+      for (uint32_t i = 0; i < count; ++i) {
+         const uint32_t old = value;
+         if (((gid + i) & 1u) != 0u)
+            value += ((i + 1u) * 3u) + (gid & 7u);
+         else
+            value ^= 0x01010101u + i * 0x00110011u;
+         acc = acc * 16777619u ^ old;
+      }
+      returned_want[gid * 2] = acc;
+      returned_want[gid * 2 + 1] = 0xc9000000u | count;
+      returned_target[gid] = 0x71000000u + gid * 13u;
+      returned_target_want[gid] = value;
+   }
+
+   GLuint returned_program = build_compute_source(returned_mask_source);
+   GLuint returned_buffers[2] = {0};
+   glGenBuffers(2, returned_buffers);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, returned_buffers[0]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER,
+                returned_count * 2 * sizeof(uint32_t), returned_output,
+                GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, returned_buffers[0]);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, returned_buffers[1]);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, returned_count * sizeof(uint32_t),
+                returned_target, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, returned_buffers[1]);
+   glUseProgram(returned_program);
+   glDispatchCompute(returned_count / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   unsigned returned_mismatches = 0;
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, returned_buffers[0]);
+   const uint32_t *returned_got = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, returned_count * 2 * sizeof(uint32_t),
+      GL_MAP_READ_BIT);
+   if (!returned_got)
+      fail("map returned masked atomic output");
+   for (uint32_t i = 0; i < returned_count * 2; ++i) {
+      if (returned_got[i] != returned_want[i]) {
+         if (returned_mismatches < 12)
+            fprintf(stderr,
+                    "returned masked atomic output word %u=%#x expected=%#x\n",
+                    i, returned_got[i], returned_want[i]);
+         ++returned_mismatches;
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, returned_buffers[1]);
+   const uint32_t *returned_final = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, returned_count * sizeof(uint32_t),
+      GL_MAP_READ_BIT);
+   if (!returned_final)
+      fail("map returned masked atomic target");
+   for (uint32_t i = 0; i < returned_count; ++i) {
+      if (returned_final[i] != returned_target_want[i]) {
+         if (returned_mismatches < 12)
+            fprintf(stderr,
+                    "returned masked atomic target word %u=%#x expected=%#x\n",
+                    i, returned_final[i], returned_target_want[i]);
+         ++returned_mismatches;
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(returned_program);
+   glDeleteBuffers(2, returned_buffers);
+   free(returned_target_want);
+   free(returned_want);
+   free(returned_target);
+   free(returned_output);
+   if (returned_mismatches)
+      fail("returned masked atomic mismatch");
+
+   /* Keep one writable binding live across many dispatch records. This catches
+    * launch/resource-record reuse and missing inter-dispatch visibility while
+    * making the oracle independent of workgroup or lane execution order. */
+   enum { repeat_buckets = 32, repeat_dispatches = 32 };
+   static const char *repeat_source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Counters { uint v[]; } counters;\n"
+      "void main(){uint gid=gl_GlobalInvocationID.x;"
+      " atomicAdd(counters.v[gid&31u],1u);}\n";
+   uint32_t repeat_initial[repeat_buckets];
+   for (unsigned i = 0; i < ARRAY_SIZE(repeat_initial); ++i)
+      repeat_initial[i] = 0x1000u + i * 17u;
+   GLuint repeat_program = build_compute_source(repeat_source);
+   GLuint repeat_buffer = 0;
+   glGenBuffers(1, &repeat_buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, repeat_buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(repeat_initial),
+                repeat_initial, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, repeat_buffer);
+   glUseProgram(repeat_program);
+   for (unsigned i = 0; i < repeat_dispatches; ++i)
+      glDispatchCompute(4, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+   const uint32_t *repeat_final = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, sizeof(repeat_initial), GL_MAP_READ_BIT);
+   if (!repeat_final)
+      fail("map repeated atomic counters");
+   const uint32_t per_bucket = repeat_dispatches * (4u * LOCAL_SIZE) /
+                               repeat_buckets;
+   for (unsigned i = 0; i < ARRAY_SIZE(repeat_initial); ++i) {
+      if (repeat_final[i] != repeat_initial[i] + per_bucket)
+         fail("repeated atomic counter mismatch");
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(repeat_program);
+   glDeleteBuffers(1, &repeat_buffer);
+}
+
 static const char *const lifecycle_case_names[] = {
    "archive-cross-program-sequence",
    "repeated-range-dispatch",
@@ -2667,6 +4193,17 @@ static const char *const lifecycle_case_names[] = {
    "branch-local-device-loads",
    "nested-short-circuit-if-else",
    "nested-branch-local-loads",
+   "top-tested-loop",
+   "bottom-tested-loop",
+   "structured-loops",
+   "loop-unwind-continue",
+   "triple-nested-loops",
+   "loop-device-loads",
+   "loop-conditions-general-break",
+   "device-atomics",
+   "device-atomic-native-shape",
+   "device-atomic-pending-load-forwarding",
+   "mid-body-break-loop",
 };
 
 static int
@@ -2721,7 +4258,50 @@ run_named_case(const char *name)
       run_nested_branch_local_loads();
       return 1;
    }
-
+   if (!strcmp(name, lifecycle_case_names[11])) {
+      run_basic_loop(false);
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[12])) {
+      run_basic_loop(true);
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[13])) {
+      run_structured_loops();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[14])) {
+      run_loop_unwind_continue();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[15])) {
+      run_triple_nested_loops();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[16])) {
+      run_loop_device_loads();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[17])) {
+      run_loop_conditions_and_general_break();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[18])) {
+      run_device_atomics();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[19])) {
+      run_device_atomic_native_shape();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[20])) {
+      run_device_atomic_pending_load_forwarding();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[21])) {
+      run_mid_body_break_loop();
+      return 1;
+   }
    size_t count = 0;
    const char *const *names = t8132_apple9_memory_case_names(&count);
    for (size_t i = 0; i < count; ++i) {
@@ -2753,7 +4333,8 @@ list_cases(bool include_archive_stress)
    for (size_t i = 0; i < count; ++i)
       puts(names[i]);
    for (unsigned i = 0;
-        i < sizeof(lifecycle_case_names) / sizeof(lifecycle_case_names[0]); ++i) {
+        i < sizeof(lifecycle_case_names) / sizeof(lifecycle_case_names[0]);
+        ++i) {
       if (!include_archive_stress && (i == 0 || i == 2 || i == 4))
          continue;
       puts(lifecycle_case_names[i]);
