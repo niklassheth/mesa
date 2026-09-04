@@ -233,6 +233,21 @@ apple9_element_index(nir_def *offset, nir_scalar *index, unsigned *index_scale,
       candidate = affine;
    }
 
+   uint32_t constant_index;
+   if (apple9_const_u32(candidate, &constant_index)) {
+      const uint64_t byte_offset =
+         (uint64_t)constant_index * byte_stride + byte_add;
+      if (byte_offset > UINT32_MAX || byte_offset % element_size != 0)
+         return false;
+      if (index != NULL)
+         *index = candidate;
+      if (index_scale != NULL)
+         *index_scale = 0;
+      if (index_add != NULL)
+         *index_add = byte_offset / element_size;
+      return true;
+   }
+
    if (byte_stride == 1 && element_size != 1) {
       /* A raw scalar offset is already an element index only for byte data. */
       return false;
@@ -277,6 +292,16 @@ struct apple9_buffer_store {
    unsigned bit_size;
    uint32_t output[4];
    uint32_t lowered_index;
+};
+
+struct apple9_buffer_atomic {
+   nir_intrinsic_instr *intr;
+   nir_block *block;
+   nir_scalar index;
+   unsigned argument;
+   unsigned index_scale;
+   unsigned index_add;
+   enum agx_apple9_atomic_op op;
 };
 
 static bool
@@ -414,7 +439,9 @@ apple9_instruction_is_in_subset(nir_instr *instr)
              op == nir_intrinsic_load_subgroup_id ||
              op == nir_intrinsic_load_subgroup_size ||
              op == nir_intrinsic_load_ssbo || op == nir_intrinsic_load_ubo ||
-             op == nir_intrinsic_store_ssbo;
+             op == nir_intrinsic_store_ssbo ||
+             op == nir_intrinsic_ssbo_atomic ||
+             op == nir_intrinsic_ssbo_atomic_swap;
    }
    case nir_instr_type_phi:
       return true;
@@ -444,6 +471,9 @@ struct apple9_dag_lower {
    uint32_t zero_vreg;
    struct apple9_scalar_load *loads;
    unsigned load_count;
+   struct apple9_buffer_atomic *atomics;
+   unsigned atomic_count;
+   unsigned argument_base;
    unsigned load_instruction_count;
    unsigned emitted_load_count;
    nir_block *active_load_block;
@@ -552,11 +582,10 @@ apple9_dag_system(struct apple9_dag_lower *lower,
 {
    if (lower->system_vreg[system.selector] == AGX_APPLE9_VREG_INVALID) {
       enum agx_apple9_vir_opcode op = system.global_id
-                                          ? AGX_APPLE9_VIR_GET_GLOBAL_ID
-                                          : AGX_APPLE9_VIR_GET_SR;
+                                         ? AGX_APPLE9_VIR_GET_GLOBAL_ID
+                                         : AGX_APPLE9_VIR_GET_SR;
       enum agx_apple9_encoding encoding =
-         system.zext16 ? AGX_APPLE9_ENC_GET_SR_ZEXT16
-                       : AGX_APPLE9_ENC_GET_SR;
+         system.zext16 ? AGX_APPLE9_ENC_GET_SR_ZEXT16 : AGX_APPLE9_ENC_GET_SR;
       uint32_t immediate =
          system.global_id
             ? system.selector - 0xa0
@@ -565,8 +594,8 @@ apple9_dag_system(struct apple9_dag_lower *lower,
       /* Both GET_SR families have a proven low destination contract.
        * Immediately move the value to the general bank so the rest of
        * instruction selection does not inherit that constraint. */
-      lower->system_vreg[system.selector] = apple9_dag_emit_constrained(
-         lower, op, encoding, NULL, 0, immediate);
+      lower->system_vreg[system.selector] =
+         apple9_dag_emit_constrained(lower, op, encoding, NULL, 0, immediate);
    }
 
    return lower->system_vreg[system.selector];
@@ -640,11 +669,12 @@ static uint32_t apple9_lower_dag_scalar(struct apple9_dag_lower *lower,
                                         nir_scalar scalar);
 static uint32_t apple9_lower_bool_scalar(struct apple9_dag_lower *lower,
                                          nir_scalar scalar);
-static uint32_t apple9_emit_dag_select_raw(
-   struct apple9_dag_lower *lower, uint32_t cmp_a, uint32_t cmp_b,
-   uint32_t if_true, uint32_t if_false, uint32_t immediate);
+static uint32_t apple9_emit_dag_select_raw(struct apple9_dag_lower *lower,
+                                           uint32_t cmp_a, uint32_t cmp_b,
+                                           uint32_t if_true, uint32_t if_false,
+                                           uint32_t immediate);
 static uint32_t apple9_dag_shift_imm(struct apple9_dag_lower *lower, nir_op op,
-                                    uint32_t source, unsigned amount);
+                                     uint32_t source, unsigned amount);
 
 static uint32_t
 apple9_dag_hidden_load(struct apple9_dag_lower *lower, unsigned binding,
@@ -658,8 +688,8 @@ apple9_dag_hidden_load(struct apple9_dag_lower *lower, unsigned binding,
       .index_kind = AGX_APPLE9_DEVICE_LOAD_INDEX_RETAINED_GPR,
       .raw_token = AGX_APPLE9_DEVICE_LOAD_TOKEN_5101,
    };
-   uint32_t value = agx_apple9_vir_emit_device_load(
-      &lower->program, binding, index, &contract);
+   uint32_t value = agx_apple9_vir_emit_device_load(&lower->program, binding,
+                                                    index, &contract);
    if (value == AGX_APPLE9_VREG_INVALID ||
        !agx_apple9_vir_set_device_load_contract(
           &lower->program, value, 0, AGX_APPLE9_SCOREBOARD_SLOT_AUTO)) {
@@ -683,23 +713,23 @@ apple9_dag_ceil_udiv(struct apple9_dag_lower *lower, uint32_t numerator,
        divisor == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
 
-   uint32_t numerator_f = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
-      &numerator, 1, 0);
-   uint32_t divisor_f = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
-      &divisor, 1, 0);
-   uint32_t reciprocal = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_FRCP, AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
-      &divisor_f, 1, 0x03);
+   uint32_t numerator_f =
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
+                      &numerator, 1, 0);
+   uint32_t divisor_f =
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_U2F32, AGX_APPLE9_ENC_UINT_TO_FLOAT,
+                      &divisor, 1, 0);
+   uint32_t reciprocal =
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
+                      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, &divisor_f, 1, 0x03);
    uint32_t half = apple9_dag_imm(lower, 0x3f000000);
    uint32_t estimate_sources[3] = {numerator_f, reciprocal, half};
-   uint32_t estimate = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED,
-      estimate_sources, ARRAY_SIZE(estimate_sources), 0);
-   uint32_t quotient = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_F2U32, AGX_APPLE9_ENC_FLOAT_TO_UINT,
-      &estimate, 1, 0);
+   uint32_t estimate =
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_FMA, AGX_APPLE9_ENC_FLOAT3_EXTENDED,
+                      estimate_sources, ARRAY_SIZE(estimate_sources), 0);
+   uint32_t quotient =
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_F2U32, AGX_APPLE9_ENC_FLOAT_TO_UINT,
+                      &estimate, 1, 0);
    uint32_t zero = apple9_dag_zero(lower);
    uint32_t product_sources[3] = {quotient, divisor, zero};
    uint32_t product = apple9_dag_emit(
@@ -732,16 +762,14 @@ apple9_dag_num_workgroups(struct apple9_dag_lower *lower, unsigned component)
 
    uint32_t divisor;
    if (lower->nir->info.workgroup_size_variable) {
-      divisor = apple9_dag_system(
-         lower, (struct apple9_system_source){
-                   .selector = 0x98 + component,
-                   .zext16 = true,
-                });
+      divisor = apple9_dag_system(lower, (struct apple9_system_source){
+                                            .selector = 0x98 + component,
+                                            .zext16 = true,
+                                         });
    } else {
       const uint32_t local = lower->nir->info.workgroup_size[component];
       if (!local) {
-         lower->reason =
-            "Apple9 load_num_workgroups has an invalid local size";
+         lower->reason = "Apple9 load_num_workgroups has an invalid local size";
          return AGX_APPLE9_VREG_INVALID;
       }
       if (local == 1)
@@ -753,9 +781,9 @@ apple9_dag_num_workgroups(struct apple9_dag_lower *lower, unsigned component)
    uint32_t direct = apple9_dag_ceil_udiv(lower, q0, divisor);
    uint32_t one = apple9_dag_imm(lower, 1);
    uint32_t mode_sources[2] = {q1, one};
-   uint32_t mode = apple9_dag_emit(
-      lower, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED,
-      mode_sources, ARRAY_SIZE(mode_sources), 0);
+   uint32_t mode =
+      apple9_dag_emit(lower, AGX_APPLE9_VIR_IXOR, AGX_APPLE9_ENC_LOGIC_EXTENDED,
+                      mode_sources, ARRAY_SIZE(mode_sources), 0);
    if (q1 == AGX_APPLE9_VREG_INVALID || direct == AGX_APPLE9_VREG_INVALID ||
        one == AGX_APPLE9_VREG_INVALID || mode == AGX_APPLE9_VREG_INVALID)
       return AGX_APPLE9_VREG_INVALID;
@@ -803,40 +831,40 @@ apple9_normalize_compare(nir_op op, struct apple9_compare *compare)
 {
    switch (op) {
    case nir_op_feq:
-      *compare = (struct apple9_compare){APPLE9_COMPARE_FLOAT,
-                                         APPLE9_COMPARE_EQUAL};
+      *compare =
+         (struct apple9_compare){APPLE9_COMPARE_FLOAT, APPLE9_COMPARE_EQUAL};
       break;
    case nir_op_fneu:
       *compare = (struct apple9_compare){APPLE9_COMPARE_FLOAT,
                                          APPLE9_COMPARE_NOT_EQUAL};
       break;
    case nir_op_flt:
-      *compare = (struct apple9_compare){APPLE9_COMPARE_FLOAT,
-                                         APPLE9_COMPARE_LESS};
+      *compare =
+         (struct apple9_compare){APPLE9_COMPARE_FLOAT, APPLE9_COMPARE_LESS};
       break;
    case nir_op_fge:
       *compare = (struct apple9_compare){APPLE9_COMPARE_FLOAT,
                                          APPLE9_COMPARE_GREATER_EQUAL};
       break;
    case nir_op_ieq:
-      *compare = (struct apple9_compare){APPLE9_COMPARE_INTEGER,
-                                         APPLE9_COMPARE_EQUAL};
+      *compare =
+         (struct apple9_compare){APPLE9_COMPARE_INTEGER, APPLE9_COMPARE_EQUAL};
       break;
    case nir_op_ine:
       *compare = (struct apple9_compare){APPLE9_COMPARE_INTEGER,
                                          APPLE9_COMPARE_NOT_EQUAL};
       break;
    case nir_op_ilt:
-      *compare = (struct apple9_compare){APPLE9_COMPARE_SIGNED,
-                                         APPLE9_COMPARE_LESS};
+      *compare =
+         (struct apple9_compare){APPLE9_COMPARE_SIGNED, APPLE9_COMPARE_LESS};
       break;
    case nir_op_ige:
       *compare = (struct apple9_compare){APPLE9_COMPARE_SIGNED,
                                          APPLE9_COMPARE_GREATER_EQUAL};
       break;
    case nir_op_ult:
-      *compare = (struct apple9_compare){APPLE9_COMPARE_UNSIGNED,
-                                         APPLE9_COMPARE_LESS};
+      *compare =
+         (struct apple9_compare){APPLE9_COMPARE_UNSIGNED, APPLE9_COMPARE_LESS};
       break;
    case nir_op_uge:
       *compare = (struct apple9_compare){APPLE9_COMPARE_UNSIGNED,
@@ -982,7 +1010,8 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
 
    const unsigned key = scalar.def->index * 4 + scalar.comp;
    if (key >= lower->ssa_map_count) {
-      lower->reason = "Apple9 Boolean lowering encountered an invalid SSA index";
+      lower->reason =
+         "Apple9 Boolean lowering encountered an invalid SSA index";
       return AGX_APPLE9_VREG_INVALID;
    }
    if (lower->ssa_to_vreg[key] != AGX_APPLE9_VREG_INVALID)
@@ -997,8 +1026,7 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
       if (apple9_normalize_compare(op, &compare)) {
          uint32_t one = apple9_dag_imm(lower, 1);
          uint32_t zero = apple9_dag_zero(lower);
-         if (one != AGX_APPLE9_VREG_INVALID &&
-             zero != AGX_APPLE9_VREG_INVALID)
+         if (one != AGX_APPLE9_VREG_INVALID && zero != AGX_APPLE9_VREG_INVALID)
             value = apple9_emit_dag_select(lower, scalar, one, zero);
       } else {
          switch (op) {
@@ -1006,10 +1034,10 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          case nir_op_ior:
          case nir_op_ixor: {
             uint32_t sources[2] = {
-               apple9_lower_bool_scalar(
-                  lower, nir_scalar_chase_alu_src(scalar, 0)),
-               apple9_lower_bool_scalar(
-                  lower, nir_scalar_chase_alu_src(scalar, 1)),
+               apple9_lower_bool_scalar(lower,
+                                        nir_scalar_chase_alu_src(scalar, 0)),
+               apple9_lower_bool_scalar(lower,
+                                        nir_scalar_chase_alu_src(scalar, 1)),
             };
             if (sources[0] != AGX_APPLE9_VREG_INVALID &&
                 sources[1] != AGX_APPLE9_VREG_INVALID) {
@@ -1040,8 +1068,7 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                lower, nir_scalar_chase_alu_src(scalar, 2));
             uint32_t zero = apple9_dag_zero(lower);
             value = apple9_emit_dag_select_raw(lower, zero, condition, if_true,
-                                                if_false,
-                                                AGX_APPLE9_SELECT_ULT);
+                                               if_false, AGX_APPLE9_SELECT_ULT);
             break;
          }
          default:
@@ -1051,7 +1078,8 @@ apple9_lower_bool_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
    }
 
    if (value == AGX_APPLE9_VREG_INVALID && lower->reason == NULL)
-      lower->reason = "Apple9 Boolean lowering encountered an unsupported value";
+      lower->reason =
+         "Apple9 Boolean lowering encountered an unsupported value";
    if (value != AGX_APPLE9_VREG_INVALID)
       lower->ssa_to_vreg[key] = value;
    return value;
@@ -1211,7 +1239,9 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             return AGX_APPLE9_VREG_INVALID;
          }
 
-         uint32_t index = apple9_lower_dag_scalar(lower, load->index);
+         uint32_t index = load->index_scale == 0
+                             ? apple9_dag_zero(lower)
+                             : apple9_lower_dag_scalar(lower, load->index);
          if (index == AGX_APPLE9_VREG_INVALID)
             return index;
 
@@ -1243,8 +1273,8 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
             };
             const uint32_t base = agx_apple9_vir_emit_device_load_vector(
                &lower->program,
-               AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + load->argument,
-               index, components, &contract);
+               lower->argument_base + load->argument, index,
+               components, &contract);
             if (base == AGX_APPLE9_VREG_INVALID ||
                 !agx_apple9_vir_set_device_load_contract(
                    &lower->program, base, flags,
@@ -1291,10 +1321,10 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          }
 
          const uint32_t source[] = {index};
-         value = apple9_dag_emit(lower, AGX_APPLE9_VIR_DEVICE_LOAD,
-                                 AGX_APPLE9_ENC_DEVICE_LOAD, source, 1,
-                                 AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE +
-                                    load->argument);
+         value = apple9_dag_emit(
+            lower, AGX_APPLE9_VIR_DEVICE_LOAD, AGX_APPLE9_ENC_DEVICE_LOAD,
+            source, 1,
+            lower->argument_base + load->argument);
          if (value != AGX_APPLE9_VREG_INVALID)
             lower->program.instructions[lower->program.instruction_count - 1]
                .memory_bits = load->bit_size;
@@ -1364,18 +1394,18 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
                 if_false != AGX_APPLE9_VREG_INVALID &&
                 condition != AGX_APPLE9_VREG_INVALID &&
                 zero != AGX_APPLE9_VREG_INVALID)
-               value = apple9_emit_dag_select_raw(
-                  lower, zero, condition, if_true, if_false,
-                  AGX_APPLE9_SELECT_ULT);
+               value =
+                  apple9_emit_dag_select_raw(lower, zero, condition, if_true,
+                                             if_false, AGX_APPLE9_SELECT_ULT);
          } else if (op == nir_op_b2i32) {
             value = apple9_lower_bool_scalar(
                lower, nir_scalar_chase_alu_src(scalar, 0));
          } else if (op == nir_op_frcp) {
             uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
             if (source != AGX_APPLE9_VREG_INVALID)
-               value = apple9_dag_emit(
-                  lower, AGX_APPLE9_VIR_FRCP,
-                  AGX_APPLE9_ENC_FLOAT_RECIPROCAL, &source, 1, 0x03);
+               value = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
+                                       AGX_APPLE9_ENC_FLOAT_RECIPROCAL, &source,
+                                       1, 0x03);
          } else if (op == nir_op_u2f32 || op == nir_op_i2f32 ||
                     op == nir_op_f2i32 || op == nir_op_f2u32) {
             uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
@@ -1517,8 +1547,7 @@ struct apple9_buffer_map {
    unsigned count;
    uint8_t read_mask;
    uint8_t write_mask;
-   struct apple9_buffer_resource
-      resource[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
+   struct apple9_buffer_resource resource[AGX_APPLE9_COMPUTE_MAX_RESOURCES];
 };
 
 static int
@@ -1548,6 +1577,13 @@ apple9_find_buffer_resource(struct apple9_buffer_map *map,
    return NULL;
 }
 
+static bool
+apple9_is_ssbo_atomic(nir_intrinsic_op op)
+{
+   return op == nir_intrinsic_ssbo_atomic ||
+          op == nir_intrinsic_ssbo_atomic_swap;
+}
+
 /* Collect semantic API bindings before selecting a package.  The native
  * launch programs publish a compact pointer table; read/write ownership is
  * host-side scheduling state, not a distinct pointer encoding. */
@@ -1565,10 +1601,12 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
          if (intr->intrinsic != nir_intrinsic_load_ssbo &&
              intr->intrinsic != nir_intrinsic_load_ubo &&
-             intr->intrinsic != nir_intrinsic_store_ssbo)
+             intr->intrinsic != nir_intrinsic_store_ssbo &&
+             !apple9_is_ssbo_atomic(intr->intrinsic))
             continue;
 
          const bool store = intr->intrinsic == nir_intrinsic_store_ssbo;
+         const bool atomic = apple9_is_ssbo_atomic(intr->intrinsic);
          nir_def *binding_def = store ? intr->src[1].ssa : intr->src[0].ssa;
          uint32_t binding;
          if (!apple9_const_u32(nir_get_scalar(binding_def, 0), &binding) ||
@@ -1585,7 +1623,8 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
             apple9_find_buffer_resource(map, kind, binding);
          if (resource == NULL) {
             if (map->count == ARRAY_SIZE(map->resource)) {
-               *reason = "Apple9 compiler supports up to eight buffer resources";
+               *reason =
+                  "Apple9 compiler supports up to eight buffer resources";
                return false;
             }
             resource = &map->resource[map->count++];
@@ -1595,7 +1634,7 @@ apple9_collect_buffer_map(nir_shader *nir, struct apple9_buffer_map *map,
             };
          }
          resource->read |= !store;
-         resource->write |= store;
+         resource->write |= store || atomic;
       }
    }
 
@@ -1630,12 +1669,60 @@ apple9_buffer_argument(const struct apple9_buffer_map *map,
    return UINT_MAX;
 }
 
+static bool
+apple9_atomic_op(nir_atomic_op op, enum agx_apple9_atomic_op *out)
+{
+   switch (op) {
+   case nir_atomic_op_iadd:
+      *out = AGX_APPLE9_ATOMIC_ADD;
+      return true;
+   case nir_atomic_op_isub:
+      *out = AGX_APPLE9_ATOMIC_SUB;
+      return true;
+   case nir_atomic_op_imin:
+      *out = AGX_APPLE9_ATOMIC_SMIN;
+      return true;
+   case nir_atomic_op_umin:
+      *out = AGX_APPLE9_ATOMIC_UMIN;
+      return true;
+   case nir_atomic_op_imax:
+      *out = AGX_APPLE9_ATOMIC_SMAX;
+      return true;
+   case nir_atomic_op_umax:
+      *out = AGX_APPLE9_ATOMIC_UMAX;
+      return true;
+   case nir_atomic_op_iand:
+      *out = AGX_APPLE9_ATOMIC_AND;
+      return true;
+   case nir_atomic_op_ior:
+      *out = AGX_APPLE9_ATOMIC_OR;
+      return true;
+   case nir_atomic_op_ixor:
+      *out = AGX_APPLE9_ATOMIC_XOR;
+      return true;
+   case nir_atomic_op_xchg:
+      *out = AGX_APPLE9_ATOMIC_XCHG;
+      return true;
+   case nir_atomic_op_fadd:
+      *out = AGX_APPLE9_ATOMIC_FADD;
+      return true;
+   case nir_atomic_op_cmpxchg:
+      *out = AGX_APPLE9_ATOMIC_CMPXCHG;
+      return true;
+   default:
+      return false;
+   }
+}
+
 /* Resource count selects package layout, never shader semantics. */
 static bool
 apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                        struct util_dynarray *loads,
-                       struct util_dynarray *stores, const char **reason)
+                       struct util_dynarray *stores,
+                       struct util_dynarray *atomics, const char **reason)
 {
+   bool uses_num_workgroups = false;
+
    if (map->count < 1 || map->count > ARRAY_SIZE(map->resource)) {
       *reason = "Apple9 buffer compiler requires one to eight resources";
       return false;
@@ -1645,41 +1732,38 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
    if (!apple9_validate_cf_list(&impl->body, reason))
       return false;
 
-   bool written_argument[AGX_APPLE9_COMPUTE_MAX_RESOURCES] = {false};
-
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          if (!apple9_instruction_is_in_subset(instr)) {
             *reason = "Apple9 buffer compiler encountered unsupported NIR";
             return false;
          }
-         if (instr->type == nir_instr_type_phi) {
-            nir_cf_node *previous = nir_cf_node_prev(&block->cf_node);
-            if (previous == NULL || previous->type != nir_cf_node_if) {
-               *reason =
-                  "Apple9 phi is not attached to a structured if/else merge";
-               return false;
-            }
-         }
          if (instr->type != nir_instr_type_intrinsic)
             continue;
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         uses_num_workgroups |=
+            intr->intrinsic == nir_intrinsic_load_num_workgroups;
          if (intr->intrinsic != nir_intrinsic_load_ssbo &&
              intr->intrinsic != nir_intrinsic_load_ubo &&
-             intr->intrinsic != nir_intrinsic_store_ssbo)
+             intr->intrinsic != nir_intrinsic_store_ssbo &&
+             !apple9_is_ssbo_atomic(intr->intrinsic))
             continue;
-         if (nir_intrinsic_access(intr) & (ACCESS_COHERENT | ACCESS_VOLATILE)) {
+         const bool atomic = apple9_is_ssbo_atomic(intr->intrinsic);
+         if (!atomic &&
+             (nir_intrinsic_access(intr) & (ACCESS_COHERENT | ACCESS_VOLATILE))) {
             *reason = "Apple9 SSBO compiler rejects volatile access";
             return false;
          }
 
-         const bool load = intr->intrinsic != nir_intrinsic_store_ssbo;
-         nir_def *offset = load ? intr->src[1].ssa : intr->src[2].ssa;
+         const bool load = intr->intrinsic != nir_intrinsic_store_ssbo &&
+                           !atomic;
+         nir_def *offset = load || atomic ? intr->src[1].ssa : intr->src[2].ssa;
          nir_scalar index;
          unsigned index_scale, index_add;
-         const unsigned bit_size =
-            load ? intr->def.bit_size : intr->src[0].ssa->bit_size;
+         const unsigned bit_size = atomic ? intr->def.bit_size
+                                   : load  ? intr->def.bit_size
+                                           : intr->src[0].ssa->bit_size;
          if (!apple9_element_index(offset, &index, &index_scale, &index_add,
                                    bit_size / 8)) {
             *reason =
@@ -1687,14 +1771,50 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
             return false;
          }
 
-         nir_def *binding_def = load ? intr->src[0].ssa : intr->src[1].ssa;
+         nir_def *binding_def = load || atomic ? intr->src[0].ssa
+                                               : intr->src[1].ssa;
          uint32_t binding;
          if (!apple9_const_u32(nir_get_scalar(binding_def, 0), &binding)) {
             *reason = "Apple9 buffer compiler requires constant bindings";
             return false;
          }
 
-         if (load) {
+         if (atomic) {
+            if (bit_size != 32 || intr->def.num_components != 1 ||
+                intr->src[2].ssa->bit_size != 32 ||
+                intr->src[2].ssa->num_components != 1 ||
+                (intr->intrinsic == nir_intrinsic_ssbo_atomic_swap &&
+                 (nir_intrinsic_atomic_op(intr) != nir_atomic_op_cmpxchg ||
+                  intr->src[3].ssa->bit_size != 32 ||
+                  intr->src[3].ssa->num_components != 1))) {
+               *reason = "Apple9 supports scalar 32-bit SSBO atomics";
+               return false;
+            }
+
+            enum agx_apple9_atomic_op op;
+            if (!apple9_atomic_op(nir_intrinsic_atomic_op(intr), &op)) {
+               *reason = "Apple9 encountered an unsupported SSBO atomic operation";
+               return false;
+            }
+
+            unsigned argument = apple9_buffer_argument(
+               map, AGX_APPLE9_COMPUTE_RESOURCE_SSBO, binding);
+            if (argument == UINT_MAX) {
+               *reason = "Apple9 atomic binding is absent from its resource map";
+               return false;
+            }
+
+            struct apple9_buffer_atomic entry = {
+               .intr = intr,
+               .block = block,
+               .index = index,
+               .argument = argument,
+               .index_scale = index_scale,
+               .index_add = index_add,
+               .op = op,
+            };
+            util_dynarray_append(atomics, entry);
+         } else if (load) {
             if (intr->def.num_components == 0 || intr->def.num_components > 4 ||
                 (intr->def.bit_size != 8 && intr->def.bit_size != 16 &&
                  intr->def.bit_size != 32) ||
@@ -1710,11 +1830,6 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
             unsigned argument = apple9_buffer_argument(map, kind, binding);
             if (argument == UINT_MAX) {
                *reason = "Apple9 input binding is absent from its resource map";
-               return false;
-            }
-            if (written_argument[argument]) {
-               *reason =
-                  "Apple9 buffer compiler cannot yet preserve a load after an aliased store";
                return false;
             }
             const nir_component_mask_t read_mask =
@@ -1779,13 +1894,23 @@ apple9_find_buffer_dag(nir_shader *nir, const struct apple9_buffer_map *map,
                .lowered_index = AGX_APPLE9_VREG_INVALID,
             };
             util_dynarray_append(stores, store);
-            written_argument[argument] = true;
          }
       }
    }
 
-   if (stores->size == 0) {
-      *reason = "Apple9 requires at least one output store";
+   if (stores->size == 0 && atomics->size == 0) {
+      *reason = "Apple9 requires at least one SSBO side effect";
+      return false;
+   }
+
+   /* The own-source atomic package publishes its eight caller resources at
+    * q0..q7 and has no hidden direct/indirect geometry tuple. The normal
+    * superset carrier publishes that tuple at q0..q2. Until those two launch
+    * contracts are unified, silently lowering load_num_workgroups would read
+    * the first caller SSBO address as dispatch metadata. */
+   if (atomics->size != 0 && uses_num_workgroups) {
+      *reason =
+         "Apple9 atomic package does not publish the num-workgroups metadata";
       return false;
    }
 
@@ -2013,7 +2138,9 @@ apple9_lower_buffer_store_operands(struct apple9_dag_lower *lower,
          return false;
    }
 
-   uint32_t index = apple9_lower_dag_scalar(lower, store->index);
+   uint32_t index = store->index_scale == 0
+                       ? apple9_dag_zero(lower)
+                       : apple9_lower_dag_scalar(lower, store->index);
    if (index == AGX_APPLE9_VREG_INVALID)
       return false;
 
@@ -2024,8 +2151,7 @@ apple9_lower_buffer_store_operands(struct apple9_dag_lower *lower,
       uint32_t scale = apple9_dag_imm(lower, store->index_scale);
       uint32_t zero = apple9_dag_zero(lower);
       uint32_t sources[3] = {index, scale, zero};
-      if (scale == AGX_APPLE9_VREG_INVALID ||
-          zero == AGX_APPLE9_VREG_INVALID)
+      if (scale == AGX_APPLE9_VREG_INVALID || zero == AGX_APPLE9_VREG_INVALID)
          return false;
       index = apple9_dag_emit(lower, AGX_APPLE9_VIR_IMAD,
                               AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
@@ -2055,8 +2181,137 @@ apple9_emit_buffer_store(struct apple9_dag_lower *lower,
 
    return agx_apple9_vir_emit_device_store(
       &lower->program,
-      AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE + store->argument,
+      lower->argument_base + store->argument,
       store->lowered_index, store->output, store->components, store->bit_size);
+}
+
+static const struct agx_apple9_vir_instr *
+apple9_dag_value_producer(const struct apple9_dag_lower *lower,
+                          uint32_t value);
+
+static bool
+apple9_atomic_can_consume_pending_data(
+   const struct apple9_dag_lower *lower,
+   const struct apple9_buffer_atomic *atomic, nir_scalar scalar,
+   uint32_t value, bool discard)
+{
+   /* EXP-M4-51 proves the scalar, returning form for every input/result slot
+    * pair. Keep compare-exchange's two-value tuple and discarded results on
+    * the conservative materialized path until those complete shapes receive
+    * equivalent coverage. */
+   if (discard || atomic->op == AGX_APPLE9_ATOMIC_CMPXCHG || scalar.comp != 0 ||
+       scalar.def != atomic->intr->src[2].ssa ||
+       !list_is_singular(&scalar.def->uses))
+      return false;
+
+   nir_src *only_use =
+      list_first_entry(&scalar.def->uses, nir_src, use_link);
+   if (nir_src_is_if(only_use) ||
+       nir_src_use_instr(only_use) != &atomic->intr->instr)
+      return false;
+
+   const struct agx_apple9_vir_instr *producer =
+      apple9_dag_value_producer(lower, value);
+   return producer != NULL && producer->op == AGX_APPLE9_VIR_DEVICE_LOAD &&
+          producer->dest_components == 1;
+}
+
+static bool
+apple9_emit_buffer_atomic(struct apple9_dag_lower *lower,
+                          const struct apple9_buffer_atomic *atomic)
+{
+   uint32_t index = atomic->index_scale == 0
+                       ? apple9_dag_zero(lower)
+                       : apple9_lower_dag_scalar(lower, atomic->index);
+   if (index == AGX_APPLE9_VREG_INVALID)
+      return false;
+
+   if (atomic->index_scale > 1) {
+      uint32_t scale = apple9_dag_imm(lower, atomic->index_scale);
+      uint32_t zero = apple9_dag_zero(lower);
+      uint32_t sources[3] = {index, scale, zero};
+      if (scale == AGX_APPLE9_VREG_INVALID || zero == AGX_APPLE9_VREG_INVALID)
+         return false;
+      index = apple9_dag_emit(lower, AGX_APPLE9_VIR_IMAD,
+                              AGX_APPLE9_ENC_INT_MAD_EXTENDED, sources,
+                              ARRAY_SIZE(sources), 0);
+   }
+   if (atomic->index_add != 0 && index != AGX_APPLE9_VREG_INVALID) {
+      uint32_t add = apple9_dag_imm(lower, atomic->index_add);
+      uint32_t sources[2] = {index, add};
+      index = add == AGX_APPLE9_VREG_INVALID
+                 ? AGX_APPLE9_VREG_INVALID
+                 : apple9_dag_emit(lower, AGX_APPLE9_VIR_IADD,
+                                   AGX_APPLE9_ENC_INT_ADD_EXTENDED, sources,
+                                   ARRAY_SIZE(sources), 0);
+   }
+   if (index == AGX_APPLE9_VREG_INVALID)
+      return false;
+
+   /* The index is destructive and pending-index consumption is not yet
+    * characterized. Always give it an ordinary private copy. */
+   index = apple9_dag_general_copy(lower, index);
+   if (index == AGX_APPLE9_VREG_INVALID)
+      return false;
+
+   const bool discard = nir_def_components_read(&atomic->intr->def) == 0;
+   uint32_t data[2];
+   unsigned data_components = 1;
+   if (atomic->op == AGX_APPLE9_ATOMIC_CMPXCHG) {
+      /* Native tuple order is desired, compare. NIR spells the sources as
+       * compare, desired. */
+      data[0] = apple9_lower_dag_scalar(
+         lower, apple9_chase_trivial(nir_get_scalar(atomic->intr->src[3].ssa,
+                                                     0)));
+      data[1] = apple9_lower_dag_scalar(
+         lower, apple9_chase_trivial(nir_get_scalar(atomic->intr->src[2].ssa,
+                                                     0)));
+      data_components = 2;
+      for (unsigned c = 0; c < data_components; ++c) {
+         data[c] = apple9_dag_general_copy(lower, data[c]);
+         if (data[c] == AGX_APPLE9_VREG_INVALID)
+            return false;
+      }
+   } else {
+      nir_scalar scalar = apple9_chase_trivial(
+         nir_get_scalar(atomic->intr->src[2].ssa, 0));
+      data[0] = apple9_lower_dag_scalar(lower, scalar);
+      if (data[0] == AGX_APPLE9_VREG_INVALID)
+         return false;
+
+      /* A final-use scalar load can feed the proven atomic data role
+       * directly. The scoreboard pass connects the producer slot to the
+       * atomic dependency mask. Every other value gets a private copy because
+       * the atomic consumes/destructively releases its data register. */
+      if (!apple9_atomic_can_consume_pending_data(lower, atomic, scalar,
+                                                  data[0], discard)) {
+         data[0] = apple9_dag_general_copy(lower, data[0]);
+         if (data[0] == AGX_APPLE9_VREG_INVALID)
+            return false;
+      }
+   }
+
+   uint32_t result = AGX_APPLE9_VREG_INVALID;
+   if (!agx_apple9_vir_emit_device_atomic(
+          &lower->program, lower->argument_base + atomic->argument, index,
+          data, data_components, atomic->op, discard, &result)) {
+      lower->reason = "could not emit an Apple9 VIR device atomic";
+      return false;
+   }
+
+   if (!discard) {
+      const unsigned key = atomic->intr->def.index * 4;
+      if (key >= lower->ssa_map_count) {
+         lower->reason = "Apple9 atomic has an invalid SSA index";
+         return false;
+      }
+      /* Preserve the pending value until its real first consumer. Scoreboard
+       * allocation selects a free slot and the ordinary register allocator
+       * selects the result-publication landing GPR. */
+      lower->ssa_to_vreg[key] = result;
+   }
+
+   return true;
 }
 
 static bool
@@ -2064,6 +2319,16 @@ apple9_block_has_store(struct util_dynarray *stores, nir_block *block)
 {
    util_dynarray_foreach(stores, struct apple9_buffer_store, store) {
       if (store->block == block)
+         return true;
+   }
+   return false;
+}
+
+static bool
+apple9_block_has_atomic(const struct apple9_dag_lower *lower, nir_block *block)
+{
+   for (unsigned i = 0; i < lower->atomic_count; ++i) {
+      if (lower->atomics[i].block == block)
          return true;
    }
    return false;
@@ -2103,6 +2368,7 @@ apple9_cf_list_has_effects(const struct apple9_dag_lower *lower,
          nir_block *block = nir_cf_node_as_block(node);
          if (apple9_block_has_load(lower, block) ||
              apple9_block_has_store(stores, block) ||
+             apple9_block_has_atomic(lower, block) ||
              apple9_block_has_phi(block) || apple9_block_has_jump(block))
             return true;
       } else if (node->type == nir_cf_node_if) {
@@ -2145,8 +2411,52 @@ apple9_load_instruction_count_in_block(const struct apple9_dag_lower *lower,
  * was published for only the other lane population. This correctness-first
  * slice copies every entry or arm-local load to a durable ordinary GPR while
  * the load's own region is still active. */
+static const struct agx_apple9_vir_instr *
+apple9_dag_value_producer(const struct apple9_dag_lower *lower, uint32_t value)
+{
+   const struct agx_apple9_vir_instr *producer = NULL;
+
+   for (unsigned p = 0; p < lower->program.instruction_count; ++p) {
+      const struct agx_apple9_vir_instr *candidate =
+         &lower->program.instructions[p];
+      const unsigned components = candidate->dest_components
+                                     ? candidate->dest_components
+                                     : 1;
+      if (value >= candidate->dest && value - candidate->dest < components)
+         producer = candidate;
+   }
+
+   return producer;
+}
+
 static bool
-apple9_materialize_loads_in_block(struct apple9_dag_lower *lower,
+apple9_materialize_atomic_result(struct apple9_dag_lower *lower,
+                                 const struct apple9_buffer_atomic *atomic)
+{
+   const unsigned key = atomic->intr->def.index * 4;
+   if (key >= lower->ssa_map_count) {
+      lower->reason = "Apple9 atomic has an invalid SSA index";
+      return false;
+   }
+
+   const uint32_t value = lower->ssa_to_vreg[key];
+   if (value == AGX_APPLE9_VREG_INVALID)
+      return true;
+
+   const struct agx_apple9_vir_instr *producer =
+      apple9_dag_value_producer(lower, value);
+   if (producer == NULL || producer->op != AGX_APPLE9_VIR_DEVICE_ATOMIC)
+      return true;
+
+   uint32_t durable = apple9_dag_general_copy(lower, value);
+   if (durable == AGX_APPLE9_VREG_INVALID)
+      return false;
+   lower->ssa_to_vreg[key] = durable;
+   return true;
+}
+
+static bool
+apple9_materialize_async_in_block(struct apple9_dag_lower *lower,
                                   nir_block *block)
 {
    for (unsigned i = 0; i < lower->load_count; ++i) {
@@ -2168,6 +2478,13 @@ apple9_materialize_loads_in_block(struct apple9_dag_lower *lower,
       lower->ssa_to_vreg[key] = durable;
    }
 
+   for (unsigned i = 0; i < lower->atomic_count; ++i) {
+      const struct apple9_buffer_atomic *atomic = &lower->atomics[i];
+      if (atomic->block == block &&
+          !apple9_materialize_atomic_result(lower, atomic))
+         return false;
+   }
+
    return true;
 }
 
@@ -2177,6 +2494,16 @@ apple9_find_store(struct util_dynarray *stores, nir_intrinsic_instr *intr)
    util_dynarray_foreach(stores, struct apple9_buffer_store, store) {
       if (store->intr == intr)
          return store;
+   }
+   return NULL;
+}
+
+static struct apple9_buffer_atomic *
+apple9_find_atomic(struct apple9_dag_lower *lower, nir_intrinsic_instr *intr)
+{
+   for (unsigned i = 0; i < lower->atomic_count; ++i) {
+      if (lower->atomics[i].intr == intr)
+         return &lower->atomics[i];
    }
    return NULL;
 }
@@ -2264,7 +2591,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
       }
 
       if (instr->type == nir_instr_type_jump) {
-         if (!apple9_materialize_loads_in_block(lower, block) ||
+         if (!apple9_materialize_async_in_block(lower, block) ||
              !apple9_emit_jump(lower, block, nir_instr_as_jump(instr)))
             return false;
          loads_materialized = true;
@@ -2280,6 +2607,16 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
                 !apple9_emit_buffer_store(lower, store)) {
                if (lower->reason == NULL)
                   lower->reason = "could not emit an Apple9 VIR device store";
+               return false;
+            }
+            continue;
+         }
+         if (apple9_is_ssbo_atomic(intr->intrinsic)) {
+            struct apple9_buffer_atomic *atomic =
+               apple9_find_atomic(lower, intr);
+            if (atomic == NULL || !apple9_emit_buffer_atomic(lower, atomic)) {
+               if (lower->reason == NULL)
+                  lower->reason = "could not emit an Apple9 device atomic";
                return false;
             }
             continue;
@@ -2310,7 +2647,7 @@ apple9_emit_block(struct apple9_dag_lower *lower, struct util_dynarray *stores,
     * region. Keep the correctness-first invariant that none crosses a NIR
     * block boundary in a structured program. */
    if (lower->structured_cf && !loads_materialized &&
-       !apple9_materialize_loads_in_block(lower, block))
+       !apple9_materialize_async_in_block(lower, block))
       return false;
 
    lower->active_load_block = NULL;
@@ -2932,14 +3269,17 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
 {
    struct util_dynarray loads = UTIL_DYNARRAY_INIT;
    struct util_dynarray stores = UTIL_DYNARRAY_INIT;
+   struct util_dynarray atomics = UTIL_DYNARRAY_INIT;
    struct apple9_buffer_map resource_map = {0};
 
    if (!apple9_collect_buffer_map(nir, &resource_map, reason))
       return false;
 
-   if (!apple9_find_buffer_dag(nir, &resource_map, &loads, &stores, reason)) {
+   if (!apple9_find_buffer_dag(nir, &resource_map, &loads, &stores, &atomics,
+                               reason)) {
       util_dynarray_fini(&loads);
       util_dynarray_fini(&stores);
+      util_dynarray_fini(&atomics);
       return false;
    }
 
@@ -2951,6 +3291,12 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
       .loads = loads.data,
       .load_count =
          util_dynarray_num_elements(&loads, struct apple9_scalar_load),
+      .atomics = atomics.data,
+      .atomic_count =
+         util_dynarray_num_elements(&atomics, struct apple9_buffer_atomic),
+      .argument_base = atomics.size == 0
+                          ? AGX_APPLE9_COMPUTE_VISIBLE_ARGUMENT_BASE
+                          : 0,
       .structured_cf = apple9_cf_list_has_control_flow(&impl->body),
    };
    for (unsigned i = 0; i < ARRAY_SIZE(lower.system_vreg); ++i)
@@ -3023,8 +3369,10 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          for (unsigned s = 0; s < instruction->nr_srcs; ++s)
             fprintf(stderr, "%sr%u", s ? "," : "",
                     lower.program.phys[instruction->src[s]]);
-         fprintf(stderr, " imm=%#x live=%#x slot=%u\n", instruction->immediate,
-                 instruction->live_after_mask, instruction->scoreboard_slot);
+         fprintf(stderr, " imm=%#x live=%#x slot=%u producer_slot=%u\n",
+                 instruction->immediate, instruction->live_after_mask,
+                 instruction->scoreboard_slot,
+                 instruction->producer_scoreboard_slot);
       }
    }
 
@@ -3105,8 +3453,9 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
          for (unsigned s = 0; s < instruction->nr_srcs; ++s)
             fprintf(stderr, "%sr%u", s ? "," : "",
                     lower.program.phys[instruction->src[s]]);
-         fprintf(stderr, " live=%#x slot=%u\n", instruction->live_after_mask,
-                 instruction->scoreboard_slot);
+         fprintf(stderr, " live=%#x slot=%u producer_slot=%u\n",
+                 instruction->live_after_mask, instruction->scoreboard_slot,
+                 instruction->producer_scoreboard_slot);
       }
    }
    vir_offsets[lower.program.instruction_count] = emitter.bytes.size;
@@ -3176,6 +3525,8 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    if (profile != NULL) {
       const unsigned resource_count = resource_map.count;
       *profile = AGX_APPLE9_SSBO8_SUPERSET_COMPUTE_PROFILE;
+      if (lower.atomic_count != 0)
+         profile->abi = AGX_APPLE9_COMPUTE_ABI_SSBO8_ATOMIC;
       profile->resource_binding_count = resource_count;
       profile->resource_read_mask = resource_map.read_mask;
       profile->resource_write_mask = resource_map.write_mask;
@@ -3192,6 +3543,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    agx_apple9_vir_finish(&lower.program);
    util_dynarray_fini(&loads);
    util_dynarray_fini(&stores);
+   util_dynarray_fini(&atomics);
    return true;
 
 fail:
@@ -3199,6 +3551,7 @@ fail:
    agx_apple9_vir_finish(&lower.program);
    util_dynarray_fini(&loads);
    util_dynarray_fini(&stores);
+   util_dynarray_fini(&atomics);
    return false;
 }
 
