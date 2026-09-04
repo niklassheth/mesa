@@ -44,10 +44,29 @@ fails during compilation and the triangle is not a regression gate.
 The supported NIR surface is intentionally limited. It includes arbitrary
 u32 constants; integer add/subtract, negate, multiply, AND/OR/XOR/NOT, shifts,
 signed and unsigned min/max; core float arithmetic, accurate FP32 reciprocal,
-and FMA; comparisons and
-straight-line select; scalar/vector device loads and stores; general constant,
-affine, and runtime buffer indexing; 8/16/32-bit memory formats; and the
-measured system values and dense dispatch geometries used by the fixtures.
+and FMA; comparisons, straight-line select, and recursively nested structured
+if/else with multiple blocks and sibling regions; scalar/vector device loads
+and stores; general constant, affine, and runtime buffer indexing; 8/16/32-bit
+memory formats; and the measured system values and dense dispatch geometries
+used by the fixtures.
+
+The control-flow emitter recursively walks structured NIR and serializes its
+implicit execution-mask stack. Every pending asynchronous result is copied to
+a durable GPR before its NIR block ends, so no pending result crosses a nested
+push, else transition, or reconvergence pop. The load sequence's native
+`HAS_NEXT` bit still follows linear issue order across those transitions, while
+the formerly named `FIRST` bit is now modeled correctly as the raw `get_sr`
+index address form. Arm-local stores use the native compare, execution-mask
+push, else-transition, and pop sequence. Scalar and 1--4 component Boolean or
+8/16/32-bit phis use the same compiler architecture as Apple8: register
+allocation assigns one merge destination per component, and each predecessor
+performs an ordinary bit-copy into that destination while its lane mask is
+active. Merge destinations remain disjoint from every edge source, making each
+edge's copy set parallel-copy safe without post-allocation scratch registers.
+The merge pseudo itself emits no hardware instruction.
+Native select formation remains a future optimization; keeping it disabled for
+CFG phis makes this correctness-first slice exercise masked arm computation and
+reconvergence directly.
 
 This early bring-up path deliberately does not implement robust buffer access.
 The compiler does not infer resource access bounds, and dispatch does not
@@ -55,9 +74,9 @@ preflight a shader-derived byte span. Buffer indices are passed through to the
 generated address calculation; callers are responsible for binding enough
 storage for every access the shader can make.
 
-Structured conditional side effects, phis, loops, `break`, `continue`,
-division/modulo, spilling, and unmeasured package/resource forms reject rather
-than falling back to capture-assigned registers or opaque native mains.
+Loops, `break`, `continue`, early return, division/modulo, spilling, and
+unmeasured package/resource forms reject rather than falling back to
+capture-assigned registers or opaque native mains.
 
 ## External development inputs
 
@@ -156,11 +175,21 @@ at its proxy prompt with a cold GPU ASC. The native compute tests enter through
 ordinary GLES 3.1, the normal Mesa driver, and the DRM UAPI; they do not
 construct NIR or m1n1 work records directly.
 
-Run all supported compute cases directly in one process and EGL context:
+Run the default supported compute regression set directly in one process and
+EGL context:
 
 ```sh
 src/asahi/drm-shim/piglit/run.sh direct
 ```
+
+The default one-boot sequence omits `archive-cross-program-sequence`,
+`program-lifecycle-stress`, and the 24-program `two-source-comparisons` matrix
+to reduce pressure on the temporary append-only 64 KiB shader archive. As the
+ordinary compiler corpus grows, a complete default run can still reach that
+temporary limit; run the named control-flow and lifecycle batches separately
+after fresh chainloads when it does. Archive exhaustion is a packaging-harness
+limit, not a shader result. The two lifecycle cases test program-publication
+lifetime; the comparison matrix is the exhaustive predicate correctness gate.
 
 Or record each named case as a Piglit subtest while retaining the same
 single-process execution model:
@@ -174,6 +203,39 @@ The native cases also verify immutable inputs, poison-filled gaps, leading and
 trailing guards, multiple bindings and dependent addresses. Dedicated cases
 exercise repeated range dispatch, program publication/retirement pressure, and
 ordered reuse of independently compiled programs.
+`simple-divergent-if-else` checks unsigned, signed, and floating-point `<`,
+`>=`, equality, inequality, and composed Boolean forms with mixed, all-true,
+and all-false lane populations. Its floating-point inputs include NaNs and both
+signed zeros, so `>=` is validated as an IEEE ordered comparison rather than a
+naive inversion of `<`. Each of its 36 submissions verifies both predicated arm
+stores and a post-reconvergence value merge across complete 16,384-word outputs,
+while inactive outputs retain poison and surrounding guards remain unchanged.
+`two-source-comparisons` independently computes both operands and covers every
+canonical signed, unsigned, and floating-point equality/order relation,
+including relations normalized by reversing operands. It runs mixed, all-true,
+and all-false populations; the mixed floating-point population includes NaNs,
+infinities, adjacent finite values, and both signed zeros. Additional short and
+extended predicates keep neither, either, or both sources live after the
+comparison. `compare-register-pressure` repeats a retained-source comparison
+with 16 independently loaded values live across the region.
+`single-region-shapes` covers empty, then-only, else-only, and two-sided arms,
+with exact stores before, inside, and after the region. `multiple-phi-vectors`
+checks a scalar phi and a four-component phi from ordinary GLSL through exact
+scalar and vector-buffer outputs.
+`branch-local-device-loads` uses seven SSBOs and three executions to cover
+mixed, all-true, and all-false lane populations. It performs distinct affine
+loads in both arms, fans each loaded value into an arm-local side effect and a
+32-bit phi, then combines the merged value with a post-reconvergence load. All
+three complete 16,384-word output buffers, inactive poison values, and guard
+regions are checked exactly.
+`nested-short-circuit-if-else` covers nested conditionals in both outer arms,
+multi-level value reconvergence, sibling and asymmetric regions, and observable
+right-hand-side stores for short-circuit AND and OR. Seven complete 16,384-word
+outputs verify both final values and that skipped right-hand sides leave poison
+unchanged. `nested-branch-local-loads` issues two distinct pending loads in
+each of four nested leaf regions, resolves their values through both inner and
+outer phis, and checks two complete guarded outputs. The two tests also pass
+back-to-back in one process and persistent VM.
 `reciprocal-direct`, `reciprocal-retain`, and `reciprocal-materialized` cover
 pending-load handoff, source lifetime, and ordinary-GPR input paths with exact
 FP32 output oracles. `reciprocal-denominators-1-1024` converts every integer

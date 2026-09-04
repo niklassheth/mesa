@@ -439,29 +439,8 @@ open_asahi_display(void)
 }
 
 static GLuint
-build_program(enum workload workload)
+build_compute_source(const char *source)
 {
-   const char *expression = workload_expressions[workload];
-   const char *body = workload_bodies[workload];
-   char statement[3072];
-   if (body) {
-      snprintf(statement, sizeof(statement), "%s", body);
-   } else {
-      snprintf(statement, sizeof(statement), "output0.v[gid]=%s;", expression);
-   }
-
-   unsigned glsl_version = (workload == WORKLOAD_FMA_ALL_LIVE_DAG ||
-                            workload == WORKLOAD_FLOAT_CACHE_RING_DAG)
-                              ? 320
-                              : 310;
-   char source[4096];
-   snprintf(source, sizeof(source),
-            "#version %u es\n"
-            "layout(local_size_x=256) in;\n"
-            "layout(std430, binding=0) buffer Output { uint v[]; } output0;\n"
-            "void main() { uint gid=gl_GlobalInvocationID.x; %s }\n",
-            glsl_version, statement);
-
    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
    const char *sources[] = {source};
    glShaderSource(shader, 1, sources, NULL);
@@ -489,6 +468,33 @@ build_program(enum workload workload)
       fail("compute program link");
    }
    return program;
+}
+
+static GLuint
+build_program(enum workload workload)
+{
+   const char *expression = workload_expressions[workload];
+   const char *body = workload_bodies[workload];
+   char statement[3072];
+   if (body) {
+      snprintf(statement, sizeof(statement), "%s", body);
+   } else {
+      snprintf(statement, sizeof(statement), "output0.v[gid]=%s;", expression);
+   }
+
+   unsigned glsl_version = (workload == WORKLOAD_FMA_ALL_LIVE_DAG ||
+                            workload == WORKLOAD_FLOAT_CACHE_RING_DAG)
+                              ? 320
+                              : 310;
+   char source[4096];
+   snprintf(source, sizeof(source),
+            "#version %u es\n"
+            "layout(local_size_x=256) in;\n"
+            "layout(std430, binding=0) buffer Output { uint v[]; } output0;\n"
+            "void main() { uint gid=gl_GlobalInvocationID.x; %s }\n",
+            glsl_version, statement);
+
+   return build_compute_source(source);
 }
 
 static uint32_t
@@ -1202,10 +1208,1465 @@ run_program_lifecycle_stress(void)
    free(expected);
 }
 
+static void
+fill_divergent_input(unsigned variant, unsigned pattern, uint32_t *input)
+{
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+      if (variant < 2 || (variant >= 10 && variant < 12)) {
+         if (pattern == 0) {
+            static const uint32_t mixed[] = {
+               0x7fffffffu, 0x80000000u, 0x80000001u, 0x00004567u,
+            };
+            input[i] = mixed[i & 3] ^ ((i >> 2) & 0x3ffu);
+         } else if (pattern == 1) {
+            input[i] = 0x7fff0000u | (i & 0xffffu);
+         } else {
+            input[i] = 0x80000000u | i;
+         }
+      } else if (variant < 4) {
+         if (pattern == 0) {
+            static const int32_t mixed[] = {-6, -5, -4, INT32_MIN, INT32_MAX};
+            input[i] = (uint32_t)mixed[i % 5];
+         } else if (pattern == 1) {
+            input[i] = (uint32_t)(-100000 - (int32_t)i);
+         } else {
+            input[i] = (uint32_t)(-5 + (int32_t)i);
+         }
+      } else if (variant < 6 || (variant >= 8 && variant < 10)) {
+         if (pattern == 0) {
+            static const uint32_t mixed[] = {
+               0xc0000000u, /* -2.0 */
+               0x3fa00000u, /*  1.25 */
+               0x40200000u, /*  2.5 */
+               0x7fc00000u, /* quiet NaN */
+               0x00000000u, /* +0.0 */
+               0x80000000u, /* -0.0 */
+            };
+            input[i] = mixed[i % 6];
+         } else {
+            const bool equality = variant >= 8;
+            input[i] = float_bits(pattern == 1 && equality ? 1.25f
+                                    : pattern == 1          ? 0.5f
+                                                            : 2.0f);
+         }
+      } else {
+         if (pattern == 0) {
+            static const uint32_t mixed[] = {
+               0x7fffffffu, 0x80000000u, 0x80000001u, 0x00004567u,
+            };
+            input[i] = mixed[i & 3];
+         } else {
+            input[i] = pattern == 1 ? 0x80000000u : 0x80010000u | i;
+         }
+      }
+   }
+}
+
+static bool
+divergent_condition(unsigned variant, uint32_t value)
+{
+   switch (variant) {
+   case 0:
+      return value < UINT32_C(0x80000000);
+   case 1:
+      return value >= UINT32_C(0x80000000);
+   case 2:
+      return (int32_t)value < -5;
+   case 3:
+      return (int32_t)value >= -5;
+   case 4:
+      return bits_float(value) < 1.25f;
+   case 5:
+      return bits_float(value) >= 1.25f;
+   case 6:
+      return value == UINT32_C(0x80000000);
+   case 7:
+      return value != UINT32_C(0x80000000);
+   case 8:
+      return bits_float(value) == 1.25f;
+   case 9:
+      return bits_float(value) != 1.25f;
+   case 10:
+      return (value < UINT32_C(0x80000000)) != ((value & 1u) != 0);
+   case 11:
+      return (value & 2u) != 0 ? value < UINT32_C(0x80000000)
+                               : value >= UINT32_C(0x80000000);
+   default:
+      fail("invalid divergent condition variant");
+      return false;
+   }
+}
+
+static void
+run_simple_divergent_if_else(void)
+{
+   static const struct {
+      const char *name;
+      const char *expression;
+   } variants[] = {
+      {"ult", "raw < 0x80000000u"},
+      {"uge", "raw >= 0x80000000u"},
+      {"ilt", "int(raw) < -5"},
+      {"ige", "int(raw) >= -5"},
+      {"flt", "uintBitsToFloat(raw) < 1.25"},
+      {"fge", "uintBitsToFloat(raw) >= 1.25"},
+      {"ieq", "raw == 0x80000000u"},
+      {"ine", "raw != 0x80000000u"},
+      {"feq", "uintBitsToFloat(raw) == 1.25"},
+      {"fne", "uintBitsToFloat(raw) != 1.25"},
+      {"bool-xor",
+       "(raw < 0x80000000u) ^^ ((raw & 1u) != 0u)"},
+      {"bool-select",
+       "((raw & 2u) != 0u) ? (raw < 0x80000000u) : "
+       "(raw >= 0x80000000u)"},
+   };
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(3, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   uint32_t *input = malloc(segment_bytes);
+   if (!seed || !input)
+      fail("allocate divergent-if buffers");
+
+   GLuint output_buffer = 0, input_buffer = 0;
+   glGenBuffers(1, &output_buffer);
+   glGenBuffers(1, &input_buffer);
+
+   for (unsigned variant = 0;
+        variant < sizeof(variants) / sizeof(variants[0]); ++variant) {
+      char source[2048];
+      int length = snprintf(
+         source, sizeof(source),
+         "#version 310 es\n"
+         "layout(local_size_x=256) in;\n"
+         "layout(std430,binding=0) buffer OutA { uint v[]; } out_a;\n"
+         "layout(std430,binding=1) buffer OutB { uint v[]; } out_b;\n"
+         "layout(std430,binding=2) readonly buffer Input { uint v[]; } input2;\n"
+         "layout(std430,binding=3) buffer Merge { uint v[]; } merge;\n"
+         "void main(){\n"
+         " uint gid=gl_GlobalInvocationID.x; uint raw=input2.v[gid];\n"
+         " uint merged;\n"
+         " if(%s) {\n"
+         "  out_a.v[gid]=(raw^0x13579bdfu)+gid*3u;\n"
+         "  merged=(raw*9u)+(gid^0x10203u);\n"
+         " } else {\n"
+         "  out_b.v[gid]=(raw+0x2468ace0u)^(gid*5u);\n"
+         "  merged=(raw^0xa5a55a5au)-(gid*7u);\n"
+         " }\n"
+         " merge.v[gid]=merged^0x31415926u;\n"
+         "}\n",
+         variants[variant].expression);
+      if (length < 0 || (size_t)length >= sizeof(source))
+         fail("divergent-if shader source overflow");
+      GLuint program = build_compute_source(source);
+      glUseProgram(program);
+
+      for (unsigned pattern = 0; pattern < 3; ++pattern) {
+         const unsigned seed_id = variant * 3 + pattern;
+         for (unsigned slot = 0; slot < 3; ++slot)
+            seed_output_slot(seed, &layout, slot, WORKLOAD_GID, seed_id);
+         fill_divergent_input(variant, pattern, input);
+
+         glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+         glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                      GL_DYNAMIC_COPY);
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, output_buffer,
+                           slot_output_offset(&layout, 0), segment_bytes);
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 1, output_buffer,
+                           slot_output_offset(&layout, 1), segment_bytes);
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 3, output_buffer,
+                           slot_output_offset(&layout, 2), segment_bytes);
+         glBindBuffer(GL_SHADER_STORAGE_BUFFER, input_buffer);
+         glBufferData(GL_SHADER_STORAGE_BUFFER, segment_bytes, input,
+                      GL_DYNAMIC_COPY);
+         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, input_buffer);
+
+         glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                         GL_SHADER_STORAGE_BARRIER_BIT);
+         glFinish();
+
+         glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+         const uint8_t *mapped = glMapBufferRange(
+            GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+         if (!mapped)
+            fail("map divergent-if result");
+
+         unsigned mismatches[3] = {0};
+         unsigned changed[3] = {0};
+         for (unsigned slot = 0; slot < 3; ++slot) {
+            const size_t offset = slot_output_offset(&layout, slot);
+            const uint32_t *before =
+               (const uint32_t *)(mapped + offset - layout.guard_bytes);
+            const uint32_t *output = (const uint32_t *)(mapped + offset);
+            const uint32_t *after =
+               (const uint32_t *)(mapped + offset + segment_bytes);
+            for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+               if (before[i] != guard_word(slot, 0, i, seed_id) ||
+                   after[i] != guard_word(slot, 1, i, seed_id))
+                  fail("divergent-if guard changed");
+            }
+
+            for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+               changed[slot] +=
+                  output[i] != poison_word(WORKLOAD_GID, i, slot, seed_id);
+               const bool true_arm = divergent_condition(variant, input[i]);
+               const bool selected =
+                  slot == 2 || slot == (true_arm ? 0u : 1u);
+               const uint32_t want =
+                  selected
+                     ? (slot == 0
+                           ? (input[i] ^ UINT32_C(0x13579bdf)) + i * 3u
+                           : slot == 1
+                                ? (input[i] + UINT32_C(0x2468ace0)) ^ (i * 5u)
+                                : ((true_arm
+                                       ? input[i] * 9u +
+                                            (i ^ UINT32_C(0x10203))
+                                       : (input[i] ^ UINT32_C(0xa5a55a5a)) -
+                                            i * 7u) ^
+                                   UINT32_C(0x31415926)))
+                     : poison_word(WORKLOAD_GID, i, slot, seed_id);
+               if (output[i] != want) {
+                  if (mismatches[slot] < 4)
+                     fprintf(stderr,
+                             "divergent-if %s pattern %u slot %u word %u=%#x "
+                             "expected=%#x input=%#x\n",
+                             variants[variant].name, pattern, slot, i,
+                             output[i], want, input[i]);
+                  ++mismatches[slot];
+               }
+            }
+         }
+         if (mismatches[0] || mismatches[1] || mismatches[2]) {
+            fprintf(stderr,
+                    "divergent-if %s pattern %u summary: slot0 changed=%u "
+                    "mismatches=%u, slot1 changed=%u mismatches=%u, "
+                    "slot2 changed=%u mismatches=%u\n",
+                    variants[variant].name, pattern, changed[0], mismatches[0],
+                    changed[1], mismatches[1], changed[2], mismatches[2]);
+            fail("divergent-if output mismatch");
+         }
+         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+      }
+      glDeleteProgram(program);
+   }
+
+   glDeleteBuffers(1, &input_buffer);
+   glDeleteBuffers(1, &output_buffer);
+   free(input);
+   free(seed);
+}
+
+enum two_source_compare_kind {
+   TWO_SOURCE_ULT,
+   TWO_SOURCE_UGE,
+   TWO_SOURCE_ILT,
+   TWO_SOURCE_IGE,
+   TWO_SOURCE_FLT,
+   TWO_SOURCE_FGE,
+   TWO_SOURCE_IEQ,
+   TWO_SOURCE_INE,
+   TWO_SOURCE_FEQ,
+   TWO_SOURCE_FNE,
+   TWO_SOURCE_UGT,
+   TWO_SOURCE_ULE,
+   TWO_SOURCE_IGT,
+   TWO_SOURCE_ILE,
+   TWO_SOURCE_FGT,
+   TWO_SOURCE_FLE,
+};
+
+struct two_source_compare_case {
+   const char *name;
+   const char *expression;
+   enum two_source_compare_kind kind;
+   unsigned live_sources;
+};
+
+static bool
+evaluate_two_source_compare(enum two_source_compare_kind kind, uint32_t a,
+                            uint32_t b)
+{
+   switch (kind) {
+   case TWO_SOURCE_ULT:
+      return a < b;
+   case TWO_SOURCE_UGE:
+      return a >= b;
+   case TWO_SOURCE_ILT:
+      return (int32_t)a < (int32_t)b;
+   case TWO_SOURCE_IGE:
+      return (int32_t)a >= (int32_t)b;
+   case TWO_SOURCE_FLT:
+      return bits_float(a) < bits_float(b);
+   case TWO_SOURCE_FGE:
+      return bits_float(a) >= bits_float(b);
+   case TWO_SOURCE_IEQ:
+      return a == b;
+   case TWO_SOURCE_INE:
+      return a != b;
+   case TWO_SOURCE_FEQ:
+      return bits_float(a) == bits_float(b);
+   case TWO_SOURCE_FNE:
+      return bits_float(a) != bits_float(b);
+   case TWO_SOURCE_UGT:
+      return a > b;
+   case TWO_SOURCE_ULE:
+      return a <= b;
+   case TWO_SOURCE_IGT:
+      return (int32_t)a > (int32_t)b;
+   case TWO_SOURCE_ILE:
+      return (int32_t)a <= (int32_t)b;
+   case TWO_SOURCE_FGT:
+      return bits_float(a) > bits_float(b);
+   case TWO_SOURCE_FLE:
+      return bits_float(a) <= bits_float(b);
+   }
+
+   fail("invalid two-source comparison");
+   return false;
+}
+
+static bool
+two_source_compare_is_float(enum two_source_compare_kind kind)
+{
+   return kind == TWO_SOURCE_FLT || kind == TWO_SOURCE_FGE ||
+          kind == TWO_SOURCE_FEQ || kind == TWO_SOURCE_FNE ||
+          kind == TWO_SOURCE_FGT || kind == TWO_SOURCE_FLE;
+}
+
+static bool
+two_source_compare_is_signed(enum two_source_compare_kind kind)
+{
+   return kind == TWO_SOURCE_ILT || kind == TWO_SOURCE_IGE ||
+          kind == TWO_SOURCE_IGT || kind == TWO_SOURCE_ILE;
+}
+
+static void
+fill_two_source_inputs(enum two_source_compare_kind kind, unsigned pattern,
+                       uint32_t *left, uint32_t *right)
+{
+   static const uint32_t unsigned_pairs[][2] = {
+      {0, 0},          {0, 1},          {1, 0},
+      {0x7fffffff, 0x80000000},         {0x80000000, 0x7fffffff},
+      {UINT32_MAX, UINT32_MAX},         {UINT32_MAX, 0},
+      {0x12345678, 0x12345679},
+   };
+   static const uint32_t signed_pairs[][2] = {
+      {(uint32_t)INT32_MIN, (uint32_t)INT32_MAX},
+      {(uint32_t)INT32_MAX, (uint32_t)INT32_MIN},
+      {(uint32_t)-1, 0},
+      {0, (uint32_t)-1},
+      {(uint32_t)-5, (uint32_t)-5},
+      {123456, (uint32_t)-654321},
+   };
+   static const uint32_t float_pairs[][2] = {
+      {0x00000000, 0x80000000}, /* +0, -0 */
+      {0x80000000, 0x00000000}, /* -0, +0 */
+      {0x7fc00000, 0x3f800000}, /* qNaN, 1 */
+      {0x3f800000, 0x7fc00000}, /* 1, qNaN */
+      {0x7f800000, 0x7f800000}, /* +inf, +inf */
+      {0xff800000, 0x7f800000}, /* -inf, +inf */
+      {0x7f800000, 0xff800000}, /* +inf, -inf */
+      {0x3fa00000, 0x3fa00000}, /* 1.25, 1.25 */
+      {0x3f9fffff, 0x3fa00000}, /* adjacent finite values */
+      {0x3fa00000, 0x3f9fffff},
+   };
+
+   if (pattern == 0) {
+      for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+         if (two_source_compare_is_float(kind)) {
+            const unsigned p =
+               i % (sizeof(float_pairs) / sizeof(float_pairs[0]));
+            left[i] = float_pairs[p][0];
+            right[i] = float_pairs[p][1];
+         } else if (two_source_compare_is_signed(kind)) {
+            const unsigned p =
+               i % (sizeof(signed_pairs) / sizeof(signed_pairs[0]));
+            left[i] = signed_pairs[p][0];
+            right[i] = signed_pairs[p][1];
+         } else {
+            const unsigned p =
+               i % (sizeof(unsigned_pairs) / sizeof(unsigned_pairs[0]));
+            left[i] = unsigned_pairs[p][0];
+            right[i] = unsigned_pairs[p][1];
+         }
+      }
+      return;
+   }
+
+   const bool desired = pattern == 1;
+   static const uint32_t unsigned_candidates[][2] = {
+      {1, 2},
+      {2, 1},
+      {1, 1},
+   };
+   static const uint32_t signed_candidates[][2] = {
+      {(uint32_t)-2, 1},
+      {1, (uint32_t)-2},
+      {(uint32_t)-1, (uint32_t)-1},
+   };
+   static const uint32_t float_candidates[][2] = {
+      {0x3f800000, 0x40000000},
+      {0x40000000, 0x3f800000},
+      {0x3f800000, 0x3f800000},
+      {0x7fc00000, 0x3f800000},
+   };
+   const uint32_t(*candidates)[2] = unsigned_candidates;
+   size_t candidate_count =
+      sizeof(unsigned_candidates) / sizeof(unsigned_candidates[0]);
+   if (two_source_compare_is_float(kind)) {
+      candidates = float_candidates;
+      candidate_count = sizeof(float_candidates) / sizeof(float_candidates[0]);
+   } else if (two_source_compare_is_signed(kind)) {
+      candidates = signed_candidates;
+      candidate_count =
+         sizeof(signed_candidates) / sizeof(signed_candidates[0]);
+   }
+   unsigned selected = UINT32_MAX;
+   for (unsigned p = 0; p < candidate_count; ++p) {
+      if (evaluate_two_source_compare(kind, candidates[p][0],
+                                      candidates[p][1]) == desired) {
+         selected = p;
+         break;
+      }
+   }
+   if (selected == UINT32_MAX)
+      fail("could not construct uniform comparison population");
+
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+      left[i] = candidates[selected][0];
+      right[i] = candidates[selected][1];
+   }
+}
+
+static uint32_t
+two_source_live_mix(unsigned live_sources, uint32_t a, uint32_t b)
+{
+   return ((live_sources & 1) ? a : 0) ^ ((live_sources & 2) ? b : 0);
+}
+
+static void
+run_two_source_comparisons(void)
+{
+   static const struct two_source_compare_case cases[] = {
+      {"ult", "a < b", TWO_SOURCE_ULT, 3},
+      {"uge", "a >= b", TWO_SOURCE_UGE, 3},
+      {"ilt", "int(a) < int(b)", TWO_SOURCE_ILT, 3},
+      {"ige", "int(a) >= int(b)", TWO_SOURCE_IGE, 3},
+      {"flt", "uintBitsToFloat(a) < uintBitsToFloat(b)", TWO_SOURCE_FLT, 3},
+      {"fge", "uintBitsToFloat(a) >= uintBitsToFloat(b)", TWO_SOURCE_FGE, 3},
+      {"ieq", "a == b", TWO_SOURCE_IEQ, 3},
+      {"ine", "a != b", TWO_SOURCE_INE, 3},
+      {"feq", "uintBitsToFloat(a) == uintBitsToFloat(b)", TWO_SOURCE_FEQ, 3},
+      {"fne", "uintBitsToFloat(a) != uintBitsToFloat(b)", TWO_SOURCE_FNE, 3},
+      {"ugt", "a > b", TWO_SOURCE_UGT, 3},
+      {"ule", "a <= b", TWO_SOURCE_ULE, 3},
+      {"igt", "int(a) > int(b)", TWO_SOURCE_IGT, 3},
+      {"ile", "int(a) <= int(b)", TWO_SOURCE_ILE, 3},
+      {"fgt", "uintBitsToFloat(a) > uintBitsToFloat(b)", TWO_SOURCE_FGT, 3},
+      {"fle", "uintBitsToFloat(a) <= uintBitsToFloat(b)", TWO_SOURCE_FLE, 3},
+      {"ult-release-both", "a < b", TWO_SOURCE_ULT, 0},
+      {"ult-retain-a", "a < b", TWO_SOURCE_ULT, 1},
+      {"ult-retain-b", "a < b", TWO_SOURCE_ULT, 2},
+      {"ult-retain-both", "a < b", TWO_SOURCE_ULT, 3},
+      {"ieq-release-both", "a == b", TWO_SOURCE_IEQ, 0},
+      {"ieq-retain-a", "a == b", TWO_SOURCE_IEQ, 1},
+      {"ieq-retain-b", "a == b", TWO_SOURCE_IEQ, 2},
+      {"ieq-retain-both", "a == b", TWO_SOURCE_IEQ, 3},
+   };
+   static const char *live_expression[] = {
+      "0u",
+      "a",
+      "b",
+      "a ^ b",
+   };
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(5, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   uint32_t *left = malloc(segment_bytes);
+   uint32_t *right = malloc(segment_bytes);
+   if (!seed || !left || !right)
+      fail("allocate two-source comparison buffers");
+
+   GLuint output_buffer = 0;
+   GLuint input_buffers[2] = {0};
+   glGenBuffers(1, &output_buffer);
+   glGenBuffers(2, input_buffers);
+
+   for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+      char source[4096];
+      int length = snprintf(
+         source, sizeof(source),
+         "#version 310 es\n"
+         "layout(local_size_x=256) in;\n"
+         "layout(std430,binding=0) buffer TrueOut { uint v[]; } true_out;\n"
+         "layout(std430,binding=1) buffer FalseOut { uint v[]; } false_out;\n"
+         "layout(std430,binding=2) readonly buffer Left { uint v[]; } lhs;\n"
+         "layout(std430,binding=3) readonly buffer Right { uint v[]; } rhs;\n"
+         "layout(std430,binding=4) buffer MergeA { uint v[]; } merge_a;\n"
+         "layout(std430,binding=5) buffer MergeB { uint v[]; } merge_b;\n"
+         "layout(std430,binding=6) buffer Pre { uint v[]; } pre;\n"
+         "void main(){\n"
+         " uint gid=gl_GlobalInvocationID.x; uint a=lhs.v[gid];"
+         " uint b=rhs.v[gid];\n"
+         " pre.v[gid]=gid^0x55aa33ccu; uint m0; uint m1;\n"
+         " if(%s) {\n"
+         "  true_out.v[gid]=(gid*3u+0x13579bdfu)^(%s);\n"
+         "  m0=(gid+0x10203040u)^(%s);"
+         "  m1=(gid*7u+0x31415926u)^(%s);\n"
+         " } else {\n"
+         "  false_out.v[gid]=(gid*5u+0x2468ace0u)^(%s);\n"
+         "  m0=(gid+0x50607080u)^(%s);"
+         "  m1=(gid*11u+0x27182818u)^(%s);\n"
+         " }\n"
+         " merge_a.v[gid]=m0; merge_b.v[gid]=m1;\n"
+         "}\n",
+         cases[c].expression, live_expression[cases[c].live_sources],
+         live_expression[cases[c].live_sources],
+         live_expression[cases[c].live_sources],
+         live_expression[cases[c].live_sources],
+         live_expression[cases[c].live_sources],
+         live_expression[cases[c].live_sources]);
+      if (length < 0 || (size_t)length >= sizeof(source))
+         fail("two-source comparison shader source overflow");
+      GLuint program = build_compute_source(source);
+      glUseProgram(program);
+
+      for (unsigned pattern = 0; pattern < 3; ++pattern) {
+         const unsigned seed_id = c * 3 + pattern;
+         for (unsigned slot = 0; slot < 5; ++slot)
+            seed_output_slot(seed, &layout, slot, WORKLOAD_COMPARE_COMPLETE,
+                             seed_id);
+         fill_two_source_inputs(cases[c].kind, pattern, left, right);
+
+         glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+         glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                      GL_DYNAMIC_COPY);
+         static const unsigned output_bindings[] = {0, 1, 4, 5, 6};
+         for (unsigned slot = 0;
+              slot < sizeof(output_bindings) / sizeof(output_bindings[0]);
+              ++slot) {
+            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, output_bindings[slot],
+                              output_buffer, slot_output_offset(&layout, slot),
+                              segment_bytes);
+         }
+         for (unsigned input = 0; input < 2; ++input) {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, input_buffers[input]);
+            glBufferData(GL_SHADER_STORAGE_BUFFER, segment_bytes,
+                         input ? right : left, GL_DYNAMIC_COPY);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2 + input,
+                             input_buffers[input]);
+         }
+
+         glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                         GL_SHADER_STORAGE_BARRIER_BIT);
+         glFinish();
+
+         glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+         const uint8_t *mapped = glMapBufferRange(
+            GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+         if (!mapped)
+            fail("map two-source comparison result");
+
+         unsigned mismatches[5] = {0};
+         for (unsigned slot = 0; slot < 5; ++slot) {
+            const size_t offset = slot_output_offset(&layout, slot);
+            const uint32_t *before =
+               (const uint32_t *)(mapped + offset - layout.guard_bytes);
+            const uint32_t *output = (const uint32_t *)(mapped + offset);
+            const uint32_t *after =
+               (const uint32_t *)(mapped + offset + segment_bytes);
+            for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+               if (before[i] != guard_word(slot, 0, i, seed_id) ||
+                   after[i] != guard_word(slot, 1, i, seed_id))
+                  fail("two-source comparison guard changed");
+            }
+            for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+               const bool condition = evaluate_two_source_compare(
+                  cases[c].kind, left[i], right[i]);
+               const uint32_t mix = two_source_live_mix(
+                  cases[c].live_sources, left[i], right[i]);
+               uint32_t want =
+                  poison_word(WORKLOAD_COMPARE_COMPLETE, i, slot, seed_id);
+               if (slot == 0 && condition)
+                  want = (i * 3u + 0x13579bdfu) ^ mix;
+               else if (slot == 1 && !condition)
+                  want = (i * 5u + 0x2468ace0u) ^ mix;
+               else if (slot == 2)
+                  want = (i + (condition ? 0x10203040u : 0x50607080u)) ^ mix;
+               else if (slot == 3)
+                  want = (i * (condition ? 7u : 11u) +
+                          (condition ? 0x31415926u : 0x27182818u)) ^
+                         mix;
+               else if (slot == 4)
+                  want = i ^ 0x55aa33ccu;
+               if (output[i] != want) {
+                  if (mismatches[slot] < 4)
+                     fprintf(stderr,
+                             "two-source %s pattern %u slot %u word %u=%#x "
+                             "expected=%#x a=%#x b=%#x\n",
+                             cases[c].name, pattern, slot, i, output[i], want,
+                             left[i], right[i]);
+                  ++mismatches[slot];
+               }
+            }
+         }
+         for (unsigned slot = 0; slot < 5; ++slot) {
+            if (mismatches[slot])
+               fail("two-source comparison output mismatch");
+         }
+         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+      }
+      glDeleteProgram(program);
+   }
+
+   glDeleteBuffers(2, input_buffers);
+   glDeleteBuffers(1, &output_buffer);
+   free(right);
+   free(left);
+   free(seed);
+}
+
+static void
+run_compare_register_pressure(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Pre { uint v[]; } pre;\n"
+      "layout(std430,binding=1) buffer Out { uint v[]; } out_buffer;\n"
+      "layout(std430,binding=2) readonly buffer Input { uint v[]; } input2;\n"
+      "void main(){\n"
+      " uint gid=gl_GlobalInvocationID.x;\n"
+      " uint p0=input2.v[gid+0u]; uint p1=input2.v[gid+16384u];\n"
+      " uint p2=input2.v[gid+32768u]; uint p3=input2.v[gid+49152u];\n"
+      " uint p4=input2.v[gid+65536u]; uint p5=input2.v[gid+81920u];\n"
+      " uint p6=input2.v[gid+98304u]; uint p7=input2.v[gid+114688u];\n"
+      " uint p8=input2.v[gid+131072u]; uint p9=input2.v[gid+147456u];\n"
+      " uint p10=input2.v[gid+163840u]; uint p11=input2.v[gid+180224u];\n"
+      " uint p12=input2.v[gid+196608u]; uint p13=input2.v[gid+212992u];\n"
+      " uint p14=input2.v[gid+229376u]; uint p15=input2.v[gid+245760u];\n"
+      " uint before=p0^p1^p2^p3^p4^p5^p6^p7^p8^p9^p10^p11^p12^p13^p14^p15;\n"
+      " pre.v[gid]=before; uint merged;\n"
+      " if(p0<p1) merged=(p2+p4)^(p6+p8);"
+      " else merged=(p3+p5)^(p7+p9);\n"
+      " out_buffer.v[gid]=merged+p0+p1+p2+p3+p4+p5+p6+p7+"
+      "p8+p9+p10+p11+p12+p13+p14+p15;\n"
+      "}\n";
+   const unsigned value_sets = 16;
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   const size_t input_bytes = value_sets * segment_bytes;
+   struct output_layout layout = make_output_layout(2, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   uint32_t *input = malloc(input_bytes);
+   if (!seed || !input)
+      fail("allocate compare-pressure buffers");
+
+   for (unsigned slot = 0; slot < 2; ++slot)
+      seed_output_slot(seed, &layout, slot, WORKLOAD_PRESSURE_INT_DAG, 0);
+   for (unsigned set = 0; set < value_sets; ++set) {
+      for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+         input[set * VALUE_COUNT + i] =
+            (0x9e3779b9u * (set + 1)) ^ (i * (set * 2u + 3u)) ^
+            (i >> (set & 7));
+      }
+   }
+
+   GLuint program = build_compute_source(source);
+   GLuint output_buffer = 0, input_buffer = 0;
+   glGenBuffers(1, &output_buffer);
+   glGenBuffers(1, &input_buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                GL_DYNAMIC_COPY);
+   for (unsigned slot = 0; slot < 2; ++slot) {
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, slot, output_buffer,
+                        slot_output_offset(&layout, slot), segment_bytes);
+   }
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, input_buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, input_bytes, input, GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, input_buffer);
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+   const uint8_t *mapped = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+   if (!mapped)
+      fail("map compare-pressure result");
+   for (unsigned slot = 0; slot < 2; ++slot) {
+      const size_t offset = slot_output_offset(&layout, slot);
+      const uint32_t *before =
+         (const uint32_t *)(mapped + offset - layout.guard_bytes);
+      const uint32_t *output = (const uint32_t *)(mapped + offset);
+      const uint32_t *after =
+         (const uint32_t *)(mapped + offset + segment_bytes);
+      for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+         if (before[i] != guard_word(slot, 0, i, 0) ||
+             after[i] != guard_word(slot, 1, i, 0))
+            fail("compare-pressure guard changed");
+      }
+      for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+         uint32_t x = 0;
+         for (unsigned set = 0; set < value_sets; ++set)
+            x ^= input[set * VALUE_COUNT + i];
+         uint32_t sum = 0;
+         for (unsigned set = 0; set < value_sets; ++set)
+            sum += input[set * VALUE_COUNT + i];
+         const bool condition = input[i] < input[VALUE_COUNT + i];
+         const uint32_t merged =
+            condition
+               ? (input[2 * VALUE_COUNT + i] + input[4 * VALUE_COUNT + i]) ^
+                    (input[6 * VALUE_COUNT + i] +
+                     input[8 * VALUE_COUNT + i])
+               : (input[3 * VALUE_COUNT + i] + input[5 * VALUE_COUNT + i]) ^
+                    (input[7 * VALUE_COUNT + i] +
+                     input[9 * VALUE_COUNT + i]);
+         const uint32_t want = slot == 0 ? x : merged + sum;
+         if (output[i] != want)
+            fail("compare-pressure output mismatch");
+      }
+   }
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &input_buffer);
+   glDeleteBuffers(1, &output_buffer);
+   free(input);
+   free(seed);
+}
+
+static void
+run_single_region_shapes(void)
+{
+   static const struct {
+      const char *name;
+      const char *then_statement;
+      const char *else_statement;
+      bool has_then;
+      bool has_else;
+   } shapes[] = {
+      {"empty", "", "", false, false},
+      {"then-only", "then_out.v[gid]=gid+0x22220000u;", "", true, false},
+      {"else-only", "", "else_out.v[gid]=gid+0x33330000u;", false, true},
+      {"both", "then_out.v[gid]=gid+0x22220000u;",
+       "else_out.v[gid]=gid+0x33330000u;", true, true},
+   };
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(4, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   if (!seed)
+      fail("allocate single-region buffers");
+   GLuint output_buffer = 0;
+   glGenBuffers(1, &output_buffer);
+
+   for (unsigned shape = 0; shape < sizeof(shapes) / sizeof(shapes[0]);
+        ++shape) {
+      char source[2048];
+      int length = snprintf(
+         source, sizeof(source),
+         "#version 310 es\n"
+         "layout(local_size_x=256) in;\n"
+         "layout(std430,binding=0) buffer Pre { uint v[]; } pre;\n"
+         "layout(std430,binding=1) buffer Then { uint v[]; } then_out;\n"
+         "layout(std430,binding=2) buffer Else { uint v[]; } else_out;\n"
+         "layout(std430,binding=3) buffer Post { uint v[]; } post;\n"
+         "void main(){ uint gid=gl_GlobalInvocationID.x;"
+         " pre.v[gid]=gid^0x11112222u;"
+         " if(gid<8192u){%s}else{%s}"
+         " post.v[gid]=gid^0x44448888u; }\n",
+         shapes[shape].then_statement, shapes[shape].else_statement);
+      if (length < 0 || (size_t)length >= sizeof(source))
+         fail("single-region shader source overflow");
+      GLuint program = build_compute_source(source);
+      for (unsigned slot = 0; slot < 4; ++slot)
+         seed_output_slot(seed, &layout, slot, WORKLOAD_COMPARE_DAG, shape);
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                   GL_DYNAMIC_COPY);
+      for (unsigned slot = 0; slot < 4; ++slot) {
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, slot, output_buffer,
+                           slot_output_offset(&layout, slot), segment_bytes);
+      }
+      glUseProgram(program);
+      glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+      glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                      GL_SHADER_STORAGE_BARRIER_BIT);
+      glFinish();
+
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+      const uint8_t *mapped = glMapBufferRange(
+         GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+      if (!mapped)
+         fail("map single-region result");
+      for (unsigned slot = 0; slot < 4; ++slot) {
+         const size_t offset = slot_output_offset(&layout, slot);
+         const uint32_t *before =
+            (const uint32_t *)(mapped + offset - layout.guard_bytes);
+         const uint32_t *output = (const uint32_t *)(mapped + offset);
+         const uint32_t *after =
+            (const uint32_t *)(mapped + offset + segment_bytes);
+         for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+            if (before[i] != guard_word(slot, 0, i, shape) ||
+                after[i] != guard_word(slot, 1, i, shape))
+               fail("single-region guard changed");
+         }
+         for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+            const bool selected = slot == 0 || slot == 3 ||
+                                  (slot == 1 && shapes[shape].has_then &&
+                                   i < VALUE_COUNT / 2) ||
+                                  (slot == 2 && shapes[shape].has_else &&
+                                   i >= VALUE_COUNT / 2);
+            uint32_t want =
+               poison_word(WORKLOAD_COMPARE_DAG, i, slot, shape);
+            if (selected) {
+               want = slot == 0   ? i ^ 0x11112222u
+                      : slot == 1 ? i + 0x22220000u
+                      : slot == 2 ? i + 0x33330000u
+                                  : i ^ 0x44448888u;
+            }
+            if (output[i] != want) {
+               fprintf(stderr,
+                       "single-region %s slot %u word %u=%#x expected=%#x\n",
+                       shapes[shape].name, slot, i, output[i], want);
+               fail("single-region output mismatch");
+            }
+         }
+      }
+      glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+      glDeleteProgram(program);
+   }
+
+   glDeleteBuffers(1, &output_buffer);
+   free(seed);
+}
+
+static void
+run_multiple_phi_vectors(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer Scalars { uint v[]; } scalars;\n"
+      "layout(std430,binding=1) buffer Vectors { uvec4 v[]; } vectors;\n"
+      "void main(){\n"
+      " uint gid=gl_GlobalInvocationID.x; uint scalar; uvec4 vector;\n"
+      " if(gid<8192u){\n"
+      "  scalar=gid+0x10203040u;\n"
+      "  vector=uvec4(gid+1u,gid+2u,gid+3u,gid+4u);\n"
+      " }else{\n"
+      "  scalar=gid^0x50607080u;\n"
+      "  vector=uvec4(gid^0x10u,gid^0x20u,gid^0x30u,gid^0x40u);\n"
+      " }\n"
+      " scalars.v[gid]=scalar; vectors.v[gid]=vector;\n"
+      "}\n";
+   const size_t scalar_bytes = VALUE_COUNT * sizeof(uint32_t);
+   const size_t vector_bytes = 4 * scalar_bytes;
+   struct output_layout layouts[] = {
+      make_output_layout(1, scalar_bytes),
+      make_output_layout(1, vector_bytes),
+   };
+   uint8_t *seed[2] = {
+      malloc(layouts[0].buffer_bytes),
+      malloc(layouts[1].buffer_bytes),
+   };
+   if (!seed[0] || !seed[1])
+      fail("allocate multiple-phi buffers");
+
+   const size_t output_words[] = {VALUE_COUNT, 4 * VALUE_COUNT};
+   for (unsigned binding = 0; binding < 2; ++binding) {
+      const size_t offset = slot_output_offset(&layouts[binding], 0);
+      uint32_t *before =
+         (uint32_t *)(seed[binding] + offset - layouts[binding].guard_bytes);
+      uint32_t *output = (uint32_t *)(seed[binding] + offset);
+      uint32_t *after =
+         (uint32_t *)(seed[binding] + offset + output_words[binding] * 4);
+      for (size_t i = 0; i < layouts[binding].guard_bytes / 4; ++i) {
+         before[i] = guard_word(binding, 0, i, 0x4d50);
+         after[i] = guard_word(binding, 1, i, 0x4d50);
+      }
+      for (size_t i = 0; i < output_words[binding]; ++i)
+         output[i] = 0xc001d00du ^ (binding * 0x11111111u) ^ (uint32_t)i;
+   }
+
+   GLuint program = build_compute_source(source);
+   GLuint buffers[2] = {0};
+   glGenBuffers(2, buffers);
+   for (unsigned binding = 0; binding < 2; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, layouts[binding].buffer_bytes,
+                   seed[binding], GL_DYNAMIC_COPY);
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding, buffers[binding],
+                        slot_output_offset(&layouts[binding], 0),
+                        output_words[binding] * 4);
+   }
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   for (unsigned binding = 0; binding < 2; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffers[binding]);
+      const uint8_t *mapped = glMapBufferRange(
+         GL_SHADER_STORAGE_BUFFER, 0, layouts[binding].buffer_bytes,
+         GL_MAP_READ_BIT);
+      if (!mapped)
+         fail("map multiple-phi result");
+      const size_t offset = slot_output_offset(&layouts[binding], 0);
+      const uint32_t *before =
+         (const uint32_t *)(mapped + offset - layouts[binding].guard_bytes);
+      const uint32_t *output = (const uint32_t *)(mapped + offset);
+      const uint32_t *after =
+         (const uint32_t *)(mapped + offset + output_words[binding] * 4);
+      for (size_t i = 0; i < layouts[binding].guard_bytes / 4; ++i) {
+         if (before[i] != guard_word(binding, 0, i, 0x4d50) ||
+             after[i] != guard_word(binding, 1, i, 0x4d50))
+            fail("multiple-phi guard changed");
+      }
+      for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+         const bool then_arm = gid < VALUE_COUNT / 2;
+         if (binding == 0) {
+            const uint32_t want =
+               then_arm ? gid + 0x10203040u : gid ^ 0x50607080u;
+            if (output[gid] != want)
+               fail("multiple-phi scalar mismatch");
+            continue;
+         }
+
+         for (unsigned component = 0; component < 4; ++component) {
+            const uint32_t want =
+               then_arm ? gid + component + 1
+                        : gid ^ ((component + 1) * 0x10u);
+            if (output[gid * 4 + component] != want)
+               fail("multiple-phi vector mismatch");
+         }
+      }
+      glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   }
+
+   glDeleteProgram(program);
+   glDeleteBuffers(2, buffers);
+   free(seed[1]);
+   free(seed[0]);
+}
+
+static void
+run_nested_short_circuit_if_else(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) readonly buffer Input { uint v[]; } input0;\n"
+      "layout(std430,binding=1) buffer Nested { uint v[]; } nested_out;\n"
+      "layout(std430,binding=2) buffer Phi { uint v[]; } phi_out;\n"
+      "layout(std430,binding=3) buffer AndRhs { uint v[]; } and_rhs;\n"
+      "layout(std430,binding=4) buffer AndResult { uint v[]; } and_out;\n"
+      "layout(std430,binding=5) buffer OrRhs { uint v[]; } or_rhs;\n"
+      "layout(std430,binding=6) buffer OrResult { uint v[]; } or_out;\n"
+      "layout(std430,binding=7) buffer Sibling { uint v[]; } sibling_out;\n"
+      "bool eval_and_rhs(uint gid,uint raw){"
+      " and_rhs.v[gid]=raw^0x31415926u; return (raw&64u)!=0u; }\n"
+      "bool eval_or_rhs(uint gid,uint raw){"
+      " or_rhs.v[gid]=raw+0x27182818u; return (raw&256u)!=0u; }\n"
+      "void main(){\n"
+      " uint gid=gl_GlobalInvocationID.x; uint raw=input0.v[gid];\n"
+      " if((raw&1u)!=0u){"
+      "  if((raw&2u)!=0u) nested_out.v[gid]=raw+0x10010010u;"
+      "  else nested_out.v[gid]=raw+0x20020020u;"
+      " }else{"
+      "  if((raw&4u)!=0u) nested_out.v[gid]=raw^0x30030030u;"
+      "  else nested_out.v[gid]=raw^0x40040040u;"
+      " }\n"
+      " uint merged;"
+      " if((raw&8u)!=0u){"
+      "  if((raw&16u)!=0u){"
+      "   sibling_out.v[gid]=raw^0x11115555u;"
+      "   merged=raw*3u+0x51515151u;"
+      "  }else{"
+      "   sibling_out.v[gid]=raw^0x22226666u;"
+      "   merged=(raw^0xa5a55a5au)+0x16161616u;"
+      "  }"
+      " }else merged=raw*5u+0x25252525u;"
+      " phi_out.v[gid]=merged^(gid*17u);\n"
+      " bool and_value=((raw&32u)!=0u)&&eval_and_rhs(gid,raw);"
+      " and_out.v[gid]=and_value?(raw+0x61616161u):(raw^0x62626262u);\n"
+      " bool or_value=((raw&128u)!=0u)||eval_or_rhs(gid,raw);"
+      " or_out.v[gid]=or_value?(raw+0x71717171u):(raw^0x72727272u);\n"
+      " uint sibling=raw+0x81818181u;"
+      " if((raw&512u)!=0u) sibling^=0x91919191u;"
+      " if((raw&1024u)!=0u){"
+      "  if((raw&2048u)!=0u) sibling+=0xa1a1a1a1u;"
+      "  else sibling-=0xb2b2b2b2u;"
+      " }"
+      " sibling_out.v[gid]=sibling;\n"
+      "}\n";
+
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(7, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   uint32_t *input = malloc(segment_bytes);
+   if (!seed || !input)
+      fail("allocate nested control-flow buffers");
+
+   const unsigned seed_id = 0x4e4346;
+   for (unsigned slot = 0; slot < 7; ++slot)
+      seed_output_slot(seed, &layout, slot, WORKLOAD_COMPARE_DAG, seed_id);
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i)
+      input[i] = (i & 0xfffu) | ((i * 0x9e3779b9u) & 0xfffff000u);
+
+   GLuint program = build_compute_source(source);
+   GLuint output_buffer = 0, input_buffer = 0;
+   glGenBuffers(1, &output_buffer);
+   glGenBuffers(1, &input_buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, input_buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, segment_bytes, input,
+                GL_DYNAMIC_COPY);
+   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, input_buffer);
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                GL_DYNAMIC_COPY);
+   for (unsigned slot = 0; slot < 7; ++slot) {
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, slot + 1, output_buffer,
+                        slot_output_offset(&layout, slot), segment_bytes);
+   }
+
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+   const uint8_t *mapped = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+   if (!mapped)
+      fail("map nested control-flow output");
+
+   for (unsigned slot = 0; slot < 7; ++slot) {
+      const size_t offset = slot_output_offset(&layout, slot);
+      const uint32_t *before =
+         (const uint32_t *)(mapped + offset - layout.guard_bytes);
+      const uint32_t *output = (const uint32_t *)(mapped + offset);
+      const uint32_t *after =
+         (const uint32_t *)(mapped + offset + segment_bytes);
+      for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+         if (before[i] != guard_word(slot, 0, i, seed_id) ||
+             after[i] != guard_word(slot, 1, i, seed_id))
+            fail("nested control-flow guard changed");
+      }
+
+      for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+         const uint32_t raw = input[i];
+         bool selected = true;
+         uint32_t want = 0;
+         switch (slot) {
+         case 0:
+            want = (raw & 1u) != 0u
+                      ? ((raw & 2u) != 0u ? raw + 0x10010010u
+                                          : raw + 0x20020020u)
+                      : ((raw & 4u) != 0u ? raw ^ 0x30030030u
+                                          : raw ^ 0x40040040u);
+            break;
+         case 1: {
+            uint32_t merged =
+               (raw & 8u) != 0u
+                  ? ((raw & 16u) != 0u
+                        ? raw * 3u + 0x51515151u
+                        : (raw ^ 0xa5a55a5au) + 0x16161616u)
+                  : raw * 5u + 0x25252525u;
+            want = merged ^ (i * 17u);
+            break;
+         }
+         case 2:
+            selected = (raw & 32u) != 0u;
+            want = raw ^ 0x31415926u;
+            break;
+         case 3: {
+            const bool result =
+               (raw & 32u) != 0u && (raw & 64u) != 0u;
+            want = result ? raw + 0x61616161u : raw ^ 0x62626262u;
+            break;
+         }
+         case 4:
+            selected = (raw & 128u) == 0u;
+            want = raw + 0x27182818u;
+            break;
+         case 5: {
+            const bool result =
+               (raw & 128u) != 0u || (raw & 256u) != 0u;
+            want = result ? raw + 0x71717171u : raw ^ 0x72727272u;
+            break;
+         }
+         case 6:
+            want = raw + 0x81818181u;
+            if ((raw & 512u) != 0u)
+               want ^= 0x91919191u;
+            if ((raw & 1024u) != 0u)
+               want = (raw & 2048u) != 0u ? want + 0xa1a1a1a1u
+                                           : want - 0xb2b2b2b2u;
+            break;
+         }
+
+         if (!selected)
+            want = poison_word(WORKLOAD_COMPARE_DAG, i, slot, seed_id);
+         if (output[i] != want) {
+            fprintf(stderr,
+                    "nested control-flow slot %u word %u=%#x expected=%#x "
+                    "input=%#x\n",
+                    slot, i, output[i], want, raw);
+            fail("nested control-flow output mismatch");
+         }
+      }
+   }
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(1, &input_buffer);
+   glDeleteBuffers(1, &output_buffer);
+   free(input);
+   free(seed);
+}
+
+static void
+run_nested_branch_local_loads(void)
+{
+   static const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) readonly buffer Conditions { uint v[]; } cond;\n"
+      "layout(std430,binding=1) readonly buffer A { uint v[]; } a;\n"
+      "layout(std430,binding=2) readonly buffer B { uint v[]; } b;\n"
+      "layout(std430,binding=3) readonly buffer C { uint v[]; } c;\n"
+      "layout(std430,binding=4) readonly buffer D { uint v[]; } d;\n"
+      "layout(std430,binding=5) buffer Output { uint v[]; } output0;\n"
+      "layout(std430,binding=6) buffer Side { uint v[]; } side;\n"
+      "void main(){\n"
+      " uint gid=gl_GlobalInvocationID.x; uint raw=cond.v[gid]; uint value;\n"
+      " if((raw&1u)!=0u){"
+      "  if((raw&2u)!=0u){"
+      "   uint i=(gid*5u+3u)&16383u; uint x=a.v[i],y=a.v[(i+17u)&16383u];"
+      "   side.v[gid]=(x+y)^0x11112222u; value=x*3u+(y^raw);"
+      "  }else{"
+      "   uint i=(gid*7u+11u)&16383u; uint x=b.v[i],y=b.v[(i+19u)&16383u];"
+      "   side.v[gid]=(x^y)+0x33334444u; value=(x+raw)^(y*5u);"
+      "  }"
+      " }else{"
+      "  if((raw&4u)!=0u){"
+      "   uint i=(gid*9u+13u)&16383u; uint x=c.v[i],y=c.v[(i+23u)&16383u];"
+      "   side.v[gid]=(x*7u)+y; value=(x^raw)+(y^0x55556666u);"
+      "  }else{"
+      "   uint i=(gid*13u+29u)&16383u; uint x=d.v[i],y=d.v[(i+31u)&16383u];"
+      "   side.v[gid]=(x-y)^0x77778888u; value=(x*11u)^(y+raw);"
+      "  }"
+      " }"
+      " output0.v[gid]=value^(gid*0x10203u);\n"
+      "}\n";
+
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(2, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   uint32_t *inputs[5] = {0};
+   for (unsigned i = 0; i < 5; ++i)
+      inputs[i] = malloc(segment_bytes);
+   if (!seed || !inputs[0] || !inputs[1] || !inputs[2] || !inputs[3] ||
+       !inputs[4])
+      fail("allocate nested branch-load buffers");
+
+   const unsigned seed_id = 0x4e424c;
+   for (unsigned slot = 0; slot < 2; ++slot)
+      seed_output_slot(seed, &layout, slot, WORKLOAD_COMPARE_DAG, seed_id);
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+      inputs[0][i] = (i & 7u) | ((i * 0x9e3779b9u) & 0xfffffff8u);
+      for (unsigned set = 1; set < 5; ++set)
+         inputs[set][i] =
+            (0x13579bdfu * set) ^ (i * (0x10203u + set * 0x202u)) ^
+            (i >> set);
+   }
+
+   GLuint program = build_compute_source(source);
+   GLuint input_buffers[5] = {0}, output_buffer = 0;
+   glGenBuffers(5, input_buffers);
+   glGenBuffers(1, &output_buffer);
+   for (unsigned binding = 0; binding < 5; ++binding) {
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, input_buffers[binding]);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, segment_bytes, inputs[binding],
+                   GL_DYNAMIC_COPY);
+      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding,
+                       input_buffers[binding]);
+   }
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+   glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                GL_DYNAMIC_COPY);
+   for (unsigned slot = 0; slot < 2; ++slot) {
+      glBindBufferRange(GL_SHADER_STORAGE_BUFFER, slot + 5, output_buffer,
+                        slot_output_offset(&layout, slot), segment_bytes);
+   }
+
+   glUseProgram(program);
+   glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+   glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                   GL_SHADER_STORAGE_BARRIER_BIT);
+   glFinish();
+
+   glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+   const uint8_t *mapped = glMapBufferRange(
+      GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+   if (!mapped)
+      fail("map nested branch-load output");
+   for (unsigned slot = 0; slot < 2; ++slot) {
+      const size_t offset = slot_output_offset(&layout, slot);
+      const uint32_t *before =
+         (const uint32_t *)(mapped + offset - layout.guard_bytes);
+      const uint32_t *output = (const uint32_t *)(mapped + offset);
+      const uint32_t *after =
+         (const uint32_t *)(mapped + offset + segment_bytes);
+      for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+         if (before[i] != guard_word(slot, 0, i, seed_id) ||
+             after[i] != guard_word(slot, 1, i, seed_id))
+            fail("nested branch-load guard changed");
+      }
+
+      for (uint32_t gid = 0; gid < VALUE_COUNT; ++gid) {
+         const uint32_t raw = inputs[0][gid];
+         unsigned set, index, delta;
+         if ((raw & 1u) != 0u && (raw & 2u) != 0u) {
+            set = 1;
+            index = (gid * 5u + 3u) & 16383u;
+            delta = 17;
+         } else if ((raw & 1u) != 0u) {
+            set = 2;
+            index = (gid * 7u + 11u) & 16383u;
+            delta = 19;
+         } else if ((raw & 4u) != 0u) {
+            set = 3;
+            index = (gid * 9u + 13u) & 16383u;
+            delta = 23;
+         } else {
+            set = 4;
+            index = (gid * 13u + 29u) & 16383u;
+            delta = 31;
+         }
+         const uint32_t x = inputs[set][index];
+         const uint32_t y = inputs[set][(index + delta) & 16383u];
+         uint32_t side_value, value;
+         if (set == 1) {
+            side_value = (x + y) ^ 0x11112222u;
+            value = x * 3u + (y ^ raw);
+         } else if (set == 2) {
+            side_value = (x ^ y) + 0x33334444u;
+            value = (x + raw) ^ (y * 5u);
+         } else if (set == 3) {
+            side_value = x * 7u + y;
+            value = (x ^ raw) + (y ^ 0x55556666u);
+         } else {
+            side_value = (x - y) ^ 0x77778888u;
+            value = (x * 11u) ^ (y + raw);
+         }
+         const uint32_t want =
+            slot == 0 ? value ^ (gid * 0x10203u) : side_value;
+         if (output[gid] != want) {
+            fprintf(stderr,
+                    "nested branch-load slot %u word %u=%#x expected=%#x "
+                    "set=%u\n",
+                    slot, gid, output[gid], want, set);
+            fail("nested branch-load output mismatch");
+         }
+      }
+   }
+
+   glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   glDeleteProgram(program);
+   glDeleteBuffers(5, input_buffers);
+   glDeleteBuffers(1, &output_buffer);
+   for (unsigned i = 0; i < 5; ++i)
+      free(inputs[i]);
+   free(seed);
+}
+
+static void
+fill_branch_load_inputs(unsigned pattern, uint32_t *condition,
+                        uint32_t *then_data, uint32_t *else_data,
+                        uint32_t *post_data)
+{
+   for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+      if (pattern == 0) {
+         static const uint32_t mixed[] = {
+            0x7fffffffu, 0x80000000u, 0x80000001u, 0x00004567u,
+         };
+         condition[i] = mixed[i & 3] ^ ((i >> 2) & 0x3ffu);
+      } else {
+         condition[i] = pattern == 1 ? 0x40000000u | i : 0xc0000000u | i;
+      }
+
+      then_data[i] = 0x13579bdfu ^ (i * 0x01020305u) ^ (i >> 3);
+      else_data[i] = (0x2468ace0u + (i * 0x9e3779b9u)) ^ (i << 7);
+      post_data[i] = 0xa5a55a5au ^ (i * 0x85ebca6bu) ^ (i >> 5);
+   }
+}
+
+static void
+run_branch_local_device_loads(void)
+{
+   const char *source =
+      "#version 310 es\n"
+      "layout(local_size_x=256) in;\n"
+      "layout(std430,binding=0) buffer OutThen { uint v[]; } out_then;\n"
+      "layout(std430,binding=1) buffer OutElse { uint v[]; } out_else;\n"
+      "layout(std430,binding=2) buffer OutMerge { uint v[]; } out_merge;\n"
+      "layout(std430,binding=3) readonly buffer Condition { uint v[]; } cond;\n"
+      "layout(std430,binding=4) readonly buffer ThenData { uint v[]; } td;\n"
+      "layout(std430,binding=5) readonly buffer ElseData { uint v[]; } ed;\n"
+      "layout(std430,binding=6) readonly buffer PostData { uint v[]; } pd;\n"
+      "void main(){\n"
+      " uint gid=gl_GlobalInvocationID.x;\n"
+      " uint raw=cond.v[gid]; uint merged;\n"
+      " if(raw < 0x80000000u) {\n"
+      "  uint ti=(gid*5u+3u)&16383u; uint tv=td.v[ti];\n"
+      "  out_then.v[gid]=(tv^0x31415926u)+gid*3u;\n"
+      "  merged=(tv*9u)+(gid^0x10203u);\n"
+      " } else {\n"
+      "  uint ei=(gid*7u+11u)&16383u; uint ev=ed.v[ei];\n"
+      "  out_else.v[gid]=(ev+0x27182818u)^(gid*5u);\n"
+      "  merged=(ev^0xa5a55a5au)-(gid*7u);\n"
+      " }\n"
+      " uint pi=(gid*13u+17u)&16383u; uint pv=pd.v[pi];\n"
+      " out_merge.v[gid]=(merged^pv)+0xdeadbeefu;\n"
+      "}\n";
+   const size_t segment_bytes = VALUE_COUNT * sizeof(uint32_t);
+   struct output_layout layout = make_output_layout(3, segment_bytes);
+   uint8_t *seed = malloc(layout.buffer_bytes);
+   uint32_t *condition = malloc(segment_bytes);
+   uint32_t *then_data = malloc(segment_bytes);
+   uint32_t *else_data = malloc(segment_bytes);
+   uint32_t *post_data = malloc(segment_bytes);
+   if (!seed || !condition || !then_data || !else_data || !post_data)
+      fail("allocate branch-local-load buffers");
+
+   GLuint output_buffer = 0;
+   GLuint input_buffers[4] = {0};
+   glGenBuffers(1, &output_buffer);
+   glGenBuffers(4, input_buffers);
+   GLuint program = build_compute_source(source);
+   glUseProgram(program);
+
+   for (unsigned pattern = 0; pattern < 3; ++pattern) {
+      for (unsigned slot = 0; slot < 3; ++slot)
+         seed_output_slot(seed, &layout, slot, WORKLOAD_GID, pattern);
+      fill_branch_load_inputs(pattern, condition, then_data, else_data,
+                              post_data);
+
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+      glBufferData(GL_SHADER_STORAGE_BUFFER, layout.buffer_bytes, seed,
+                   GL_DYNAMIC_COPY);
+      for (unsigned binding = 0; binding < 3; ++binding) {
+         glBindBufferRange(GL_SHADER_STORAGE_BUFFER, binding, output_buffer,
+                           slot_output_offset(&layout, binding), segment_bytes);
+      }
+
+      const uint32_t *inputs[] = {condition, then_data, else_data, post_data};
+      for (unsigned i = 0; i < 4; ++i) {
+         glBindBuffer(GL_SHADER_STORAGE_BUFFER, input_buffers[i]);
+         glBufferData(GL_SHADER_STORAGE_BUFFER, segment_bytes, inputs[i],
+                      GL_DYNAMIC_COPY);
+         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3 + i, input_buffers[i]);
+      }
+
+      glDispatchCompute(VALUE_COUNT / LOCAL_SIZE, 1, 1);
+      glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT |
+                      GL_SHADER_STORAGE_BARRIER_BIT);
+      glFinish();
+
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, output_buffer);
+      const uint8_t *mapped = glMapBufferRange(
+         GL_SHADER_STORAGE_BUFFER, 0, layout.buffer_bytes, GL_MAP_READ_BIT);
+      if (!mapped)
+         fail("map branch-local-load result");
+
+      unsigned mismatches[3] = {0};
+      unsigned changed[3] = {0};
+      for (unsigned slot = 0; slot < 3; ++slot) {
+         const size_t offset = slot_output_offset(&layout, slot);
+         const uint32_t *before =
+            (const uint32_t *)(mapped + offset - layout.guard_bytes);
+         const uint32_t *output = (const uint32_t *)(mapped + offset);
+         const uint32_t *after =
+            (const uint32_t *)(mapped + offset + segment_bytes);
+         for (size_t i = 0; i < layout.guard_bytes / sizeof(uint32_t); ++i) {
+            if (before[i] != guard_word(slot, 0, i, pattern) ||
+                after[i] != guard_word(slot, 1, i, pattern))
+               fail("branch-local-load guard changed");
+         }
+
+         for (uint32_t i = 0; i < VALUE_COUNT; ++i) {
+            const bool true_arm = condition[i] < 0x80000000u;
+            const uint32_t tv = then_data[(i * 5u + 3u) & 16383u];
+            const uint32_t ev = else_data[(i * 7u + 11u) & 16383u];
+            const uint32_t pv = post_data[(i * 13u + 17u) & 16383u];
+            const bool selected = slot == 2 || slot == (true_arm ? 0u : 1u);
+            uint32_t want = poison_word(WORKLOAD_GID, i, slot, pattern);
+            if (selected) {
+               if (slot == 0)
+                  want = (tv ^ 0x31415926u) + i * 3u;
+               else if (slot == 1)
+                  want = (ev + 0x27182818u) ^ (i * 5u);
+               else {
+                  const uint32_t merged =
+                     true_arm ? tv * 9u + (i ^ 0x10203u)
+                              : (ev ^ 0xa5a55a5au) - i * 7u;
+                  want = (merged ^ pv) + 0xdeadbeefu;
+               }
+            }
+
+            changed[slot] += output[i] !=
+                             poison_word(WORKLOAD_GID, i, slot, pattern);
+            if (output[i] != want) {
+               if (mismatches[slot] < 4)
+                  fprintf(stderr,
+                          "branch-local-load pattern %u slot %u word %u=%#x "
+                          "expected=%#x condition=%#x\n",
+                          pattern, slot, i, output[i], want, condition[i]);
+               ++mismatches[slot];
+            }
+         }
+      }
+
+      if (mismatches[0] || mismatches[1] || mismatches[2]) {
+         fprintf(stderr,
+                 "branch-local-load pattern %u summary: slot0 changed=%u "
+                 "mismatches=%u, slot1 changed=%u mismatches=%u, "
+                 "slot2 changed=%u mismatches=%u\n",
+                 pattern, changed[0], mismatches[0], changed[1],
+                 mismatches[1], changed[2], mismatches[2]);
+         fail("branch-local-load output mismatch");
+      }
+      glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+   }
+
+   glDeleteProgram(program);
+   glDeleteBuffers(4, input_buffers);
+   glDeleteBuffers(1, &output_buffer);
+   free(post_data);
+   free(else_data);
+   free(then_data);
+   free(condition);
+   free(seed);
+}
+
 static const char *const lifecycle_case_names[] = {
    "archive-cross-program-sequence",
    "repeated-range-dispatch",
    "program-lifecycle-stress",
+   "simple-divergent-if-else",
+   "two-source-comparisons",
+   "compare-register-pressure",
+   "single-region-shapes",
+   "multiple-phi-vectors",
+   "branch-local-device-loads",
+   "nested-short-circuit-if-else",
+   "nested-branch-local-loads",
 };
 
 static int
@@ -1228,6 +2689,38 @@ run_named_case(const char *name)
       run_program_lifecycle_stress();
       return 1;
    }
+   if (!strcmp(name, lifecycle_case_names[3])) {
+      run_simple_divergent_if_else();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[4])) {
+      run_two_source_comparisons();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[5])) {
+      run_compare_register_pressure();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[6])) {
+      run_single_region_shapes();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[7])) {
+      run_multiple_phi_vectors();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[8])) {
+      run_branch_local_device_loads();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[9])) {
+      run_nested_short_circuit_if_else();
+      return 1;
+   }
+   if (!strcmp(name, lifecycle_case_names[10])) {
+      run_nested_branch_local_loads();
+      return 1;
+   }
 
    size_t count = 0;
    const char *const *names = t8132_apple9_memory_case_names(&count);
@@ -1248,7 +2741,7 @@ run_named_case(const char *name)
 }
 
 static void
-list_cases(void)
+list_cases(bool include_archive_stress)
 {
    for (unsigned i = 0; i < WORKLOAD_ARCHIVE_CROSS_0; ++i)
       puts(workload_names[i]);
@@ -1260,15 +2753,23 @@ list_cases(void)
    for (size_t i = 0; i < count; ++i)
       puts(names[i]);
    for (unsigned i = 0;
-        i < sizeof(lifecycle_case_names) / sizeof(lifecycle_case_names[0]); ++i)
+        i < sizeof(lifecycle_case_names) / sizeof(lifecycle_case_names[0]); ++i) {
+      if (!include_archive_stress && (i == 0 || i == 2 || i == 4))
+         continue;
       puts(lifecycle_case_names[i]);
+   }
 }
 
 int
 main(int argc, char **argv)
 {
-   if (argc == 2 && !strcmp(argv[1], "--list")) {
-      list_cases();
+   if (argc == 2 &&
+       (!strcmp(argv[1], "--list") || !strcmp(argv[1], "--list-default"))) {
+      /* The append-only bring-up archive cannot hold every independent shader
+       * program in one process. Keep the archive-lifecycle stresses and the
+       * 24-program comparison matrix available explicitly and in the complete
+       * listing, but omit them from the one-boot semantic-output sequence. */
+      list_cases(!strcmp(argv[1], "--list"));
       return 0;
    }
    if (argc < 2) {

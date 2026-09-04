@@ -123,7 +123,7 @@ uv run --python 3.14 \
 
         if [ "$T8132_PIGLIT_ACTION" = direct ]; then
             if [ "$T8132_PIGLIT_API" = gles ]; then
-                set -- $("$T8132_PIGLIT_RUNNER" --list)
+                set -- $("$T8132_PIGLIT_RUNNER" --list-default)
             else
                 case "$T8132_PIGLIT_GL_SUBSET" in
                     smoke)
