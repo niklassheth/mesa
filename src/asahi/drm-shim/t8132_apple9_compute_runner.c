@@ -4317,7 +4317,7 @@ run_named_case(const char *name)
          return 1;
       }
    }
-   return 0;
+   return t8132_apple9_run_math_case(name);
 }
 
 static void
@@ -4332,6 +4332,13 @@ list_cases(bool include_archive_stress)
    names = t8132_apple9_geometry_case_names(&count);
    for (size_t i = 0; i < count; ++i)
       puts(names[i]);
+   /* Run the math matrix separately: its generated range-reduction shaders
+    * consume a substantial part of the temporary 64 KiB program archive. */
+   if (include_archive_stress) {
+      names = t8132_apple9_math_case_names(&count);
+      for (size_t i = 0; i < count; ++i)
+         puts(names[i]);
+   }
    for (unsigned i = 0;
         i < sizeof(lifecycle_case_names) / sizeof(lifecycle_case_names[0]);
         ++i) {

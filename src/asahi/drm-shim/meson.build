@@ -19,6 +19,7 @@ if with_tools.contains('drm-shim')
       't8132_apple9_compute_runner.c',
       't8132_apple9_compute_memory.c',
       't8132_apple9_compute_geometry.c',
+      't8132_apple9_compute_math.c',
     ),
     dependencies : [dependency('egl'), dependency('glesv2'), dep_m],
     install : false,

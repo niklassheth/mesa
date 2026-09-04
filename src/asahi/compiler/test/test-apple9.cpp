@@ -114,13 +114,13 @@ TEST(Apple9Machine, FullFileBoundaries)
 TEST(Apple9Machine, ReciprocalHasAsymmetricRegisterFiles)
 {
    EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_DEST, 95, 32));
+      AGX_APPLE9_ENC_FLOAT_SPECIAL, AGX_APPLE9_OPERAND_DEST, 95, 32));
    EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_DEST, 96, 32));
+      AGX_APPLE9_ENC_FLOAT_SPECIAL, AGX_APPLE9_OPERAND_DEST, 96, 32));
    EXPECT_TRUE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_SRC0, 63, 32));
+      AGX_APPLE9_ENC_FLOAT_SPECIAL, AGX_APPLE9_OPERAND_SRC0, 63, 32));
    EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
-      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_OPERAND_SRC0, 64, 32));
+      AGX_APPLE9_ENC_FLOAT_SPECIAL, AGX_APPLE9_OPERAND_SRC0, 64, 32));
 }
 
 TEST(Apple9Packer, ReciprocalPacksHandoffLifetimeAndNativeResultHint)
@@ -128,7 +128,7 @@ TEST(Apple9Packer, ReciprocalPacksHandoffLifetimeAndNativeResultHint)
    const uint8_t phys[] = {18, 7};
    agx_apple9_vir_instr reciprocal = {
       .op = AGX_APPLE9_VIR_FRCP,
-      .encoding = AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
+      .encoding = AGX_APPLE9_ENC_FLOAT_SPECIAL,
       .dest = 0,
       .dest_components = 1,
       .src = {1},
@@ -838,7 +838,7 @@ TEST(Apple9Machine, DependencyLayoutsAreEncodingProperties)
       {AGX_APPLE9_ENC_INT_MAD_EXTENDED, AGX_APPLE9_DEPENDENCY_MASK_12_17},
       {AGX_APPLE9_ENC_UINT_TO_FLOAT, AGX_APPLE9_DEPENDENCY_MASK_12_17},
       {AGX_APPLE9_ENC_FLOAT_TO_UINT, AGX_APPLE9_DEPENDENCY_MASK_12_17},
-      {AGX_APPLE9_ENC_FLOAT_RECIPROCAL, AGX_APPLE9_DEPENDENCY_MASK_12_17},
+      {AGX_APPLE9_ENC_FLOAT_SPECIAL, AGX_APPLE9_DEPENDENCY_MASK_12_17},
       {AGX_APPLE9_ENC_SHIFT_EXTENDED, AGX_APPLE9_DEPENDENCY_MASK_12_17},
       {AGX_APPLE9_ENC_DEVICE_STORE, AGX_APPLE9_DEPENDENCY_MASK_12_17},
       {AGX_APPLE9_ENC_LOGIC_EXTENDED, AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63},
@@ -1032,7 +1032,7 @@ TEST(Apple9Packer, IntegerFamilyUsesSharedOneHotDependencyLayout)
       },
       {
          .op = AGX_APPLE9_VIR_FRCP,
-         .encoding = AGX_APPLE9_ENC_FLOAT_RECIPROCAL,
+         .encoding = AGX_APPLE9_ENC_FLOAT_SPECIAL,
          .dest = 0,
          .src = {1},
          .immediate = 0x02,
@@ -1486,7 +1486,7 @@ TEST(Apple9Vir, ReciprocalUsesSharedOneHotDependencySlots)
 
    uint32_t reciprocal =
       agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_FRCP,
-                          AGX_APPLE9_ENC_FLOAT_RECIPROCAL, &loads[4], 1, 0x02);
+                          AGX_APPLE9_ENC_FLOAT_SPECIAL, &loads[4], 1, 0x02);
    for (unsigned i = 0; i < 4; ++i) {
       uint32_t sources[] = {loads[i], ordinary};
       agx_apple9_vir_emit(&program, AGX_APPLE9_VIR_FADD,
@@ -4926,6 +4926,93 @@ TEST(Apple9Compiler, ReciprocalUsesNativeHandoffAndLifetimeForms)
       EXPECT_EQ(profile.abi, AGX_APPLE9_COMPUTE_ABI_SSBO8_SUPERSET);
       free(compiled.binary);
       ralloc_free(nir);
+   }
+}
+
+TEST(Apple9Compiler, SpecialFunctionsUseAllocatedOperandsAndLifetimes)
+{
+   const nir_op ops[] = {nir_op_frsq, nir_op_fsqrt, nir_op_fexp2, nir_op_flog2,
+                         nir_op_ffloor, nir_op_fceil, nir_op_ftrunc,
+                         nir_op_fround_even, nir_op_fsin_factor_agx};
+   for (nir_op op : ops) {
+      for (unsigned shape = 0; shape < 3; ++shape) {
+         SCOPED_TRACE(testing::Message() << "op=" << op << " shape=" << shape);
+         nir_builder b = apple9_compute_builder("apple9_special");
+         b.shader->info.num_ssbos = 2;
+         nir_def *gid = apple9_global_id_x(&b);
+         nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1),
+                                     nir_imul_imm(&b, gid, 4),
+                                     .access = ACCESS_NON_WRITEABLE);
+         if (shape == 2)
+            x = nir_fadd_imm(&b, x, 0.25);
+         nir_def *y = nir_build_alu(&b, op, x, NULL, NULL, NULL);
+         apple9_store_output(&b, gid, y);
+         if (shape == 1)
+            apple9_store_output(&b, nir_iadd_imm(&b, gid, 64),
+                                nir_fadd(&b, y, x));
+         struct agx_shader_part compiled = {};
+         struct agx_apple9_compute_profile profile = {};
+         const char *reason = nullptr;
+         ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+            << (reason ? reason : "no diagnostic");
+         const uint8_t *bytes = (const uint8_t *)compiled.binary;
+         unsigned found = 0;
+         for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i) {
+            const uint8_t *p = bytes + i;
+            if ((p[0] != 0xaf && p[0] != 0x2f) || p[7] != 0x40 || p[9] != 0)
+               continue;
+            ++found;
+            if (op == nir_op_fsqrt || op == nir_op_fsin_factor_agx) {
+               EXPECT_EQ(p[0], 0x2f);
+               EXPECT_EQ(p[1], op == nir_op_fsqrt ? 1 : 3);
+               EXPECT_EQ(p[8], 0);
+            }
+            EXPECT_LT(p[3] >> 1, 96u);
+            EXPECT_LT(p[5] >> 2, 64u);
+            EXPECT_EQ(p[6], shape == 1 || op == nir_op_fsqrt ? 0x90 : 0xb0);
+            EXPECT_EQ(p[2], shape == 2 ? 0x54 : 0x56);
+         }
+         EXPECT_EQ(found, 1u);
+         free(compiled.binary);
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST(Apple9Compiler, TrigonometryLowersFromOrdinaryNir)
+{
+   for (nir_op op : {nir_op_fsin, nir_op_fcos}) {
+      nir_builder b = apple9_compute_builder("apple9_trigonometry");
+      b.shader->info.num_ssbos = 2;
+      nir_def *gid = apple9_global_id_x(&b);
+      nir_def *x = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1),
+                                  nir_imul_imm(&b, gid, 4),
+                                  .access = ACCESS_NON_WRITEABLE);
+      apple9_store_output(&b, gid, nir_build_alu(&b, op, x, NULL, NULL, NULL));
+      /* Two independent reductions must fit together without CSE keeping
+       * shared constants live across both complete expression trees. */
+      nir_def *other = nir_load_ssbo(&b, 1, 32, nir_imm_int(&b, 1),
+                                    nir_imul_imm(&b, nir_iadd_imm(&b, gid, 37), 4),
+                                    .access = ACCESS_NON_WRITEABLE);
+      apple9_store_output(&b, nir_iadd_imm(&b, gid, 64),
+                          nir_build_alu(&b, op, other, NULL, NULL, NULL));
+      struct agx_shader_part compiled = {};
+      struct agx_apple9_compute_profile profile = {};
+      const char *reason = nullptr;
+      ASSERT_TRUE(agx_compile_apple9_tiny(b.shader, &compiled, &profile, &reason))
+         << (reason ? reason : "no diagnostic");
+      const uint8_t *bytes = (const uint8_t *)compiled.binary;
+      unsigned factors = 0;
+      for (unsigned i = 0; i + 10 <= compiled.info.binary_size; ++i) {
+         const uint8_t *p = bytes + i;
+         if (p[0] == 0x2f && p[1] == 3 && p[7] == 0x40 && p[9] == 0) {
+            ++factors;
+            EXPECT_EQ(p[6], 0x90); /* The multiply still needs its phase. */
+         }
+      }
+      EXPECT_EQ(factors, 4u); /* Sine and complement for each reduction. */
+      free(compiled.binary);
+      ralloc_free(b.shader);
    }
 }
 

@@ -407,6 +407,15 @@ apple9_instruction_is_in_subset(nir_instr *instr)
       case nir_op_fadd:
       case nir_op_fsub:
       case nir_op_fmul:
+      case nir_op_frsq:
+      case nir_op_fsqrt:
+      case nir_op_fsin_factor_agx:
+      case nir_op_fexp2:
+      case nir_op_flog2:
+      case nir_op_ffloor:
+      case nir_op_fceil:
+      case nir_op_ftrunc:
+      case nir_op_fround_even:
       case nir_op_frcp:
       case nir_op_fmin:
       case nir_op_fmax:
@@ -721,7 +730,7 @@ apple9_dag_ceil_udiv(struct apple9_dag_lower *lower, uint32_t numerator,
                       &divisor, 1, 0);
    uint32_t reciprocal =
       apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
-                      AGX_APPLE9_ENC_FLOAT_RECIPROCAL, &divisor_f, 1, 0x03);
+                      AGX_APPLE9_ENC_FLOAT_SPECIAL, &divisor_f, 1, 0x03);
    uint32_t half = apple9_dag_imm(lower, 0x3f000000);
    uint32_t estimate_sources[3] = {numerator_f, reciprocal, half};
    uint32_t estimate =
@@ -1400,11 +1409,36 @@ apple9_lower_dag_scalar(struct apple9_dag_lower *lower, nir_scalar scalar)
          } else if (op == nir_op_b2i32) {
             value = apple9_lower_bool_scalar(
                lower, nir_scalar_chase_alu_src(scalar, 0));
-         } else if (op == nir_op_frcp) {
+         } else if (op == nir_op_fsqrt) {
+            uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
+            if (source != AGX_APPLE9_VREG_INVALID) {
+               uint32_t factor = apple9_dag_emit(
+                  lower, AGX_APPLE9_VIR_FSQRT_FACTOR,
+                  AGX_APPLE9_ENC_FLOAT_SPECIAL, &source, 1, 0x03);
+               uint32_t sources[] = {source, factor};
+               value = apple9_dag_emit(lower, AGX_APPLE9_VIR_FMUL,
+                                      AGX_APPLE9_ENC_FLOAT2_COMPACT, sources, 2, 0);
+            }
+         } else if (op == nir_op_frcp || op == nir_op_frsq ||
+                    op == nir_op_fsin_factor_agx ||
+                    op == nir_op_fexp2 ||
+                    op == nir_op_flog2 || op == nir_op_ffloor ||
+                    op == nir_op_fceil || op == nir_op_ftrunc ||
+                    op == nir_op_fround_even) {
+            enum agx_apple9_vir_opcode special =
+               op == nir_op_frcp ? AGX_APPLE9_VIR_FRCP :
+               op == nir_op_frsq ? AGX_APPLE9_VIR_FRSQ :
+               op == nir_op_fsin_factor_agx ? AGX_APPLE9_VIR_FSIN_FACTOR :
+               op == nir_op_fexp2 ? AGX_APPLE9_VIR_FEXP2 :
+               op == nir_op_flog2 ? AGX_APPLE9_VIR_FLOG2 :
+               op == nir_op_ffloor ? AGX_APPLE9_VIR_FFLOOR :
+               op == nir_op_fceil ? AGX_APPLE9_VIR_FCEIL :
+               op == nir_op_ftrunc ? AGX_APPLE9_VIR_FTRUNC :
+                                    AGX_APPLE9_VIR_FROUND_EVEN;
             uint32_t source = apple9_lower_dag_source(lower, scalar, 0);
             if (source != AGX_APPLE9_VREG_INVALID)
-               value = apple9_dag_emit(lower, AGX_APPLE9_VIR_FRCP,
-                                       AGX_APPLE9_ENC_FLOAT_RECIPROCAL, &source,
+               value = apple9_dag_emit(lower, special,
+                                       AGX_APPLE9_ENC_FLOAT_SPECIAL, &source,
                                        1, 0x03);
          } else if (op == nir_op_u2f32 || op == nir_op_i2f32 ||
                     op == nir_op_f2i32 || op == nir_op_f2u32) {
@@ -2094,29 +2128,29 @@ apple9_infer_device_load_index_contracts(struct agx_apple9_vir_program *program)
 }
 
 static void
-apple9_infer_reciprocal_result_hints(struct agx_apple9_vir_program *program)
+apple9_infer_special_result_hints(struct agx_apple9_vir_program *program)
 {
    for (unsigned i = 0; i < program->instruction_count; ++i) {
-      struct agx_apple9_vir_instr *reciprocal = &program->instructions[i];
-      if (reciprocal->op != AGX_APPLE9_VIR_FRCP)
+      struct agx_apple9_vir_instr *special = &program->instructions[i];
+      if (special->encoding != AGX_APPLE9_ENC_FLOAT_SPECIAL)
          continue;
 
       /* Native Metal selects 0x02 when the result goes directly to memory
        * and 0x03 when an ALU-family instruction consumes it. Hardware shows
        * bit 0 is output-inert in the measured low-pressure forms, but keep
        * the native distinction until its pressure behavior is understood. */
-      reciprocal->immediate = 0x02;
+      special->immediate = 0x02;
       for (unsigned j = i + 1; j < program->instruction_count; ++j) {
          const struct agx_apple9_vir_instr *consumer =
             &program->instructions[j];
          bool reads_result = false;
          for (unsigned s = 0; s < consumer->nr_srcs; ++s)
-            reads_result |= consumer->src[s] == reciprocal->dest;
+            reads_result |= consumer->src[s] == special->dest;
          if (!reads_result)
             continue;
 
          if (consumer->op != AGX_APPLE9_VIR_DEVICE_STORE) {
-            reciprocal->immediate = 0x03;
+            special->immediate = 0x03;
             break;
          }
       }
@@ -3334,7 +3368,7 @@ apple9_compile_dag(nir_shader *nir, struct agx_shader_part *out,
    if (!agx_apple9_assign_vir_scoreboard_slots(&lower.program, reason))
       goto fail;
 
-   apple9_infer_reciprocal_result_hints(&lower.program);
+   apple9_infer_special_result_hints(&lower.program);
 
    /* The byte/subword source selector is not generalized yet.  Scoreboard
     * materialization may have replaced the original load SSA, so constrain
@@ -3560,6 +3594,8 @@ agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
                         struct agx_apple9_compute_profile *profile,
                         const char **reason_out)
 {
+   agx_nir_lower_apple9_math(nir);
+
    /* Make every source-level continue an ordinary structured masked region
     * ending at the loop latch. This upstream NIR pass preserves SSA and leaves
     * one backedge, matching the Apple9 loop machine directly. */

@@ -1585,6 +1585,12 @@ unop("fcos_mdg", tfloat, "cosf(3.141592653589793 * src0)")
 # additional ALU that NIR may be able to optimize.
 unop("fsin_agx", tfloat, "sinf(src0 * (6.2831853/4.0))")
 
+# Apple9's reduced-angle sine factor (EXP-M4-55). A separate multiply by
+# src0 yields sin(pi*src0/2). Unlike fsin_agx, this does not fold quadrants.
+# Hardware approximates the factor; the expression supplies constant folding.
+unop("fsin_factor_agx", tfloat32,
+     "fabsf(src0) > 1.0f ? NAN : (src0 == 0.0f ? 1.5707963267948966f : sin(1.5707963267948966 * src0) / src0)")
+
 # AGX specific bitfield extraction from a pair of 32bit registers.
 # src0,src1: the two registers
 # src2: bit position of the LSB of the bitfield

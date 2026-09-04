@@ -2762,35 +2762,74 @@ pack_f2i32(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
 }
 
 static bool
-pack_frcp(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
-          struct agx_apple9_packed_instruction *packed)
+pack_fspecial(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
+              struct agx_apple9_packed_instruction *packed)
 {
    const unsigned dst = phys[instruction->dest];
    const unsigned src = phys[instruction->src[0]];
-   if (instruction->encoding != AGX_APPLE9_ENC_FLOAT_RECIPROCAL ||
+   if (instruction->encoding != AGX_APPLE9_ENC_FLOAT_SPECIAL ||
        instruction->nr_srcs != 1 || dst >= AGX_APPLE9_GPR_COUNT || src >= 64 ||
        (instruction->immediate != 0x02 && instruction->immediate != 0x03))
       return false;
 
-   /* EXP-M4-41 identifies this ten-byte form as the accurate FP32
-    * reciprocal. Its pending dependency uses the shared one-hot bits 12..17;
-    * the unmodified 0x54 form therefore means no pending dependency.
-    *
-    * Byte 4 bit 1 publishes the result. Bit 0 is Metal's stable distinction
-    * between direct-store and following-ALU shapes; low-pressure mutations
-    * show it is not required for arithmetic, but preserve the native choice.
-    * Byte 6 bit 4 is the independently hardware-proven source release bit. */
+   /* The function class and datapath jointly select the operation. In
+    * particular, class 0 on the ordinary SFU datapath is not reciprocal.
+    * Source lifetime and pending dependencies are independent of selection.
+    * EXP-M4-41/42 establish reciprocal and the mask; EXP-0026/0165/0237
+    * document the other datapaths and direct-round selector family. */
+   unsigned family = 0, function = 0;
+   unsigned precision = 0x40, rounding = 0;
+   switch (instruction->op) {
+   case AGX_APPLE9_VIR_FRCP:
+      family = 1;
+      precision = 0x48;
+      rounding = 0x20;
+      break;
+   case AGX_APPLE9_VIR_FRSQ:
+      family = 1;
+      function = 1;
+      break;
+   case AGX_APPLE9_VIR_FSQRT_FACTOR:
+      function = 1;
+      break;
+   case AGX_APPLE9_VIR_FSIN_FACTOR:
+      function = 3;
+      break;
+   case AGX_APPLE9_VIR_FEXP2:
+      family = 1;
+      function = 2;
+      break;
+   case AGX_APPLE9_VIR_FLOG2:
+      function = 2;
+      break;
+   case AGX_APPLE9_VIR_FFLOOR:
+      rounding = 2;
+      break;
+   case AGX_APPLE9_VIR_FCEIL:
+      rounding = 4;
+      break;
+   case AGX_APPLE9_VIR_FTRUNC:
+      rounding = 6;
+      break;
+   case AGX_APPLE9_VIR_FROUND_EVEN:
+      break;
+   default:
+      return false;
+   }
+   /* EXP-M4-54 T8132 matched Metal and destructive source-reuse tests:
+    * ordinary SFU uses bit 5 for source release (0x90 -> 0xb0), whereas
+    * reciprocal's distinct datapath uses bit 4 (0x00 -> 0x10).
+    * Ordinary SFU bits [4:3] select BF16/FP16/FP32 as 0/1/2. Clearing bit 4
+    * changes FP32 to BF16, reading the low 16 bits (often zero), not retaining
+    * FP32. Reciprocal instead places source type in byte 7 bits [3:2].
+    * Both forms consume pending producers through the independent mask. */
    const uint8_t bytes[10] = {
-      0xaf,
-      0x00,
-      0x54,
-      dst << 1,
-      instruction->immediate,
-      src << 2,
-      (instruction->live_after_mask & 1u) ? 0x00 : 0x10,
-      0x48,
-      0x20,
-      0x00,
+      0x2f | (family << 7), function, 0x54, dst << 1,
+      instruction->immediate, src << 2,
+      instruction->op == AGX_APPLE9_VIR_FRCP
+         ? ((instruction->live_after_mask & 1u) ? 0x00 : 0x10)
+         : ((instruction->live_after_mask & 1u) ? 0x90 : 0xb0),
+      precision, rounding, 0,
    };
    packed_init(packed, bytes, sizeof(bytes));
    return true;
@@ -3775,7 +3814,16 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_F2U32:
       return pack_f2i32(instruction, phys, packed);
    case AGX_APPLE9_VIR_FRCP:
-      return pack_frcp(instruction, phys, packed);
+   case AGX_APPLE9_VIR_FRSQ:
+   case AGX_APPLE9_VIR_FSQRT_FACTOR:
+   case AGX_APPLE9_VIR_FSIN_FACTOR:
+   case AGX_APPLE9_VIR_FEXP2:
+   case AGX_APPLE9_VIR_FLOG2:
+   case AGX_APPLE9_VIR_FFLOOR:
+   case AGX_APPLE9_VIR_FCEIL:
+   case AGX_APPLE9_VIR_FTRUNC:
+   case AGX_APPLE9_VIR_FROUND_EVEN:
+      return pack_fspecial(instruction, phys, packed);
    case AGX_APPLE9_VIR_ISHR:
       return pack_ishr_imm(instruction, phys, packed);
    case AGX_APPLE9_VIR_IMUL:

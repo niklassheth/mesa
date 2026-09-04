@@ -16,6 +16,8 @@
 extern "C" {
 #endif
 
+bool agx_nir_lower_apple9_math(nir_shader *shader);
+
 /*
  * Compile the deliberately bounded Apple9 straight-line NIR subset.
  *

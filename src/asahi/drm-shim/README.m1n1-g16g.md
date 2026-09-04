@@ -44,7 +44,8 @@ fails during compilation and the triangle is not a regression gate.
 
 The supported NIR surface is intentionally limited. It includes arbitrary
 u32 constants; integer add/subtract, negate, multiply, AND/OR/XOR/NOT, shifts,
-signed and unsigned min/max; core float arithmetic, accurate FP32 reciprocal,
+signed and unsigned min/max; core float arithmetic, FP32 reciprocal, reciprocal
+square root, exp2, log2, floor, ceil, truncation, round-to-even, sqrt, sin, cos,
 and FMA; comparisons, straight-line select, recursively nested structured
 if/else, and general structured loops with loop-carried values, `break`,
 `continue`, and nesting within the six encoded predicate scratch banks;
@@ -105,6 +106,46 @@ storage for every access the shader can make.
 Early return, general division/modulo, spilling, and unmeasured
 package/resource forms reject rather than falling back to capture-assigned
 registers or opaque native mains.
+
+### FP32 math
+
+The special functions use semantic VIR operations, allocated registers, and
+the ordinary pending-producer dependency mask. Both pending and materialized
+sources support retained and final uses. The SFU source-control byte (byte 6)
+uses `0x90` for retain and `0xb0` for final use. Reciprocal has a distinct form
+using `0x00` and `0x10`. Applying reciprocal's bit-4 rule to the ordinary SFU
+selects `0xa0`, which reads a **bfloat16** source from the low 16 bits instead
+of FP32. Those bits were zero in many early inputs. EXP-M4-54 confirms this
+with matched native BF16/FP16/FP32 Metal shaders and packed-input mutations.
+Ordinary-SFU source type occupies byte 6 bits [4:3], while reciprocal places
+it in byte 7 bits [3:2]. The lifetime difference is part of distinct operand
+layouts, independent of the scoreboard; no blanket source-copy workaround is
+used. Ordinary-SFU source negation is byte 8 bit 0 and absolute value is byte 7
+bit 7. Earlier positive-only rsqrt/log2 probes mistook negation for a NaN control.
+
+`sqrt` uses the `0x2f` class-1 sqrt factor followed by a multiply. EXP-M4-55
+establishes that this factor returns 1 for signed zero and positive infinity,
+and the usual rsqrt factor for positive normal inputs. Multiplication by the
+input supplies fast sqrt with signed-zero and infinity handling built in.
+The tested arithmetic mode treats denormal SFU inputs and outputs as signed
+zero. NaN results are checked by classification; payload propagation is not
+promised. The source stays live across the factor until the multiply, using
+the allocator's ordinary liveness handling.
+
+`sin` and `cos` use the `0x2f` class-3 factor, represented by the FP32 NIR
+operation `fsin_factor_agx`: `sin(pi*x/2)/x` on [-1,1], with the pi/2 limit at
+zero and NaN outside that interval. An independently constructed 256-bit
+fixed-point expansion of 2/pi preserves quadrant information across the
+finite FP32 range. The two-part reduced phase feeds factor-and-multiply
+operations for sine and its complement for cosine. FMA corrections preserve
+the phase residual and account for complement subtraction rounding. No Taylor
+polynomial remains. This opcode evaluates reduced angles; it does not perform
+range reduction or quadrant selection.
+
+Tiny sine inputs and signed zero are preserved by bit selection; infinities
+and NaNs return NaN. Full-range reduction still has substantial code and
+register cost. Large combined expressions can exceed the current allocator's
+no-spill register budget.
 
 ## External development inputs
 
@@ -226,7 +267,8 @@ src/asahi/drm-shim/piglit/run.sh direct
 ```
 
 The default one-boot sequence omits `archive-cross-program-sequence`,
-`program-lifecycle-stress`, and the 24-program `two-source-comparisons` matrix
+`program-lifecycle-stress`, the math matrix, and the 24-program
+`two-source-comparisons` matrix
 to reduce pressure on the temporary append-only 64 KiB shader archive. As the
 ordinary compiler corpus grows, a complete default run can still reach that
 temporary limit; run the named control-flow and lifecycle batches separately
@@ -290,6 +332,28 @@ the ceiling-division lowering. `ceil-div-grid-domain` executes the compiler's
 complete U2F/reciprocal/FMA/F2U/multiply/compare/correct sequence for eight
 numerators at every denominator, including zero, remainder boundaries, and
 the maximum legal `65535 * D`; all 8,192 exact integer outputs pass on T8132.
+
+The separately runnable math cases are `sfu-rsqrt`, `sfu-sqrt`, `sfu-exp2`,
+`sfu-log2`, `sfu-floor`, `sfu-ceil`, `sfu-trunc`, and `sfu-round-even`, plus a
+`-materialized` variant of each. Every case checks 4,096 inputs: a retained
+source, its result, a separate final-use pending input, and an ALU consumer
+of the result, totaling 16,384 values plus immutable inputs and buffer guards.
+Rounding functions require exact results; rsqrt/sqrt/exp2/log2 allow two ULPs
+against host double-precision libm rounded to FP32. The ALU consumer is checked
+against the independently validated rounded SFU result. Directed cases cover
+signed zero, infinities, NaNs, denormals, exponent extremes, and rounding ties;
+the remaining inputs are deterministic randomized values.
+
+Run `math-sin`, `math-cos`, `math-sin-boundaries`, `math-cos-boundaries`,
+`math-sin-reduced`, and `math-cos-reduced` as another batch after a fresh
+chainload. They use the same buffer checks and
+two-ULP numerical tolerance. Boundary cases sample neighboring FP32 values at
+small multiples of pi/2 and at powers of two times pi/2 through exponent 127,
+with both signs. Reduced cases densely sample [-pi,pi], exercising both factor
+arguments and the small-input path. This is sampled numerical validation, not an exhaustive
+two-ULP guarantee over all FP32 bit patterns. `--list` includes all math cases;
+`--list-default` excludes them to keep archive-heavy batches separate.
+
 `superset-1` through `superset-8` specifically compile distinct ordinary GLSL
 programs and exercise every active-resource occupancy of the shared carrier.
 `device-atomic-native-shape` reproduces the own-source eight-resource Metal

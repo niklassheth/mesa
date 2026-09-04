@@ -315,9 +315,9 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
-   [AGX_APPLE9_ENC_FLOAT_RECIPROCAL] =
+   [AGX_APPLE9_ENC_FLOAT_SPECIAL] =
       {
-         .name = "float_reciprocal",
+         .name = "float_special",
          .length = 10,
          .operand_count = 2,
          .allocator_safe = true,

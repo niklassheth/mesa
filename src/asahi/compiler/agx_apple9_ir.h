@@ -57,6 +57,17 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_FMAX,
    AGX_APPLE9_VIR_FMA,
    AGX_APPLE9_VIR_FRCP,
+   AGX_APPLE9_VIR_FRSQ,
+   /* rsqrt-like factor with 1 at signed zero and +infinity. */
+   AGX_APPLE9_VIR_FSQRT_FACTOR,
+   /* sin(pi*x/2)/x on [-1,1], with limit pi/2 at zero. */
+   AGX_APPLE9_VIR_FSIN_FACTOR,
+   AGX_APPLE9_VIR_FEXP2,
+   AGX_APPLE9_VIR_FLOG2,
+   AGX_APPLE9_VIR_FFLOOR,
+   AGX_APPLE9_VIR_FCEIL,
+   AGX_APPLE9_VIR_FTRUNC,
+   AGX_APPLE9_VIR_FROUND_EVEN,
    AGX_APPLE9_VIR_SELECT,
    AGX_APPLE9_VIR_COLLECT,
    AGX_APPLE9_VIR_MERGE,
