@@ -59,8 +59,36 @@ enum agx_apple9_vir_opcode {
    AGX_APPLE9_VIR_FRCP,
    AGX_APPLE9_VIR_SELECT,
    AGX_APPLE9_VIR_COLLECT,
+   AGX_APPLE9_VIR_MERGE,
+   AGX_APPLE9_VIR_MASKED_COPY,
+   AGX_APPLE9_VIR_PREDICATE_COMPARE,
+   AGX_APPLE9_VIR_EXEC_MASK_PUSH,
+   AGX_APPLE9_VIR_EXEC_MASK_ELSE,
+   AGX_APPLE9_VIR_EXEC_MASK_POP,
    AGX_APPLE9_VIR_DEVICE_STORE,
 };
+
+enum agx_apple9_predicate_condition {
+   AGX_APPLE9_PREDICATE_FGT = 0x02,
+   AGX_APPLE9_PREDICATE_FLT = 0x03,
+   AGX_APPLE9_PREDICATE_UGT = 0x04,
+   AGX_APPLE9_PREDICATE_ULT = 0x05,
+   AGX_APPLE9_PREDICATE_IGT = 0x06,
+   AGX_APPLE9_PREDICATE_ILT = 0x07,
+};
+
+enum agx_apple9_predicate_extended_condition {
+   AGX_APPLE9_PREDICATE_EXT_FEQ = 0x00,
+   AGX_APPLE9_PREDICATE_EXT_FGE_SEQUENCE = 0x02,
+   AGX_APPLE9_PREDICATE_EXT_FLE_SEQUENCE = 0x03,
+   AGX_APPLE9_PREDICATE_EXT_IEQ = 0x07,
+};
+
+/* These are independent controls.  PREDICATE_INVERT complements the
+ * transient predicate produced by either comparison form.  EXEC_MASK_INVERT
+ * complements that predicate when it is consumed by EXEC_MASK_PUSH. */
+#define AGX_APPLE9_PREDICATE_INVERT (1u << 8)
+#define AGX_APPLE9_EXEC_MASK_INVERT (1u << 0)
 
 enum agx_apple9_select_condition {
    AGX_APPLE9_SELECT_FEQ = 0x00,
@@ -158,6 +186,11 @@ struct agx_apple9_vir_instr {
     * destination and carry their ordered data values in src[0..N-1]. */
    uint8_t memory_components;
    uint32_t src[AGX_APPLE9_MAX_VIR_SRCS];
+   /* MASKED_COPY is a predecessor-edge assignment into storage defined by a
+    * MERGE pseudo.  Keeping this distinct from dest preserves SSA: MERGE has
+    * the single virtual definition, while each masked arm conditionally writes
+    * its allocated physical register. */
+   uint32_t target;
    uint32_t immediate;
    uint8_t nr_srcs;
 
@@ -238,6 +271,12 @@ uint32_t agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
                              const uint32_t *src, unsigned nr_srcs,
                              uint32_t immediate);
 
+bool agx_apple9_vir_emit_side_effect(struct agx_apple9_vir_program *program,
+                                     enum agx_apple9_vir_opcode op,
+                                     enum agx_apple9_encoding encoding,
+                                     const uint32_t *src, unsigned nr_srcs,
+                                     uint32_t immediate);
+
 uint32_t agx_apple9_vir_input(struct agx_apple9_vir_program *program,
                               unsigned phys);
 uint32_t agx_apple9_vir_emit_device_load(
@@ -252,6 +291,9 @@ uint32_t agx_apple9_vir_emit_device_load_vector(
 uint32_t agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
                                     const uint32_t *src,
                                     unsigned components);
+uint32_t agx_apple9_vir_emit_merge(struct agx_apple9_vir_program *program);
+bool agx_apple9_vir_emit_masked_copy(struct agx_apple9_vir_program *program,
+                                    uint32_t target, uint32_t source);
 bool agx_apple9_vir_emit_device_store(
    struct agx_apple9_vir_program *program, unsigned binding, uint32_t index,
    const uint32_t *data, unsigned components, unsigned bits);

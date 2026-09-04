@@ -196,12 +196,42 @@ agx_apple9_vir_emit(struct agx_apple9_vir_program *program,
       .encoding = encoding,
       .dest = dest,
       .dest_components = 1,
+      .target = AGX_APPLE9_VREG_INVALID,
       .immediate = immediate,
       .nr_srcs = nr_srcs,
    };
    for (unsigned i = 0; i < nr_srcs; ++i)
       instruction->src[i] = src[i];
    return dest;
+}
+
+bool
+agx_apple9_vir_emit_side_effect(struct agx_apple9_vir_program *program,
+                                enum agx_apple9_vir_opcode op,
+                                enum agx_apple9_encoding encoding,
+                                const uint32_t *src, unsigned nr_srcs,
+                                uint32_t immediate)
+{
+   if (program == NULL || nr_srcs > AGX_APPLE9_MAX_VIR_SRCS)
+      return false;
+
+   struct agx_apple9_vir_instr *instruction =
+      apple9_vir_append_instruction(program);
+   if (instruction == NULL)
+      return false;
+
+   *instruction = (struct agx_apple9_vir_instr){
+      .op = op,
+      .encoding = encoding,
+      .dest = AGX_APPLE9_VREG_INVALID,
+      .target = AGX_APPLE9_VREG_INVALID,
+      .immediate = immediate,
+      .nr_srcs = nr_srcs,
+   };
+   for (unsigned i = 0; i < nr_srcs; ++i)
+      instruction->src[i] = src[i];
+
+   return true;
 }
 
 uint32_t
@@ -368,12 +398,44 @@ agx_apple9_vir_emit_collect(struct agx_apple9_vir_program *program,
       .encoding = AGX_APPLE9_ENC_PSEUDO,
       .dest = dest,
       .dest_components = components,
+      .target = AGX_APPLE9_VREG_INVALID,
       .nr_srcs = components,
    };
    for (unsigned c = 0; c < components; ++c)
       instruction->src[c] = src[c];
 
    return dest;
+}
+
+uint32_t
+agx_apple9_vir_emit_merge(struct agx_apple9_vir_program *program)
+{
+   return agx_apple9_vir_emit(program, AGX_APPLE9_VIR_MERGE,
+                              AGX_APPLE9_ENC_PSEUDO, NULL, 0, 0);
+}
+
+bool
+agx_apple9_vir_emit_masked_copy(struct agx_apple9_vir_program *program,
+                                uint32_t target, uint32_t source)
+{
+   if (program == NULL || target >= program->value_count ||
+       source >= program->value_count)
+      return false;
+
+   struct agx_apple9_vir_instr *instruction =
+      apple9_vir_append_instruction(program);
+   if (instruction == NULL)
+      return false;
+
+   *instruction = (struct agx_apple9_vir_instr){
+      .op = AGX_APPLE9_VIR_MASKED_COPY,
+      .encoding = AGX_APPLE9_ENC_LOGIC_EXTENDED,
+      .dest = AGX_APPLE9_VREG_INVALID,
+      .src = {source},
+      .target = target,
+      .nr_srcs = 1,
+   };
+   return true;
 }
 
 static bool
@@ -438,6 +500,7 @@ agx_apple9_vir_emit_device_store(struct agx_apple9_vir_program *program,
       .op = AGX_APPLE9_VIR_DEVICE_STORE,
       .encoding = AGX_APPLE9_ENC_DEVICE_STORE,
       .dest = AGX_APPLE9_VREG_INVALID,
+      .target = AGX_APPLE9_VREG_INVALID,
       .memory_bits = bits,
       .memory_components = components,
       .immediate = binding,
@@ -604,12 +667,16 @@ encoding_tuple(const struct agx_apple9_vir_instr *instruction,
    for (unsigned i = 0; i < info->operand_count; ++i)
       gpr_operand_count += !!(info->operands[i].files & AGX_APPLE9_FILE_GPR);
 
-   if (gpr_operand_count != instruction->nr_srcs + 1)
+   const bool has_destination =
+      instruction->dest != AGX_APPLE9_VREG_INVALID;
+   if (gpr_operand_count != instruction->nr_srcs + has_destination)
       return false;
 
-   gprs[0] = phys[instruction->dest];
+   unsigned base = 0;
+   if (has_destination)
+      gprs[base++] = phys[instruction->dest];
    for (unsigned i = 0; i < instruction->nr_srcs; ++i)
-      gprs[i + 1] = phys[instruction->src[i]];
+      gprs[base + i] = phys[instruction->src[i]];
    *count = gpr_operand_count;
    return true;
 }
@@ -626,6 +693,15 @@ static const struct agx_apple9_vir_instr *
 apple9_vir_producer_instruction(const struct agx_apple9_vir_program *program,
                                 uint32_t value);
 
+static bool
+apple9_vir_is_control_side_effect(enum agx_apple9_vir_opcode op)
+{
+   return op == AGX_APPLE9_VIR_PREDICATE_COMPARE ||
+          op == AGX_APPLE9_VIR_EXEC_MASK_PUSH ||
+          op == AGX_APPLE9_VIR_EXEC_MASK_ELSE ||
+          op == AGX_APPLE9_VIR_EXEC_MASK_POP;
+}
+
 bool
 agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
                                    const char **reason)
@@ -638,6 +714,7 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
       return false;
    }
 
+   unsigned execution_mask_depth = 0;
    for (unsigned i = 0; i < program->instruction_count; ++i) {
       const struct agx_apple9_vir_instr *instruction =
          &program->instructions[i];
@@ -693,6 +770,138 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
             return false;
          }
 
+         continue;
+      }
+
+      if (instruction->op == AGX_APPLE9_VIR_MERGE) {
+         const bool valid =
+            instruction->encoding == AGX_APPLE9_ENC_PSEUDO &&
+            instruction->dest != AGX_APPLE9_VREG_INVALID &&
+            instruction->dest_components == 1 && instruction->nr_srcs == 0 &&
+            instruction->target == AGX_APPLE9_VREG_INVALID &&
+            instruction->immediate == 0 && instruction->memory_bits == 0 &&
+            instruction->memory_components == 0 &&
+            instruction->producer_scoreboard_slot ==
+               AGX_APPLE9_SCOREBOARD_SLOT_NONE &&
+            instruction->scoreboard_slot == AGX_APPLE9_SCOREBOARD_SLOT_NONE &&
+            instruction->dest < program->value_count &&
+            program->phys[instruction->dest] <= APPLE9_LAST_ALLOCATABLE_GPR;
+         if (!valid) {
+            if (reason != NULL)
+               *reason = "Apple9 MERGE has an invalid VIR contract";
+            return false;
+         }
+         continue;
+      }
+
+      if (instruction->op == AGX_APPLE9_VIR_MASKED_COPY) {
+         const struct agx_apple9_vir_instr *target_producer =
+            apple9_vir_producer_instruction(program, instruction->target);
+         const unsigned target = instruction->target < program->value_count
+                                    ? program->phys[instruction->target]
+                                    : AGX_APPLE9_PHYS_INVALID;
+         const unsigned source =
+            instruction->nr_srcs == 1 &&
+                  instruction->src[0] < program->value_count
+               ? program->phys[instruction->src[0]]
+               : AGX_APPLE9_PHYS_INVALID;
+         const unsigned tuple[] = {target, source, source};
+         const bool valid =
+            instruction->encoding == AGX_APPLE9_ENC_LOGIC_EXTENDED &&
+            instruction->dest == AGX_APPLE9_VREG_INVALID &&
+            instruction->nr_srcs == 1 &&
+            instruction->target < program->value_count &&
+            instruction->src[0] < program->value_count &&
+            target_producer != NULL &&
+            target_producer->op == AGX_APPLE9_VIR_MERGE &&
+            instruction->immediate == 0 && instruction->memory_bits == 0 &&
+            instruction->memory_components == 0 &&
+            instruction->producer_scoreboard_slot ==
+               AGX_APPLE9_SCOREBOARD_SLOT_NONE &&
+            agx_apple9_encoding_accepts_gpr_tuple(
+               instruction->encoding, tuple, ARRAY_SIZE(tuple), 32);
+         if (!valid) {
+            if (reason != NULL)
+               *reason = "Apple9 MASKED_COPY has an invalid VIR contract";
+            return false;
+         }
+         continue;
+      }
+
+      if (apple9_vir_is_control_side_effect(instruction->op)) {
+         bool valid = instruction->dest == AGX_APPLE9_VREG_INVALID &&
+                      instruction->memory_bits == 0 &&
+                      instruction->memory_components == 0 &&
+                      instruction->producer_scoreboard_slot ==
+                         AGX_APPLE9_SCOREBOARD_SLOT_NONE &&
+                      instruction->scoreboard_slot ==
+                         AGX_APPLE9_SCOREBOARD_SLOT_NONE;
+
+         switch (instruction->op) {
+         case AGX_APPLE9_VIR_PREDICATE_COMPARE: {
+            const unsigned condition = instruction->immediate & 0xff;
+            const bool short_form =
+               instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT;
+            const bool extended_form = instruction->encoding ==
+                                       AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED;
+            const bool valid_condition =
+               short_form
+                  ? (condition == AGX_APPLE9_PREDICATE_FGT ||
+                     condition == AGX_APPLE9_PREDICATE_FLT ||
+                     condition == AGX_APPLE9_PREDICATE_UGT ||
+                     condition == AGX_APPLE9_PREDICATE_ULT ||
+                     condition == AGX_APPLE9_PREDICATE_IGT ||
+                     condition == AGX_APPLE9_PREDICATE_ILT)
+                  : extended_form &&
+                       (condition == AGX_APPLE9_PREDICATE_EXT_FEQ ||
+                        condition ==
+                           AGX_APPLE9_PREDICATE_EXT_FGE_SEQUENCE ||
+                        condition ==
+                           AGX_APPLE9_PREDICATE_EXT_FLE_SEQUENCE ||
+                        condition == AGX_APPLE9_PREDICATE_EXT_IEQ);
+            valid &= (short_form || extended_form) &&
+                     instruction->nr_srcs == 2 &&
+                     (instruction->immediate &
+                      ~(0xffu | AGX_APPLE9_PREDICATE_INVERT)) == 0 &&
+                     valid_condition;
+            break;
+         }
+         case AGX_APPLE9_VIR_EXEC_MASK_PUSH:
+            valid &= instruction->encoding == AGX_APPLE9_ENC_EXEC_MASK_PUSH &&
+                     instruction->nr_srcs == 0 &&
+                     (instruction->immediate &
+                      ~AGX_APPLE9_EXEC_MASK_INVERT) == 0;
+            if (valid)
+               ++execution_mask_depth;
+            break;
+         case AGX_APPLE9_VIR_EXEC_MASK_ELSE:
+            valid &= instruction->encoding == AGX_APPLE9_ENC_EXEC_MASK_ELSE &&
+                     instruction->nr_srcs == 0 && instruction->immediate == 0 &&
+                     execution_mask_depth > 0;
+            break;
+         case AGX_APPLE9_VIR_EXEC_MASK_POP:
+            valid &= instruction->encoding == AGX_APPLE9_ENC_EXEC_MASK_POP &&
+                     instruction->nr_srcs == 0 && instruction->immediate == 0 &&
+                     execution_mask_depth > 0;
+            if (valid)
+               --execution_mask_depth;
+            break;
+         default:
+            valid = false;
+            break;
+         }
+
+         unsigned tuple[AGX_APPLE9_MAX_ENCODING_OPERANDS] = {0};
+         unsigned tuple_count = 0;
+         valid &= encoding_tuple(instruction, program->phys, tuple,
+                                 &tuple_count) &&
+                  agx_apple9_encoding_accepts_gpr_tuple(
+                     instruction->encoding, tuple, tuple_count, 32);
+         if (!valid) {
+            if (reason != NULL)
+               *reason = "Apple9 control-flow instruction has an invalid VIR contract";
+            return false;
+         }
          continue;
       }
 
@@ -827,6 +1036,12 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
 
    }
 
+   if (execution_mask_depth != 0) {
+      if (reason != NULL)
+         *reason = "Apple9 execution-mask stack is unbalanced";
+      return false;
+   }
+
    return true;
 }
 
@@ -837,6 +1052,35 @@ apple9_propagate_source_register_classes(struct agx_apple9_vir_program *program,
    for (unsigned i = 0; i < program->instruction_count; ++i) {
       const struct agx_apple9_vir_instr *instruction =
          &program->instructions[i];
+      if (instruction->op == AGX_APPLE9_VIR_MASKED_COPY) {
+         if (instruction->target >= program->value_count ||
+             instruction->nr_srcs != 1 ||
+             instruction->src[0] >= program->value_count)
+            goto invalid;
+
+         const struct agx_apple9_operand_constraint *dest =
+            agx_apple9_find_operand(instruction->encoding,
+                                    AGX_APPLE9_OPERAND_DEST);
+         const struct agx_apple9_operand_constraint *src0 =
+            agx_apple9_find_operand(instruction->encoding,
+                                    AGX_APPLE9_OPERAND_SRC0);
+         const struct agx_apple9_operand_constraint *src1 =
+            agx_apple9_find_operand(instruction->encoding,
+                                    AGX_APPLE9_OPERAND_SRC1);
+         if (dest == NULL || src0 == NULL || src1 == NULL)
+            goto invalid;
+
+         uint32_t target = instruction->target;
+         uint32_t source = instruction->src[0];
+         if (program->max_phys[target] == AGX_APPLE9_PHYS_INVALID ||
+             dest->max_index < program->max_phys[target])
+            program->max_phys[target] = dest->max_index;
+         const uint8_t source_max = MIN2(src0->max_index, src1->max_index);
+         if (program->max_phys[source] == AGX_APPLE9_PHYS_INVALID ||
+             source_max < program->max_phys[source])
+            program->max_phys[source] = source_max;
+         continue;
+      }
       if (instruction->encoding == AGX_APPLE9_ENC_PSEUDO)
          continue;
 
@@ -950,7 +1194,9 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
       const uint32_t dest = instruction->dest;
       const unsigned components = apple9_vir_dest_components(instruction);
       if (components == 0) {
-         if (instruction->op != AGX_APPLE9_VIR_DEVICE_STORE) {
+         if (instruction->op != AGX_APPLE9_VIR_DEVICE_STORE &&
+             instruction->op != AGX_APPLE9_VIR_MASKED_COPY &&
+             !apple9_vir_is_control_side_effect(instruction->op)) {
             free(last_use);
             free(defined);
             free(seen_definition);
@@ -1014,6 +1260,22 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          }
          used[instruction->src[s]] = true;
          last_use[instruction->src[s]] = i;
+      }
+      if (instruction->op == AGX_APPLE9_VIR_MASKED_COPY) {
+         const uint32_t target = instruction->target;
+         if (target >= program->value_count || !seen_definition[target]) {
+            free(last_use);
+            free(defined);
+            free(seen_definition);
+            free(used);
+            free(phys);
+            if (reason != NULL)
+               *reason =
+                  "Apple9 masked copy target is not defined before its edge";
+            return false;
+         }
+         used[target] = true;
+         last_use[target] = i;
       }
    }
 
@@ -1140,6 +1402,29 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                --live;
             }
          }
+         if (instruction->op == AGX_APPLE9_VIR_MASKED_COPY) {
+            const uint32_t target = instruction->target;
+            if (phys[target] == AGX_APPLE9_PHYS_INVALID ||
+                owner[phys[target]] != (int32_t)target) {
+               free(last_use);
+               free(defined);
+               free(seen_definition);
+               free(used);
+               free(phys);
+               if (reason != NULL)
+                  *reason = "Apple9 masked copy target is not live";
+               return false;
+            }
+            if (last_use[target] == i) {
+               owner[phys[target]] =
+                  (program->reserved_gprs[phys[target]] ||
+                   fixed_gpr[phys[target]])
+                     ? -2
+                     : -1;
+               assert(live > 0);
+               --live;
+            }
+         }
          continue;
       }
 
@@ -1177,8 +1462,11 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
          }
       }
 
+      const bool is_pseudo_definition =
+         instruction->op == AGX_APPLE9_VIR_COLLECT ||
+         instruction->op == AGX_APPLE9_VIR_MERGE;
       const struct agx_apple9_operand_constraint *dest_constraint =
-         instruction->op == AGX_APPLE9_VIR_COLLECT
+         is_pseudo_definition
             ? NULL
             : agx_apple9_find_operand(instruction->encoding,
                                       AGX_APPLE9_OPERAND_DEST);
@@ -1232,6 +1520,7 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
                break;
             if (base + components > AGX_APPLE9_GPR_COUNT ||
                 (instruction->op != AGX_APPLE9_VIR_COLLECT &&
+                 instruction->op != AGX_APPLE9_VIR_MERGE &&
                  !agx_apple9_encoding_accepts_gpr(
                     instruction->encoding, AGX_APPLE9_OPERAND_DEST, base, 32)))
                continue;
@@ -1288,10 +1577,16 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
             for (unsigned j = 0; j < program->instruction_count; ++j) {
                const struct agx_apple9_vir_instr *vir =
                   &program->instructions[j];
-               fprintf(stderr,
-                       "APPLE9_ALLOC_VIR i=%u op=%u enc=%u dest=v%u fixed=%u src=",
-                       j, vir->op, vir->encoding, vir->dest,
-                       program->fixed_phys[vir->dest]);
+               fprintf(stderr, "APPLE9_ALLOC_VIR i=%u op=%u enc=%u dest=", j,
+                       vir->op, vir->encoding);
+               if (vir->dest == AGX_APPLE9_VREG_INVALID)
+                  fputs("-", stderr);
+               else
+                  fprintf(stderr, "v%u fixed=%u", vir->dest,
+                          program->fixed_phys[vir->dest]);
+               if (vir->op == AGX_APPLE9_VIR_MASKED_COPY)
+                  fprintf(stderr, " target=v%u", vir->target);
+               fputs(" src=", stderr);
                for (unsigned s = 0; s < vir->nr_srcs; ++s)
                   fprintf(stderr, "%sv%u", s ? "," : "", vir->src[s]);
                fprintf(stderr, " imm=%#x\n", vir->immediate);
@@ -2691,6 +2986,63 @@ pack_select(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
    return true;
 }
 
+static bool
+pack_predicate_compare(const struct agx_apple9_vir_instr *instruction,
+                       const uint8_t *phys,
+                       struct agx_apple9_packed_instruction *packed)
+{
+   const bool short_form =
+      instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT;
+   const bool extended_form =
+      instruction->encoding == AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED;
+   if ((!short_form && !extended_form) || instruction->nr_srcs != 2 ||
+       (instruction->immediate &
+        ~(0xffu | AGX_APPLE9_PREDICATE_INVERT)) != 0)
+      return false;
+
+   const unsigned condition = instruction->immediate & 0xff;
+   if (short_form) {
+      if (condition != AGX_APPLE9_PREDICATE_FGT &&
+          condition != AGX_APPLE9_PREDICATE_FLT &&
+          condition != AGX_APPLE9_PREDICATE_UGT &&
+          condition != AGX_APPLE9_PREDICATE_ULT &&
+          condition != AGX_APPLE9_PREDICATE_IGT &&
+          condition != AGX_APPLE9_PREDICATE_ILT)
+         return false;
+   } else if (condition != AGX_APPLE9_PREDICATE_EXT_FEQ &&
+              condition != AGX_APPLE9_PREDICATE_EXT_FGE_SEQUENCE &&
+              condition != AGX_APPLE9_PREDICATE_EXT_FLE_SEQUENCE &&
+              condition != AGX_APPLE9_PREDICATE_EXT_IEQ) {
+      return false;
+   }
+
+   const unsigned src0 = phys[instruction->src[0]];
+   const unsigned src1 = phys[instruction->src[1]];
+   if (src0 >= 64 || src1 >= 64)
+      return false;
+
+   const uint8_t opcode =
+      0x0a | ((instruction->immediate & AGX_APPLE9_PREDICATE_INVERT) ? 0x10
+                                                                     : 0);
+   uint8_t control = 0x22 | (extended_form ? 0x01 : 0);
+   if (!(instruction->live_after_mask & BITFIELD_BIT(0)))
+      control |= 0x08;
+   if (!(instruction->live_after_mask & BITFIELD_BIT(1)))
+      control |= 0x10;
+
+   if (short_form) {
+      const uint8_t bytes[6] = {opcode, (uint8_t)((src0 << 1) | 1), control,
+                                (uint8_t)((src1 << 1) | 1), condition, 0xc0};
+      packed_init(packed, bytes, sizeof(bytes));
+   } else {
+      const uint8_t bytes[10] = {
+         opcode, (uint8_t)((src0 << 1) | 1), control,
+         (uint8_t)((src1 << 1) | 1), 0x06, 0x00, condition, 0xc0, 0x00, 0x00,
+      };
+      packed_init(packed, bytes, sizeof(bytes));
+   }
+   return true;
+}
 
 static bool
 pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
@@ -2843,7 +3195,42 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       return pack_fma(instruction, phys, packed);
    case AGX_APPLE9_VIR_SELECT:
       return pack_select(instruction, phys, packed);
+   case AGX_APPLE9_VIR_PREDICATE_COMPARE:
+      return pack_predicate_compare(instruction, phys, packed);
+   case AGX_APPLE9_VIR_EXEC_MASK_PUSH: {
+      if (instruction->encoding != AGX_APPLE9_ENC_EXEC_MASK_PUSH ||
+          instruction->nr_srcs != 0 ||
+          (instruction->immediate & ~AGX_APPLE9_EXEC_MASK_INVERT) != 0)
+         break;
+      const uint8_t bytes[] = {
+         0x0f, 0x05, 0x54,
+         (uint8_t)(0x01 | ((instruction->immediate &
+                            AGX_APPLE9_EXEC_MASK_INVERT)
+                              ? 0x20
+                              : 0)),
+      };
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_EXEC_MASK_ELSE: {
+      if (instruction->encoding != AGX_APPLE9_ENC_EXEC_MASK_ELSE ||
+          instruction->nr_srcs != 0 || instruction->immediate != 0)
+         break;
+      const uint8_t bytes[] = {0x0f, 0x04, 0x04, 0x19};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_EXEC_MASK_POP: {
+      if (instruction->encoding != AGX_APPLE9_ENC_EXEC_MASK_POP ||
+          instruction->nr_srcs != 0 || instruction->immediate != 0)
+         break;
+      const uint8_t bytes[] = {0x0f, 0x06, 0x04, 0x01, 0x00, 0x00};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_COLLECT:
+   case AGX_APPLE9_VIR_MERGE:
+   case AGX_APPLE9_VIR_MASKED_COPY:
       break;
    }
 

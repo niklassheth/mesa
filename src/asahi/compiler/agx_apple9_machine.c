@@ -493,6 +493,67 @@ static const struct agx_apple9_encoding_info encodings[] = {
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_PREDICATE_COMPARE_SHORT] =
+      {
+         .name = "predicate_compare_short",
+         .length = 6,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {
+               /* Both sources use the ordinary 32-bit descriptor
+                * (gpr << 1) | 1.  Source lifetime is encoded independently
+                * in byte 2. */
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
+   [AGX_APPLE9_ENC_PREDICATE_COMPARE_EXTENDED] =
+      {
+         .name = "predicate_compare_extended",
+         .length = 10,
+         .operand_count = 2,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32, 63, 2,
+                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+                   AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
+   [AGX_APPLE9_ENC_EXEC_MASK_PUSH] =
+      {
+         .name = "exec_mask_push",
+         .length = 4,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_EXEC_MASK_ELSE] =
+      {
+         .name = "exec_mask_else",
+         .length = 4,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_EXEC_MASK_POP] =
+      {
+         .name = "exec_mask_pop",
+         .length = 6,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
    [AGX_APPLE9_ENC_DEVICE_LOAD] =
       {
          .name = "device_load",
