@@ -847,6 +847,13 @@ apple9_vir_producer_instruction(const struct agx_apple9_vir_program *program,
                                 uint32_t value);
 
 static bool
+apple9_vir_is_graphics_output(enum agx_apple9_vir_opcode op)
+{
+   return op == AGX_APPLE9_VIR_VARY_STORE || op == AGX_APPLE9_VIR_TILE_ACCESS ||
+          op == AGX_APPLE9_VIR_TILE_STORE || op == AGX_APPLE9_VIR_TILE_FENCE;
+}
+
+static bool
 apple9_vir_is_control_side_effect(enum agx_apple9_vir_opcode op)
 {
    return op == AGX_APPLE9_VIR_PREDICATE_COMPARE ||
@@ -1182,6 +1189,25 @@ agx_apple9_validate_vir_allocation(const struct agx_apple9_vir_program *program,
          continue;
       }
 
+      if (instruction->op == AGX_APPLE9_VIR_VARY_STORE ||
+          instruction->op == AGX_APPLE9_VIR_TILE_ACCESS ||
+          instruction->op == AGX_APPLE9_VIR_TILE_STORE ||
+          instruction->op == AGX_APPLE9_VIR_TILE_FENCE) {
+         unsigned gprs[AGX_APPLE9_MAX_ENCODING_OPERANDS], count;
+         struct agx_apple9_packed_instruction packed;
+         if (instruction->dest != AGX_APPLE9_VREG_INVALID ||
+             !encoding_tuple(instruction, program->phys, gprs, &count) ||
+             !agx_apple9_encoding_accepts_gpr_tuple(instruction->encoding, gprs,
+                                                    count, 32) ||
+             !agx_apple9_pack_vir_instruction(instruction, program->phys,
+                                              &packed, reason)) {
+            if (reason)
+               *reason = "Apple9 graphics output has an invalid contract";
+            return false;
+         }
+         continue;
+      }
+
       const unsigned components = apple9_vir_dest_components(instruction);
       if (components > 4 || components > program->value_count ||
           instruction->dest > program->value_count - components ||
@@ -1488,7 +1514,8 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
    for (unsigned i = 0; i < program->instruction_count; ++i)
       has_side_effect |=
          program->instructions[i].op == AGX_APPLE9_VIR_DEVICE_STORE ||
-         program->instructions[i].op == AGX_APPLE9_VIR_DEVICE_ATOMIC;
+         program->instructions[i].op == AGX_APPLE9_VIR_DEVICE_ATOMIC ||
+         apple9_vir_is_graphics_output(program->instructions[i].op);
    if ((program->output == AGX_APPLE9_VREG_INVALID && !has_side_effect) ||
        (program->output != AGX_APPLE9_VREG_INVALID &&
         program->output >= program->value_count)) {
@@ -1529,7 +1556,8 @@ agx_apple9_allocate_vir(struct agx_apple9_vir_program *program,
              instruction->op != AGX_APPLE9_VIR_DEVICE_ATOMIC &&
              instruction->op != AGX_APPLE9_VIR_DEVICE_ATOMIC_RESULT &&
              instruction->op != AGX_APPLE9_VIR_MASKED_COPY &&
-             !apple9_vir_is_control_side_effect(instruction->op)) {
+             !apple9_vir_is_control_side_effect(instruction->op) &&
+             !apple9_vir_is_graphics_output(instruction->op)) {
             free(last_use);
             free(defined);
             free(seen_definition);
@@ -3240,9 +3268,14 @@ static bool
 pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
             struct agx_apple9_packed_instruction *packed)
 {
-   uint8_t bytes[6] = {0x09, 0x05, 0x1c, 0x01, 0x00, 0x00};
-   if (instruction->op == AGX_APPLE9_VIR_FMUL)
-      set_bits(bytes, 16, 3, 5);
+   if ((instruction->op == AGX_APPLE9_VIR_FMUL_PROJECT) !=
+       (instruction->encoding == AGX_APPLE9_ENC_FLOAT2_PROJECT))
+      return false;
+   uint8_t bytes[8] = {0x09, 0x05, 0x1c, 0x01, 0x00, 0x00};
+   if (instruction->op == AGX_APPLE9_VIR_FMUL ||
+       instruction->op == AGX_APPLE9_VIR_FMUL_PROJECT)
+      set_bits(bytes, 16, 3,
+               instruction->op == AGX_APPLE9_VIR_FMUL_PROJECT ? 7 : 5);
    else
       set_bits(bytes, 16, 3, 4);
    if (instruction->op == AGX_APPLE9_VIR_FSUB)
@@ -3272,7 +3305,33 @@ pack_float2(const struct agx_apple9_vir_instr *instruction, const uint8_t *phys,
                                  phys[instruction->src[0]],
                                  phys[instruction->src[1]]))
       return false;
-   packed_init(packed, bytes, sizeof(bytes));
+   if (instruction->encoding == AGX_APPLE9_ENC_FLOAT2_PROJECT) {
+      if (phys[instruction->dest] >= 64 || phys[instruction->src[0]] >= 64 ||
+          phys[instruction->src[1]] >= 64 || instruction->immediate > 12)
+         return false;
+      /* Source-authored Metal probes use opcode 7 and name the CF slot
+       * alongside the two GPR operands. Perspective coefficients can be
+       * primitive-constant; this form preserves their constant fast path
+       * instead of unconditionally multiplying them by reciprocal 1/W.
+       * The CF nibble shares byte 5 with the dependency field, so this
+       * measured form has six-bit GPR operands. */
+      bytes[5] = instruction->immediate;
+      packed_init(packed, bytes, 8);
+   } else if (instruction->encoding == AGX_APPLE9_ENC_FLOAT2_EXPORT) {
+      /* EXP-M4-56: extended destination publication for vertex exports.
+       * The ordinary ALU destination cannot be consumed by VARY_STORE.
+       * Keep the proven low destination bank; its extension differs from
+       * the ordinary compact ALU register map. */
+      if (phys[instruction->dest] >= 16 || phys[instruction->src[0]] >= 64 ||
+          phys[instruction->src[1]] >= 64)
+         return false;
+      bytes[4] |= 0x41;
+      packed_init(packed, bytes, 8);
+   } else {
+      if (instruction->encoding != AGX_APPLE9_ENC_FLOAT2_COMPACT)
+         return false;
+      packed_init(packed, bytes, 6);
+   }
    return true;
 }
 
@@ -3664,6 +3723,33 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       return agx_apple9_pack_get_global_id(phys[instruction->dest],
                                            instruction->immediate, packed);
    case AGX_APPLE9_VIR_GET_SR:
+      if (instruction->encoding == AGX_APPLE9_ENC_GET_VERTEX_ID) {
+         const unsigned dst = phys[instruction->dest];
+         if (dst >= 16 || instruction->immediate != 0x10dd ||
+             instruction->nr_srcs)
+            return false;
+         /* Vertex ID is a slot-1 return, unlike compute's synchronous SR
+          * reads. Materialize it immediately with an allocated identity IOR.
+          * This bounded pair also leaves the slot free for subsequent work. */
+         struct agx_apple9_vir_instr copy = {
+            .op = AGX_APPLE9_VIR_IOR,
+            .encoding = AGX_APPLE9_ENC_LOGIC_EXTENDED,
+            .dest = 0,
+            .src = {0, 0},
+            .nr_srcs = 2,
+         };
+         uint8_t registers[] = {dst};
+         struct agx_apple9_packed_instruction move;
+         if (!pack_logic(&copy, registers, &move) ||
+             !apple9_pack_dependency(move.bytes, move.length,
+                                     AGX_APPLE9_DEPENDENCY_MASK_45_47_61_63,
+                                     AGX_APPLE9_SCOREBOARD_SLOT_1))
+            return false;
+         uint8_t bytes[14] = {(dst << 4) | 0x0c, 0xdd, 0x10, 0x06};
+         memcpy(bytes + 4, move.bytes, move.length);
+         packed_init(packed, bytes, sizeof(bytes));
+         return true;
+      }
       if (instruction->encoding == AGX_APPLE9_ENC_GET_SR_ZEXT16)
          return agx_apple9_pack_get_sr_zext16(
             phys[instruction->dest], instruction->immediate & 0xff, packed);
@@ -3807,6 +3893,73 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
       packed_init(packed, bytes, sizeof(bytes));
       return true;
    }
+   case AGX_APPLE9_VIR_ITER: {
+      if (instruction->encoding != AGX_APPLE9_ENC_ITER ||
+          instruction->nr_srcs || phys[instruction->dest] >= 64 ||
+          (instruction->immediate & ~0x20fu) ||
+          (instruction->immediate & 15) > 12)
+         return false;
+      /* EXP-M4-56: ordinary center coefficients, including coefficient 0
+       * for interpolated 1/W. Bit 9 marks the first iterator. */
+      unsigned imm = instruction->immediate;
+      const uint8_t bytes[] = {0x2f, (imm & 0x200) ? 0x0d : 0x05,
+                               0x54, phys[instruction->dest] << 1,
+                               0x03, (imm & 0xff) << 1,
+                               0,    2,
+                               0x10, 0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_VARY_STORE: {
+      if (instruction->encoding != AGX_APPLE9_ENC_VARY_STORE ||
+          instruction->nr_srcs != 1 || instruction->immediate >= 16 ||
+          phys[instruction->src[0]] >= 16)
+         return false;
+      unsigned slot = instruction->immediate;
+      const uint8_t bytes[] = {0x57,
+                               0x06,
+                               0x54,
+                               phys[instruction->src[0]] << 1,
+                               (slot & 7) << 5,
+                               0x40 | (slot >> 3),
+                               0,
+                               0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_TILE_ACCESS:
+   case AGX_APPLE9_VIR_TILE_FENCE: {
+      const bool access = instruction->op == AGX_APPLE9_VIR_TILE_ACCESS;
+      if (instruction->nr_srcs ||
+          instruction->encoding != (access ? AGX_APPLE9_ENC_TILE_ACCESS
+                                           : AGX_APPLE9_ENC_TILE_FENCE) ||
+          (access ? instruction->immediate != 0x600 &&
+                       instruction->immediate != 0x80c
+                  : instruction->immediate != 0x20c))
+         return false;
+      const uint8_t bytes[] = {
+         instruction->op == AGX_APPLE9_VIR_TILE_ACCESS ? 0x87 : 0x07,
+         2,
+         0x54,
+         instruction->immediate & 0xff,
+         (instruction->immediate >> 8) & 0xff,
+         0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
+   case AGX_APPLE9_VIR_TILE_STORE: {
+      if (instruction->encoding != AGX_APPLE9_ENC_TILE_STORE ||
+          instruction->nr_srcs != 1 || instruction->immediate != 0 ||
+          phys[instruction->src[0]] >= 64)
+         return false;
+      /* EXP-M4-56: format 0x4e consumes one RGBA8 word. Explicit integer
+       * packing is independent of the native compiler's conversion code. */
+      const uint8_t bytes[] = {0xe7, 6, 0x54, phys[instruction->src[0]] << 1,
+                               0,    0, 1,    0x4e,
+                               0,    0, 0,    0};
+      packed_init(packed, bytes, sizeof(bytes));
+      return true;
+   }
    case AGX_APPLE9_VIR_U2F32:
    case AGX_APPLE9_VIR_I2F32:
       return pack_i2f32(instruction, phys, packed);
@@ -3854,6 +4007,7 @@ pack_vir_instruction_body(const struct agx_apple9_vir_instr *instruction,
    case AGX_APPLE9_VIR_FADD:
    case AGX_APPLE9_VIR_FSUB:
    case AGX_APPLE9_VIR_FMUL:
+   case AGX_APPLE9_VIR_FMUL_PROJECT:
       return pack_float2(instruction, phys, packed);
    case AGX_APPLE9_VIR_FADD_IMM:
    case AGX_APPLE9_VIR_FMUL_IMM:

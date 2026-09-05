@@ -263,6 +263,33 @@ static const struct agx_apple9_encoding_info encodings[] = {
                   AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
+   [AGX_APPLE9_ENC_FLOAT2_PROJECT] =
+      {
+         .name = "float2_project",
+         .length = 8,
+         .operand_count = 3,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .dependency_layout = AGX_APPLE9_DEPENDENCY_INDEX_45_47,
+         .operands =
+            {
+               GPR(
+                  AGX_APPLE9_OPERAND_DEST,
+                  AGX_APPLE9_WIDTH_32, 63,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC0,
+                  AGX_APPLE9_WIDTH_32, 63,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_SRC1,
+                  AGX_APPLE9_WIDTH_32, 63,
+                  1, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED | AGX_APPLE9_OPERAND_COMPACT_PREFERRED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+            },
+      },
    [AGX_APPLE9_ENC_FLOAT2_MODIFIER_EXTENDED] =
       {
          .name = "float2_modifier_extended",
@@ -613,6 +640,85 @@ static const struct agx_apple9_encoding_info encodings[] = {
          .allocator_safe = true,
          .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
       },
+   [AGX_APPLE9_ENC_GET_VERTEX_ID] =
+      {
+         .name = "get_vertex_id",
+         .length = 14,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                 15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW,
+                 AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_FLOAT2_EXPORT] =
+      {
+         .name = "float2_export",
+         .length = 8,
+         .operand_count = 3,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands =
+            {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32,
+                 15, 2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_HARD_LOW,
+                 AGX_APPLE9_EVIDENCE_HARDWARE),
+             GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                 63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                 AGX_APPLE9_EVIDENCE_HARDWARE),
+             GPR(AGX_APPLE9_OPERAND_SRC1, AGX_APPLE9_WIDTH_32,
+                 63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                 AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_ITER] =
+      {
+         .name = "iter",
+         .length = 10,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {GPR(AGX_APPLE9_OPERAND_DEST, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_VARY_STORE] =
+      {
+         .name = "vary_store",
+         .length = 8,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_TILE_ACCESS] =
+      {
+         .name = "tile_access",
+         .length = 6,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
+   [AGX_APPLE9_ENC_TILE_STORE] =
+      {
+         .name = "tile_store",
+         .length = 12,
+         .operand_count = 1,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+         .operands = {GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63,
+                          2, AGX_APPLE9_OPERAND_ALLOCATABLE,
+                          AGX_APPLE9_EVIDENCE_HARDWARE)},
+      },
+   [AGX_APPLE9_ENC_TILE_FENCE] =
+      {
+         .name = "tile_fence",
+         .length = 6,
+         .operand_count = 0,
+         .allocator_safe = true,
+         .evidence = AGX_APPLE9_EVIDENCE_HARDWARE,
+      },
    [AGX_APPLE9_ENC_DEVICE_LOAD] =
       {
          .name = "device_load",
@@ -666,14 +772,14 @@ static const struct agx_apple9_encoding_info encodings[] = {
                 * hardware-validated atomic-address witnesses currently use
                 * the compact bank (r0..r6). Keep RA inside that proven bank
                 * until a dedicated high-index splice establishes otherwise. */
-               GPR(AGX_APPLE9_OPERAND_INDEX, AGX_APPLE9_WIDTH_32, 15, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_SCATTERED,
-                   AGX_APPLE9_EVIDENCE_HARDWARE),
-               GPR(AGX_APPLE9_OPERAND_ATOMIC_DATA, AGX_APPLE9_WIDTH_32, 15, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE |
-                      AGX_APPLE9_OPERAND_SCATTERED,
-                   AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_INDEX, AGX_APPLE9_WIDTH_32, 15,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
+               GPR(
+                  AGX_APPLE9_OPERAND_ATOMIC_DATA, AGX_APPLE9_WIDTH_32, 15,
+                  2, AGX_APPLE9_OPERAND_ALLOCATABLE | AGX_APPLE9_OPERAND_SCATTERED,
+                  AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },
    [AGX_APPLE9_ENC_DEVICE_ATOMIC_RESULT] =
@@ -687,8 +793,8 @@ static const struct agx_apple9_encoding_info encodings[] = {
             {
                /* The long low-nibble-c instruction following a returning
                 * atomic has a hardware-validated six-bit destination. */
-               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32, 63, 2,
-                   AGX_APPLE9_OPERAND_ALLOCATABLE,
+               GPR(AGX_APPLE9_OPERAND_SRC0, AGX_APPLE9_WIDTH_32,
+                   63, 2, AGX_APPLE9_OPERAND_ALLOCATABLE,
                    AGX_APPLE9_EVIDENCE_HARDWARE),
             },
       },

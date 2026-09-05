@@ -123,6 +123,40 @@ TEST(Apple9Machine, ReciprocalHasAsymmetricRegisterFiles)
       AGX_APPLE9_ENC_FLOAT_SPECIAL, AGX_APPLE9_OPERAND_SRC0, 64, 32));
 }
 
+TEST(Apple9Packer, PerspectiveMultiplyNamesCoefficientAndBoundsRegisters)
+{
+   uint8_t phys[] = {15, 10, 6};
+   agx_apple9_vir_instr project = {
+      .op = AGX_APPLE9_VIR_FMUL_PROJECT,
+      .encoding = AGX_APPLE9_ENC_FLOAT2_PROJECT,
+      .dest = 0,
+      .dest_components = 1,
+      .src = {1, 2},
+      .immediate = 2,
+      .nr_srcs = 2,
+      .live_after_mask = 2,
+      .scoreboard_slot = AGX_APPLE9_SCOREBOARD_SLOT_NONE,
+   };
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&project, phys, &packed, &reason));
+   const uint8_t own_msl[] = {0xf9, 0x15, 0x2f, 0x8d, 0x00, 0x02, 0x00, 0x00};
+   ASSERT_EQ(packed.length, sizeof(own_msl));
+   EXPECT_EQ(memcmp(packed.bytes, own_msl, sizeof(own_msl)), 0);
+   for (unsigned cf = 0; cf <= 12; ++cf) {
+      project.immediate = cf;
+      ASSERT_TRUE(agx_apple9_pack_vir_instruction(&project, phys, &packed, &reason));
+      EXPECT_EQ(packed.bytes[5] & 15, cf);
+   }
+   project.immediate = 13;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&project, phys, &packed, &reason));
+   project.immediate = 2;
+   phys[1] = 64;
+   EXPECT_FALSE(agx_apple9_pack_vir_instruction(&project, phys, &packed, &reason));
+   EXPECT_FALSE(agx_apple9_encoding_accepts_gpr(
+      AGX_APPLE9_ENC_FLOAT2_PROJECT, AGX_APPLE9_OPERAND_SRC0, 63, 16));
+}
+
 TEST(Apple9Packer, ReciprocalPacksHandoffLifetimeAndNativeResultHint)
 {
    const uint8_t phys[] = {18, 7};
@@ -5502,4 +5536,28 @@ TEST(Apple9Compiler, SystemRegisterAndDerivedLoadIndicesShareTheSsaPath)
 
    free(compiled.binary);
    ralloc_free(nir);
+}
+
+TEST(Apple9Machine, RenderPublicationOperands)
+{
+   const uint8_t phys[] = {7, 16, 17};
+   agx_apple9_vir_instr mul = {};
+   mul.op = AGX_APPLE9_VIR_FMUL;
+   mul.encoding = AGX_APPLE9_ENC_FLOAT2_EXPORT;
+   mul.dest = 0;
+   mul.src[0] = 1;
+   mul.src[1] = 2;
+   mul.nr_srcs = 2;
+   agx_apple9_packed_instruction packed = {};
+   const char *reason = nullptr;
+   ASSERT_TRUE(agx_apple9_pack_vir_instruction(&mul, phys, &packed, &reason));
+   const uint8_t expected[] = {0x79, 0x21, 0x3d, 0x23, 0x41, 0, 0, 0};
+   ASSERT_EQ(packed.length, sizeof(expected));
+   EXPECT_EQ(memcmp(packed.bytes, expected, sizeof(expected)), 0);
+   const uint8_t bad_dest[] = {16, 16, 17};
+   EXPECT_FALSE(
+      agx_apple9_pack_vir_instruction(&mul, bad_dest, &packed, &reason));
+   const uint8_t bad_source[] = {7, 64, 17};
+   EXPECT_FALSE(
+      agx_apple9_pack_vir_instruction(&mul, bad_source, &packed, &reason));
 }
