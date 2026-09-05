@@ -561,6 +561,9 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
                                                             : "Other resource";
 
    uint32_t create_flags = 0;
+   /* Apple9 index commands address the fixed USC aperture. */
+   if (agx_apple9_direct_render_enabled(dev) && (bind & PIPE_BIND_INDEX_BUFFER))
+      create_flags |= AGX_BO_LOW_VA;
 
    /* Default to write-combine resources, but use writeback if that is expected
     * to be beneficial.
@@ -1721,6 +1724,13 @@ agx_flush_batch(struct agx_context *ctx, struct agx_batch *batch)
          agx_apple9_render_cache_invalidate_fixed_usc(
             screen->apple9_render_cache);
          simple_mtx_unlock(&screen->apple9_render_package_lock);
+         abort();
+      }
+      if (batch->apple9_uniform_draw_count &&
+          !agx_apple9_render_cache_upload_uniforms(
+             screen->apple9_render_cache, batch->apple9_uniform_draws,
+             batch->apple9_uniform_draw_count)) {
+         fprintf(stderr, "failed to upload Apple9 graphics UBO bindings\n");
          abort();
       }
       if (batch->apple9_vertex_bo) {

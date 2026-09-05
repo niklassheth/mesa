@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "asahi/compiler/agx_apple9_profile.h"
+#include "asahi/compiler/agx_compile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,10 +25,14 @@ struct agx_apple9_render_cache;
 struct agx_apple9_render_stage {
    const uint8_t *binary;
    size_t binary_size;
+   uint32_t ubo_mask;
+   uint8_t resource_count;
+   uint8_t resource_binding[4];
 
    /* Scalar interface counts used by the bounded Apple9 stage linker. */
    uint8_t position_components;
    uint8_t varying_components;
+   struct agx_apple9_varying_layout varyings;
    uint8_t render_targets;
 };
 
@@ -51,9 +56,28 @@ struct agx_apple9_render_pipeline {
 
    /* Apple9 VDM linkage words produced by the bounded pipeline linker. */
    uint32_t pipeline_word;
-   uint32_t vertex_outputs;
+   uint32_t vertex_launch;
    uint32_t vertex_state_class;
+
+   /* One-based index into the batch-owned graphics resource snapshots. */
+   uint32_t uniform_draw;
+   uint64_t index_buffer;
+   uint32_t index_extent;
+   uint8_t index_size;
+
 };
+
+/* Bounded per-draw buffer/depth arena, independent of vertex/primitive count. */
+#define AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS 32
+struct agx_apple9_uniform_draw {
+   uint64_t vertex[4];
+   uint64_t fragment[4];
+   uint32_t depth_control, depth_face;
+};
+
+bool agx_apple9_render_cache_upload_uniforms(
+   struct agx_apple9_render_cache *cache,
+   const struct agx_apple9_uniform_draw *draws, unsigned count);
 
 #define AGX_APPLE9_COMPUTE_PACKAGE_SIZE        0x100000u
 #define AGX_APPLE9_COMPUTE_CODE_OFFSET         0x00000u
@@ -441,7 +465,7 @@ uint32_t agx_apple9_render_package_program_word(
  * neither is treated as the incompatible Apple8 ISA used by G13/G14.  Their
  * render packet and compiler-container ABIs also need Apple9-specific
  * handling.  This first encoder is deliberately narrow: it describes the
- * direct, non-indexed triangle used while bringing the new backend up.
+ * direct triangle lists, with optional 16- or 32-bit indices.
  */
 bool agx_apple9_direct_render_enabled(const struct agx_device *dev);
 

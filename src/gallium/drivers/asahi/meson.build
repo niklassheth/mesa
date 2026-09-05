@@ -40,7 +40,7 @@ if with_tests
       'agx_apple9_geometry_tests',
       files('test/test-apple9-geometry.cpp', 'agx_apple9_geometry.c'),
       include_directories : [inc_include, inc_src],
-      dependencies : [idep_gtest],
+      dependencies : [idep_gtest, idep_nir],
     ),
     suite : ['asahi'],
     protocol : 'gtest',

@@ -131,6 +131,7 @@ agx_batch_init(struct agx_context *ctx,
    batch->apple9_dispatch_count = 0;
    batch->apple9_package = NULL;
    batch->apple9_render_package = NULL;
+   batch->apple9_uniform_draw_count = 0;
    batch->apple9_launch_next = AGX_APPLE9_COMPUTE_LAUNCH_OFFSET;
    batch->apple9_resource_next = AGX_APPLE9_COMPUTE_RESOURCE_OFFSET +
                                   AGX_APPLE9_COMPUTE_RESOURCE_TABLE_OFFSET;
@@ -322,6 +323,7 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    if (batch->apple9_render_package)
       agx_apple9_render_package_release(batch->apple9_render_package);
    batch->apple9_render_package = NULL;
+   batch->apple9_uniform_draw_count = 0;
    agx_pool_cleanup(&batch->pool);
    agx_pool_cleanup(&batch->pipeline_pool);
 

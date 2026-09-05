@@ -8,6 +8,7 @@
 
 #include <xf86drm.h>
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx_compile_apple9.h"
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_bo.h"
@@ -471,6 +472,9 @@ struct agx_batch {
 
    /* Immutable source package selected into the resident archive on submit. */
    struct agx_apple9_render_package *apple9_render_package;
+   unsigned apple9_uniform_draw_count;
+   struct agx_apple9_uniform_draw
+      apple9_uniform_draws[AGX_APPLE9_RENDER_MAX_UNIFORM_DRAWS];
    struct agx_bo *apple9_vertex_bo;
    uint32_t apple9_vertex_offset;
    uint32_t apple9_vertex_size;
@@ -527,6 +531,7 @@ struct asahi_vs_shader_key {
     * compute job used to feed a TCS or GS.
     */
    bool hw;
+   struct agx_apple9_vertex_layout apple9_inputs;
 };
 
 struct agx_vertex_elements {
@@ -542,8 +547,9 @@ struct asahi_fs_shader_key {
    enum pipe_format rt_formats[PIPE_MAX_COLOR_BUFS];
    uint8_t nr_samples;
    bool padding[7];
+   struct agx_apple9_varying_layout apple9_varyings;
 };
-static_assert(sizeof(struct asahi_fs_shader_key) == 40, "no holes");
+static_assert(sizeof(struct asahi_fs_shader_key) == 76, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;
