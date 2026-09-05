@@ -530,6 +530,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 }
 
 #include "scenes/mesh/mesh.h"
+#include "scenes/island/island.h"
 
 int
 main(int argc, char **argv)
@@ -597,6 +598,9 @@ main(int argc, char **argv)
    const char *renderer = (const char *)glGetString(GL_RENDERER);
    if (!renderer || !strstr(renderer, "Apple M4"))
       fail("unexpected GL renderer");
+
+   if (getenv("T8132_GLES_ISLAND"))
+      return run_island(width, height);
 
    if (getenv("T8132_GLES_MESH"))
       return run_mesh(width, height);
