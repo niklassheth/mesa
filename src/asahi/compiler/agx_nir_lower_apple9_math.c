@@ -148,7 +148,8 @@ math_filter(const nir_instr *instr, UNUSED const void *data)
       return false;
    const nir_alu_instr *alu = nir_instr_as_alu(instr);
    return alu->def.bit_size == 32 &&
-          (alu->op == nir_op_fsin || alu->op == nir_op_fcos);
+          (alu->op == nir_op_fsin || alu->op == nir_op_fcos ||
+           alu->op == nir_op_fsat);
 }
 
 static nir_def *
@@ -159,7 +160,13 @@ lower_math(nir_builder *b, nir_instr *instr, UNUSED void *data)
    nir_def *components[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < alu->def.num_components; ++i) {
       nir_def *x = nir_channel(b, source, i);
-      components[i] = lower_sincos(b, x, alu->op == nir_op_fcos);
+      /* GLSL clamp/smoothstep may arrive as fsat even though Apple9 does
+       * not yet model an ALU saturation modifier. Use its ordinary FP32
+       * min/max operations, preserving the NIR clamp ordering. */
+      components[i] = alu->op == nir_op_fsat
+                         ? nir_fmin(b, nir_fmax(b, x, nir_imm_float(b, 0)),
+                                    nir_imm_float(b, 1))
+                         : lower_sincos(b, x, alu->op == nir_op_fcos);
    }
    return nir_vec(b, components, alu->def.num_components);
 }

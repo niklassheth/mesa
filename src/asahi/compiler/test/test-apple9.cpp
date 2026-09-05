@@ -4979,6 +4979,24 @@ TEST(Apple9Compiler, SpecialFunctionsUseAllocatedOperandsAndLifetimes)
    }
 }
 
+TEST(Apple9Compiler, SaturationLowersVectorComponents)
+{
+   nir_builder b = apple9_compute_builder("apple9_saturate");
+   nir_def *input = nir_imm_vec4(&b, -2.0, -0.0, 0.375, 2.0);
+   nir_def *clamped = nir_fsat(&b, input);
+   nir_intrinsic_instr *store =
+      nir_store_ssbo(&b, clamped, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                     .write_mask = 0xf, .align_mul = 16);
+   ASSERT_TRUE(agx_nir_lower_apple9_math(b.shader));
+   ASSERT_TRUE(nir_src_is_const(store->src[0]));
+   const nir_const_value *value = nir_src_as_const_value(store->src[0]);
+   EXPECT_EQ(value[0].u32, 0u);
+   EXPECT_EQ(value[1].u32, 0u);
+   EXPECT_FLOAT_EQ(value[2].f32, 0.375f);
+   EXPECT_FLOAT_EQ(value[3].f32, 1.0f);
+   ralloc_free(b.shader);
+}
+
 TEST(Apple9Compiler, TrigonometryLowersFromOrdinaryNir)
 {
    for (nir_op op : {nir_op_fsin, nir_op_fcos}) {
