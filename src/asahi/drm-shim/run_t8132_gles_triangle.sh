@@ -22,7 +22,7 @@ ninja -C "$mesa_build" \
     src/egl/libEGL_mesa.so.0.0.0
 
 cc -std=c11 -O2 -Wall -Wextra -Werror \
-    "$script_dir/t8132_gles_triangle.c" -o "$binary" -lEGL -lGLESv2
+    "$script_dir/t8132_gles_triangle.c" -o "$binary" -lEGL -lGLESv2 -lm
 
 export M1N1_SHIM_LIBRARY=$mesa_build/src/asahi/drm-shim/libasahi_noop_drm_shim.so
 export M1N1_SHIM_ROOT=$m1n1_root

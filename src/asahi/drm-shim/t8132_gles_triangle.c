@@ -99,6 +99,30 @@ read_vertex_variant(void)
    return VERTEX_VARIANT_NORMAL;
 }
 
+/* Optional source files let the bring-up fixture exercise ordinary new GLSL
+ * programs without teaching either the driver or compiler about scene names. */
+static char *
+read_shader_source(const char *environment)
+{
+   const char *path = getenv(environment);
+   if (!path || !path[0])
+      return NULL;
+   FILE *file = fopen(path, "rb");
+   if (!file)
+      fail("open shader source");
+   if (fseek(file, 0, SEEK_END))
+      fail("seek shader source");
+   long size = ftell(file);
+   if (size < 0 || size > 1024 * 1024 || fseek(file, 0, SEEK_SET))
+      fail("shader source size");
+   char *source = malloc((size_t)size + 1);
+   if (!source || fread(source, 1, size, file) != (size_t)size)
+      fail("read shader source");
+   source[size] = 0;
+   fclose(file);
+   return source;
+}
+
 static GLuint
 link_program(unsigned fragment_variant, bool vbo_vertex,
              enum vertex_variant vertex_variant, GLuint *shared_vs)
@@ -374,6 +398,17 @@ link_program(unsigned fragment_variant, bool vbo_vertex,
    else if (fragment_variant == 15)
       selected_fragment_source = fragment_source_square_gb_passthrough_r;
 
+   static const char vertex_source_procedural[] =
+      "#version 300 es\n"
+      "precision highp float;\n"
+      "out vec3 color;\n"
+      "void main() {\n"
+      " int id = gl_VertexID;\n"
+      " float x = id == 0 ? 0.0 : (id == 1 ? -0.82 : 0.82);\n"
+      " float y = id == 0 ? 0.82 : -0.72;\n"
+      " gl_Position = vec4(x, y, 0.0, 1.0);\n"
+      " color = vec3(id == 0 ? 1.0 : 0.0, id == 2 ? 1.0 : 0.0, id == 1 ? 1.0 : 0.0);\n"
+      "}\n";
    const char *selected_vertex_source = vertex_source;
    if (vbo_vertex)
       selected_vertex_source = vertex_source_vbo;
@@ -383,11 +418,21 @@ link_program(unsigned fragment_variant, bool vbo_vertex,
       selected_vertex_source = vertex_source_degenerate;
    if (fragment_variant == 4)
       selected_vertex_source = vertex_source_split_varyings;
+   if (getenv("T8132_GLES_PROCEDURAL"))
+      selected_vertex_source = vertex_source_procedural;
+   char *external_vs = read_shader_source("T8132_GLES_VERTEX_SOURCE");
+   char *external_fs = read_shader_source("T8132_GLES_FRAGMENT_SOURCE");
+   if (external_vs)
+      selected_vertex_source = external_vs;
+   if (external_fs)
+      selected_fragment_source = external_fs;
    GLuint vs = shared_vs && *shared_vs ? *shared_vs :
                compile_shader(GL_VERTEX_SHADER, selected_vertex_source);
    if (shared_vs && !*shared_vs)
       *shared_vs = vs;
    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, selected_fragment_source);
+   free(external_vs);
+   free(external_fs);
    GLuint program = glCreateProgram();
    glAttachShader(program, vs);
    glAttachShader(program, fs);
@@ -701,6 +746,9 @@ main(int argc, char **argv)
       frame_count = parsed;
    }
    unsigned draws_per_frame = read_dimension("T8132_GLES_DRAWS", 1);
+   unsigned vertex_count = read_dimension("T8132_GLES_VERTICES", 3);
+   printf("T8132_GLES_DRAW vertices=%u draws_per_frame=%u\n",
+          vertex_count, draws_per_frame);
    for (unsigned frame = 0; frame < frame_count; ++frame) {
       /*
        * A/B/A is the minimum dynamic-cache lifetime gate: A and B select
@@ -722,8 +770,70 @@ main(int argc, char **argv)
       glViewport(0, 0, width, height);
       glClearColor(0.75f, 0.73f, 1.0f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
-      for (unsigned draw = 0; draw < draws_per_frame; ++draw)
-         glDrawArrays(GL_TRIANGLES, 0, 3);
+      for (unsigned draw = 0; draw < draws_per_frame; ++draw) {
+         if (getenv("T8132_GLES_UNIFORMS")) {
+            GLint transform =
+               glGetUniformLocation(programs[selected], "u_transform");
+            GLint tint = glGetUniformLocation(programs[selected], "u_tint");
+            GLint time = glGetUniformLocation(programs[selected], "u_time");
+            bool blocks = getenv("T8132_GLES_UNIFORM_BLOCKS") != NULL;
+            if (!blocks && transform < 0 && tint < 0 && time < 0)
+               fail("uniform test shader interface");
+            const GLfloat matrix[2][16] = {
+               {.5, 0, 0, 0, 0, .5, 0, 0, 0, 0, 1, 0, -.5, -.125, 0, 1},
+               {0, .5, 0, 0, -.5, 0, 0, 0, 0, 0, 1, 0, .5, .125, 0, 1},
+            };
+            const GLfloat colors[2][4] = {{1, .5, .25, 1}, {.25, .75, 1, 1}};
+            if (blocks) {
+               static GLuint buffers[2];
+               if (!buffers[0])
+                  glGenBuffers(2, buffers);
+               GLuint vs_block =
+                  glGetUniformBlockIndex(programs[selected], "TransformBlock");
+               GLuint fs_block =
+                  glGetUniformBlockIndex(programs[selected], "TintBlock");
+               if (vs_block == GL_INVALID_INDEX || fs_block == GL_INVALID_INDEX)
+                  fail("uniform block test interface");
+               glUniformBlockBinding(programs[selected], vs_block, 4);
+               glUniformBlockBinding(programs[selected], fs_block, 7);
+               if (draw == 0) {
+                  /* Populate all immutable per-draw ranges before the first
+                   * draw. Rebinding then exercises two stage-specific UBOs
+                   * without triggering an unrelated in-place buffer hazard. */
+                  unsigned char *data = calloc(draws_per_frame, 256);
+                  if (!data)
+                     fail("uniform block allocation");
+                  for (unsigned stage = 0; stage < 2; ++stage) {
+                     memset(data, 0, draws_per_frame * 256);
+                     for (unsigned d = 0; d < draws_per_frame; ++d) {
+                        memcpy(data + d * 256,
+                               stage ? colors[d % 2] : matrix[d % 2],
+                               stage ? sizeof(colors[0]) : sizeof(matrix[0]));
+                        if (stage) {
+                           GLfloat value = frame * .125f;
+                           memcpy(data + d * 256 + 16, &value, sizeof(value));
+                        }
+                     }
+                     glBindBuffer(GL_UNIFORM_BUFFER, buffers[stage]);
+                     glBufferData(GL_UNIFORM_BUFFER, draws_per_frame * 256,
+                                  data, GL_DYNAMIC_DRAW);
+                  }
+                  free(data);
+               }
+               glBindBufferRange(GL_UNIFORM_BUFFER, 4, buffers[0], draw * 256,
+                                 64);
+               glBindBufferRange(GL_UNIFORM_BUFFER, 7, buffers[1], draw * 256,
+                                 32);
+            }
+            if (transform >= 0)
+               glUniformMatrix4fv(transform, 1, GL_FALSE, matrix[draw % 2]);
+            if (tint >= 0)
+               glUniform4fv(tint, 1, colors[draw % 2]);
+            if (time >= 0)
+               glUniform1f(time, frame * .125f);
+         }
+         glDrawArrays(GL_TRIANGLES, 0, vertex_count);
+      }
       /* Build the complete Gallium batch and its Apple9 compiler package,
        * but deliberately stop before glFinish submits it to drm-shim.  This
        * is an offline package-format diagnostic, unlike COMPILE_ONLY which
