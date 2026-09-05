@@ -97,10 +97,11 @@ int agx_bind_timestamps(struct agx_device *dev, struct agx_bo *bo,
 /*
  * Apple9 keeps executable archives and compactly addressed compiler resource
  * records in one fixed USC aperture.  Compute currently uses the first 64
- * KiB; render vertex-fetch additionally names a resource record at +0x1500a0.
+ * KiB. The render carrier reaches helpers and resources across the first
+ * 4 MiB, which must remain reserved even while compute owns the aperture.
  */
 #define AGX_APPLE9_COMPUTE_ARCHIVE_SIZE 0x10000
-#define AGX_APPLE9_FIXED_USC_ARENA_SIZE 0x200000
+#define AGX_APPLE9_FIXED_USC_ARENA_SIZE      0x400000
 #define AGX_APPLE9_FIXED_RENDER_CONTEXT_BASE UINT64_C(0x1000000000)
 #define AGX_APPLE9_FIXED_RENDER_CONTEXT_SIZE 0x6c000
 

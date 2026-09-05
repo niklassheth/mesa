@@ -63,6 +63,42 @@ static_assert((AGX_APPLE9_COMPUTE_STATE_SLAB_SIZE /
                AGX_APPLE9_COMPUTE_STATE_RECORD_SIZE) == 256,
               "Apple9 state slabs contain 256 records");
 
+/* The render carrier contains executable pages and GPU-writable resource
+ * records in the same fixed USC window. Reserve the whole window so ordinary
+ * USC allocations cannot occupy addresses still referenced by its helpers. */
+static int
+agx_apple9_bind_fixed_usc(struct agx_device *dev, struct agx_bo *bo)
+{
+   if (bo != dev->apple9_render_fixed_usc)
+      return agx_bo_bind(dev, bo, dev->shader_base,
+                         AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
+                         DRM_ASAHI_BIND_READ);
+
+   static const struct {
+      uint32_t start, end;
+   } writable[] = {
+      {0x018000, 0x038000}, {0x058000, 0x078000}, {0x080000, 0x184000},
+      {0x220000, 0x228000}, {0x230000, 0x340000}, {0x348000, 0x350000},
+   };
+   uint32_t cursor = 0;
+   for (unsigned i = 0; i <= ARRAY_SIZE(writable); ++i) {
+      uint32_t end = i < ARRAY_SIZE(writable) ? writable[i].start
+                                              : AGX_APPLE9_FIXED_USC_ARENA_SIZE;
+      int ret = agx_bo_bind(dev, bo, dev->shader_base + cursor, end - cursor,
+                            cursor, DRM_ASAHI_BIND_READ);
+      if (ret)
+         return ret;
+      if (i == ARRAY_SIZE(writable))
+         break;
+      ret = agx_bo_bind(dev, bo, dev->shader_base + end, writable[i].end - end,
+                        end, DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
+      if (ret)
+         return ret;
+      cursor = writable[i].end;
+   }
+   return 0;
+}
+
 static bool
 agx_apple9_switch_fixed_usc_locked(struct agx_device *dev,
                                    struct agx_bo *next)
@@ -80,17 +116,13 @@ agx_apple9_switch_fixed_usc_locked(struct agx_device *dev,
       return false;
    dev->apple9_fixed_usc_owner = NULL;
 
-   if (agx_bo_bind(dev, next, dev->shader_base,
-                   AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
-                   DRM_ASAHI_BIND_READ)) {
-      /* Best-effort rollback keeps the VM usable if the replacement bind is
-       * rejected.  Report failure even when rollback succeeds. */
-      if (previous) {
-         if (!agx_bo_bind(dev, previous, dev->shader_base,
-                          AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
-                          DRM_ASAHI_BIND_READ))
-            dev->apple9_fixed_usc_owner = previous;
-      }
+   if (agx_apple9_bind_fixed_usc(dev, next)) {
+      /* Remove any partially installed view before restoring its predecessor. */
+      if (!agx_bo_bind(dev, NULL, dev->shader_base,
+                       AGX_APPLE9_FIXED_USC_ARENA_SIZE, 0,
+                       DRM_ASAHI_BIND_UNBIND) &&
+          previous && !agx_apple9_bind_fixed_usc(dev, previous))
+         dev->apple9_fixed_usc_owner = previous;
       return false;
    }
 
