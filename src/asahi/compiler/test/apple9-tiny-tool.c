@@ -78,6 +78,79 @@ store_shader(enum tool_program program, unsigned first, unsigned second)
    return b.shader;
 }
 
+static nir_shader *
+render_shader(bool fragment, bool constant, bool perspective, bool small,
+              bool alternate)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX, &agx_nir_options,
+      "apple9_render_tool");
+   nir_def *color;
+   if (fragment) {
+      nir_def *bary =
+         nir_load_barycentric_pixel(&b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+      color = nir_load_interpolated_input(
+         &b, 3, 32, bary, nir_imm_int(&b, 0),
+         .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1},
+         .dest_type = nir_type_float32);
+      if (constant)
+         color = nir_vec3(&b, nir_imm_float(&b, 0.75), nir_imm_float(&b, 0.5),
+                          nir_imm_float(&b, 0.25));
+      nir_def *r = nir_channel(&b, color, 0);
+      nir_def *g = nir_channel(&b, color, 1);
+      nir_def *blue = nir_channel(&b, color, 2);
+      color = alternate
+                 ? nir_vec4(&b, nir_fsub(&b, nir_imm_float(&b, 1), r),
+                            nir_fmul(&b, g, g),
+                            nir_fadd_imm(&b, nir_fmul_imm(&b, blue, 0.5), 0.25),
+                            nir_imm_float(&b, 1))
+                 : nir_vec4(&b, nir_fmul(&b, r, r), nir_fadd_imm(&b, g, 0.125),
+                            nir_fmul_imm(&b, blue, 0.5), nir_imm_float(&b, 1));
+      nir_store_output(
+         &b, color, nir_imm_int(&b, 0), .write_mask = 15,
+         .io_semantics = {.location = FRAG_RESULT_DATA0, .num_slots = 1},
+         .src_type = nir_type_float32);
+   } else {
+      nir_def *id = nir_load_vertex_id_zero_base(&b);
+      nir_def *red = nir_ieq_imm(&b, id, 0);
+      nir_def *green = nir_ieq_imm(&b, id, 1);
+      nir_def *blue = nir_ieq_imm(&b, id, 2);
+      nir_def *x = nir_bcsel(
+         &b, red, nir_imm_float(&b, -0.75),
+         nir_bcsel(&b, green, nir_imm_float(&b, 0.75), nir_imm_float(&b, 0)));
+      nir_def *y =
+         nir_bcsel(&b, blue, nir_imm_float(&b, 0.75), nir_imm_float(&b, -0.75));
+      if (small) {
+         x = nir_fadd_imm(&b, nir_fmul_imm(&b, x, 0.5), 0.125);
+         y = nir_fmul_imm(&b, y, 0.5);
+      }
+      nir_def *w = perspective
+                      ? nir_bcsel(&b, red, nir_imm_float(&b, 1),
+                                  nir_bcsel(&b, green, nir_imm_float(&b, 2),
+                                            nir_imm_float(&b, 4)))
+                      : nir_imm_float(&b, 1);
+      if (perspective) {
+         x = nir_fmul(&b, x, w);
+         y = nir_fmul(&b, y, w);
+      }
+      nir_store_output(
+         &b, nir_vec4(&b, x, y, nir_imm_float(&b, 0), w), nir_imm_int(&b, 0),
+         .write_mask = 15,
+         .io_semantics = {.location = VARYING_SLOT_POS, .num_slots = 1},
+         .src_type = nir_type_float32);
+      color = nir_vec3(
+         &b, nir_bcsel(&b, red, nir_imm_float(&b, 1), nir_imm_float(&b, 0)),
+         nir_bcsel(&b, green, nir_imm_float(&b, 1), nir_imm_float(&b, 0)),
+         nir_bcsel(&b, blue, nir_imm_float(&b, 1), nir_imm_float(&b, 0)));
+      nir_store_output(
+         &b, color, nir_imm_int(&b, 0), .write_mask = 7,
+         .io_semantics = {.location = VARYING_SLOT_VAR0, .num_slots = 1},
+         .src_type = nir_type_float32);
+   }
+   b.shader->info.io_lowered = true;
+   return b.shader;
+}
+
 static bool
 parse_u8(const char *text, unsigned *value)
 {
@@ -98,6 +171,11 @@ main(int argc, char **argv)
 usage:
       fprintf(stderr, "usage: %s OUTPUT [VALUE|gid]\n", argv[0]);
       fprintf(stderr, "       %s OUTPUT mad MULTIPLIER ADDEND\n", argv[0]);
+      fprintf(stderr, "       %s OUTPUT vertex|vertex-w|vertex-small\n",
+              argv[0]);
+      fprintf(stderr,
+              "       %s OUTPUT fragment|fragment-alt|fragment-constant\n",
+              argv[0]);
       fprintf(stderr, "       %s OUTPUT dag\n", argv[0]);
       fprintf(stderr, "       %s OUTPUT select-dag\n", argv[0]);
       fprintf(stderr, "       %s OUTPUT carrier RESOURCE_COUNT\n", argv[0]);
@@ -107,7 +185,16 @@ usage:
    enum tool_program program = TOOL_PROGRAM_CONSTANT;
    unsigned first = 42;
    unsigned second = 0;
-   if (argc == 3 && strcmp(argv[2], "gid") == 0) {
+   bool perspective = argc == 3 && !strcmp(argv[2], "vertex-w");
+   bool small = argc == 3 && !strcmp(argv[2], "vertex-small");
+   bool alternate = argc == 3 && !strcmp(argv[2], "fragment-alt");
+   bool vertex =
+      perspective || small || (argc == 3 && !strcmp(argv[2], "vertex"));
+   bool constant = argc == 3 && !strcmp(argv[2], "fragment-constant");
+   bool fragment =
+      alternate || constant || (argc == 3 && !strcmp(argv[2], "fragment"));
+   if (vertex || fragment) {
+   } else if (argc == 3 && strcmp(argv[2], "gid") == 0) {
       program = TOOL_PROGRAM_GLOBAL_ID;
    } else if (argc == 3 && strcmp(argv[2], "dag") == 0) {
       program = TOOL_PROGRAM_DAG;
@@ -131,11 +218,18 @@ usage:
       goto usage;
    }
 
-   nir_shader *nir = store_shader(program, first, second);
+   nir_shader *nir =
+      vertex || fragment
+         ? render_shader(fragment, constant, perspective, small, alternate)
+         : store_shader(program, first, second);
    struct agx_shader_part compiled = {0};
    struct agx_apple9_compute_profile profile = {0};
    const char *reason = NULL;
-   if (!agx_compile_apple9_tiny(nir, &compiled, &profile, &reason)) {
+   bool compiled_ok =
+      vertex     ? agx_compile_apple9_vertex(nir, &compiled, &reason)
+      : fragment ? agx_compile_apple9_fragment(nir, &compiled, &reason)
+                 : agx_compile_apple9_tiny(nir, &compiled, &profile, &reason);
+   if (!compiled_ok) {
       fprintf(stderr, "Apple9 compilation failed: %s\n", reason);
       nir_print_shader(nir, stderr);
       ralloc_free(nir);
@@ -160,7 +254,7 @@ usage:
       return EXIT_FAILURE;
    }
 
-   fprintf(stderr, "Apple9 tiny compiler wrote %u bytes to %s (ABI %u; ",
+   fprintf(stderr, "Apple9 compiler wrote %u bytes to %s (ABI %u; ",
            compiled.info.binary_size, argv[1], profile.abi);
    for (unsigned i = 0; i < profile.resource_binding_count; ++i)
       fprintf(stderr, "%sarg%u=b%u", i ? "," : "", i,

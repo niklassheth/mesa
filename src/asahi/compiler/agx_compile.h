@@ -77,9 +77,27 @@ struct agx_rodata {
    uint16_t size_16;
 };
 
+/* The current export publication bank retains position plus at most twelve
+ * user scalars through completion. This is a compiler limit, not an API or
+ * hardware varying limit. Semantic locations are compacted independently of
+ * declaration order and never encoded directly as hardware slot numbers. */
+#define AGX_APPLE9_MAX_VARYING_COMPONENTS 12
+struct agx_apple9_varying_layout {
+   uint8_t mask[32]; /* Per-component masks for VAR0..VAR31. */
+   uint8_t count;
+   uint8_t reserved[3];
+};
+
 struct agx_shader_info {
    mesa_shader_stage stage;
    uint32_t binary_size;
+
+   /* Apple9 graphics API UBO binding mask (distinct from hardware slots). */
+   uint32_t apple9_ubo_mask;
+   struct agx_apple9_varying_layout apple9_varyings;
+   /* Ordered launcher arguments: API UBOs 0..31, vertex elements 32..47. */
+   uint8_t apple9_resource_count;
+   uint8_t apple9_resource_binding[4];
 
    union agx_varyings varyings;
 

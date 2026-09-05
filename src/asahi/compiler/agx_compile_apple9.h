@@ -40,30 +40,49 @@ bool agx_compile_apple9_tiny(nir_shader *nir, struct agx_shader_part *out,
                              const char **reason);
 
 /*
- * Compile the first bounded Apple9 fragment-stage subset.
- *
- * The initial subset is one smooth vec3 varying written to render target 0.
- * It is intentionally selected from lowered NIR and emitted instruction by
- * instruction.  Unsupported interpolation, arithmetic, exports, or control
- * flow are rejected instead of falling back to a complete captured shader.
+ * Compile straight-line FP32 graphics NIR through the common semantic VIR and
+ * register allocator. Fragment inputs support pixel-center smooth FP32 user
+ * components; RT0 is a complete vec4 packed to RGBA8. Vertex inputs use vertex
+ * ID and FP32 vertex elements; exports cover position plus up to twelve user
+ * scalars across VAR0..VAR31, compacted by semantic location and component.
+ * Fragment variants use the producer's layout, including unused outputs.
+ * User UVS values stay unprojected for clipping and require perspective CF
+ * bindings. The FS uses coefficient-aware projective multiplication, which
+ * handles both ordinary and primitive-constant coefficient representations.
+ * Constant array offsets and component holes are supported. Up to four buffer
+ * arguments per stage use common buffer lowering.
+ * Vertex elements and UBOs share that budget. The resource-binding array
+ * records hardware argument order; apple9_ubo_mask records API UBO bindings.
+ * SSBOs, other interpolation modes, MRT, and structured graphics control flow fail
+ * closed. The caller supplies hardware clip coordinates and compatible stage
+ * and render-target state.
  */
 bool agx_compile_apple9_fragment(nir_shader *nir,
                                  struct agx_shader_part *out,
                                  const char **reason);
 
-/* Compile the matching bounded vertex-ID/UBO triangle vertex subset. */
+/* Specialize fragment coefficient reads to the producing vertex layout. */
+bool agx_compile_apple9_fragment_inputs(
+   nir_shader *nir, const struct agx_apple9_varying_layout *varyings,
+   struct agx_shader_part *out, const char **reason);
+
+/* Vertex pulling uses ordinary buffer loads in the API main. Addresses and
+ * source offsets remain draw state; stride and format determine the code. */
+struct agx_apple9_vertex_layout {
+   uint32_t stride[16];
+   bool clip_halfz; /* Convert GL [-w,w] depth to hardware [0,w]. */
+   uint8_t components[16]; /* FP32 channel count; zero means unsupported. */
+};
+
+bool agx_compile_apple9_vertex_inputs(
+   nir_shader *nir, const struct agx_apple9_vertex_layout *layout,
+   struct agx_shader_part *out, const char **reason);
+
+/* Compile the bounded procedural vertex stage described above. */
 bool agx_compile_apple9_vertex(nir_shader *nir, struct agx_shader_part *out,
                                const char **reason);
 
-/*
- * Compile the first bounded Apple9 hardware vertex-fetch prolog.
- *
- * This program is distinct from the API vertex main in the Apple9 archive.
- * The initial supported ABI is an interleaved, per-vertex float2 position and
- * float3 colour stream.  The matcher consumes Mesa's lowered VS-prolog NIR
- * and rejects every other fetch layout rather than reusing the static demo
- * prolog.
- */
+/* Vertex-fetch packaging is not implemented; this entry point rejects. */
 bool agx_compile_apple9_vertex_prolog(nir_shader *nir,
                                       struct agx_shader_part *out,
                                       const char **reason);
