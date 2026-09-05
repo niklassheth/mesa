@@ -529,6 +529,8 @@ write_ppm(const char *path, const uint8_t *rgba,
    fclose(file);
 }
 
+#include "scenes/mesh/mesh.h"
+
 int
 main(int argc, char **argv)
 {
@@ -595,6 +597,9 @@ main(int argc, char **argv)
    const char *renderer = (const char *)glGetString(GL_RENDERER);
    if (!renderer || !strstr(renderer, "Apple M4"))
       fail("unexpected GL renderer");
+
+   if (getenv("T8132_GLES_MESH"))
+      return run_mesh(width, height);
 
    bool cycle_pipelines = getenv("T8132_GLES_PIPELINE_CYCLE") != NULL;
    bool cycle_vertices = getenv("T8132_GLES_VERTEX_CYCLE") != NULL;
