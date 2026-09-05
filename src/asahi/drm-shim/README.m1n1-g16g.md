@@ -6,11 +6,46 @@ embeds the m1n1 Python backend, and forwards device parameters, VM/GEM
 operations, queues, synchronization, and submissions to the source-built G16
 firmware backend.
 
-The current Mesa milestone is **compute**. The earlier capture-matched Apple9
-render compiler was removed because it was no longer representative of the
-compiler and packaging model. Render packaging helpers and the GLES triangle
-fixture remain useful research scaffolding, but a render shader currently
-fails during compilation and the triangle is not a regression gate.
+Mesa now compiles both compute and a bounded vertex/fragment subset through
+semantic Apple9 IR. The graphics path supports procedural vertex-ID geometry,
+FP32 vertex elements, position and up to twelve smooth user components across
+multiple locations, perspective interpolation, arithmetic, indexed triangles,
+and one packed RGBA8 color output. See [varying linkage](scenes/varyings/README.md). Unsupported graphics inputs fail compilation.
+
+After the normal reset and m1n1 chainload, the hardware triangle gate is:
+
+```sh
+T8132_GLES_PROCEDURAL=1 T8132_GLES_PASSTHROUGH=1 \
+src/asahi/drm-shim/run_t8132_gles_triangle.sh
+```
+
+Both shader mains are generated from GLSL/NIR; the original carrier mains are
+replaced with STOP. Launchers, helpers, and fixed color load/store programs are
+still opaque external assets from our own-source Metal captures. Their archive
+offsets remain fixed, while generated mains are appended and selected through
+explicit entry calls. Mesa supplies the full 4 MiB fixed-USC view with separate
+executable/read-only and GPU-writable resource mappings; the shim does not
+supply missing client pages.
+
+The 512x512 standalone draw completed TA and fragment work for two frames.
+Independent CPU analysis of the uncompressed attachment found exactly 82,620
+covered pixels, no coverage mismatches, and at most one byte of color error.
+Four additional Metal-hosted tests cover changed geometry, nontrivial fragment
+arithmetic, and unequal vertex W, with both mains replaced in full.
+
+This remains a graphics bring-up gate. Other interpolation modes, arbitrary
+raster/attachment state, and graphics control flow are not implemented in the
+semantic graphics path. The carrier still clears to its
+captured color instead of honoring `glClearColor`; `glReadPixels` is not part of
+this gate. Readback validation used the shim's synchronized attachment bytes.
+
+The [Tidal prism scene](scenes/tidal-prism/README.md) exercises a much larger
+fragment program with sine, floor, smoothstep, procedural color, and unequal
+vertex W. Its two hardware frames match an independent coverage/color oracle
+within one channel byte. Shader files can be selected using
+`T8132_GLES_VERTEX_SOURCE` and `T8132_GLES_FRAGMENT_SOURCE`; the optional
+`G16G_RENDER_ATTACHMENT_DUMP` directory receives raw synchronized attachments
+from the shim without altering the submission.
 
 ## Current compute model
 
@@ -387,3 +422,60 @@ compute lowering and replace each external wrapper field as it becomes
 understood. Render should resume from compiler-generated stage code and a
 verified packaging model; the old capture-matched render compiler should not
 be resurrected as a fallback.
+
+### Graphics uniforms (EXP-M4-57)
+
+The graphics compiler now supports one active UBO per stage, including Mesa's
+ordinary default uniform block. The driver records each draw's VS/FS buffer
+and range, retains the BOs, and publishes separate binding records while
+sharing the shader binaries. The initial compatibility arena supports 32
+uniform-bearing draws per batch. Multiple buffers in one stage and arena
+exhaustion are rejected; this is not full graphics-resource support.
+
+`scenes/uniforms/run.sh OUTPUT_DIRECTORY` tests matrix, tint, and time updates
+through glUniform. Its `blocks` mode tests separate std140 UBOs at API bindings
+4 and 7 with per-draw range rebinding. Both paths produce two exact hardware
+frames with distinct transforms and colors; their output bytes match.
+
+The additional opaque preload/data artifact remains outside Mesa:
+`/home/nsheth/Projects/asahi/tmp/agx-apple9/render_uniform_launch.bin`
+(SHA-256 `3840a61cb6cbaf17aae247766001a90663f493e2fa1e72791ca14c6e9d1ecafe`).
+Its source, captures, and reproduction tool are under
+`tmp/agx-re/experiments/EXP-M4-57-graphics-uniforms/` in the Asahi workspace.
+It contains no Metal-generated API shader main.
+
+### Vertex buffers, indices and depth (EXP-M4-58)
+
+`scenes/mesh/` now exercises real FP32 vertex elements, u16/u32 index buffers,
+VS transforms and FS tint uniforms, and Depth32Float testing/writes. Vertex
+loads are normal compiler-generated device loads inside the API VS main;
+there is no fixed-format Metal vertex-fetch main. Stride and FP32 channel
+count are shader-key state; buffer bindings and offsets are retained per draw.
+The compiler uses Gallium's compacted vertex-element indices independently of
+GL attribute locations.
+
+The graphics preload now publishes four pointers per stage. It lives outside
+Mesa as `render_buffers_launch.bin` (SHA-256
+`2c2c906598a3993ef31999a6d9dfd004f598eb660dd0c106be095f339baad67c`),
+extracted as opaque records from the authored EXP-M4-58 Metal probe. This
+supersedes the one-buffer EXP-M4-57 preload. Its known archive selector is at
++0x36; it does not use that older preload's separate constant-state reference.
+
+Indexed command words use a 32-bit offset into the fixed USC aperture, so
+index-buffer resources are allocated there. Draw-local PPP records supply
+depth function/write state. GLES clip depth is converted to [0,w] in the VS;
+caller depth attachment addresses, clears and stores already pass through the
+existing render UAPI/shim path.
+
+See `scenes/mesh/README.md` for reproduction and limits. The four-buffer u32
+quad, depth-state controls and rotating shared-vertex cube pass pixel checks.
+The earlier uniform and 100-triangle scenes retain their original hashes.
+
+### Generalized VS/FS linkage (EXP-M4-59)
+
+See [the varying tests](scenes/varyings/README.md) for the scalar/component map,
+coefficient-aware perspective interpolation contract, and reproduction. The runtime
+preload is now `render_buffers_varyings12_launch.bin`; its complete vertex
+launcher handles sixteen retained publications. The prior four-buffer blob
+remains available as the historical EXP-M4-58 artifact. Linkage, shader keys,
+and coefficient/state tables are generated from the current shader interface.
