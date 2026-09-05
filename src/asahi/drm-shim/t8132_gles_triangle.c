@@ -531,6 +531,7 @@ write_ppm(const char *path, const uint8_t *rgba,
 
 #include "scenes/mesh/mesh.h"
 #include "scenes/island/island.h"
+#include "scenes/sunset/sunset.h"
 
 int
 main(int argc, char **argv)
@@ -600,7 +601,7 @@ main(int argc, char **argv)
       fail("unexpected GL renderer");
 
    if (getenv("T8132_GLES_ISLAND"))
-      return run_island(width, height);
+      return getenv("T8132_GLES_SUNSET") ? run_sunset(width, height) : run_island(width, height);
 
    if (getenv("T8132_GLES_MESH"))
       return run_mesh(width, height);
